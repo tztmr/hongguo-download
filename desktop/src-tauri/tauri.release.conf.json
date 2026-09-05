@@ -1,0 +1,18 @@
+{
+  "bundle": {
+    "resources": {
+      "../../main.py": "api/main.py",
+      "../../requirements.txt": "api/requirements.txt",
+      "../../core": "api/core",
+      "../../endpoints": "api/endpoints",
+      "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "resources/ai-components.schema.json": "resources/ai-components.schema.json",
+      "resources/ai-components.json": "resources/ai-components.json"
+    },
+    "externalBin": [
+      "binaries/hongguo-api",
+      "binaries/ffmpeg",
+      "binaries/ffprobe"
+    ]
+  }
+}

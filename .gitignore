@@ -1,0 +1,30 @@
+# Local secrets and runtime state
+config/device_pool.json
+config/*.local.json
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+
+# macOS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local planning and generated output
+.superpowers/
+output/
+dist/
+
+# Desktop dependencies and build products
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/schemas/
+desktop/*.local
+

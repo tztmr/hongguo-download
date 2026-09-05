@@ -1,0 +1,1619 @@
+use crate::app_error::AppError;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashSet,
+    fs::{self, File, OpenOptions},
+    io::{BufWriter, Read, Write},
+    path::{Component, Path, PathBuf},
+    process::{Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
+use url::Url;
+
+pub const AI_COMPONENTS_MANIFEST_VERSION: u32 = 1;
+pub const AI_COMPONENT_PLATFORM: &str = "aarch64-apple-darwin";
+const INSTALLED_STORE: &str = "installed.json";
+const DOWNLOADS_DIR: &str = ".downloads";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComponentRelease {
+    pub id: String,
+    pub version: String,
+    pub platform: String,
+    pub url: String,
+    pub sha256: String,
+    pub download_bytes: u64,
+    pub installed_bytes: u64,
+    pub entrypoint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComponentManifest {
+    pub version: u32,
+    pub platform: String,
+    pub components: Vec<ComponentRelease>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentStatus {
+    pub id: String,
+    pub version: String,
+    pub installed: bool,
+    pub installed_version: Option<String>,
+    pub download_bytes: u64,
+    pub installed_bytes: u64,
+    pub in_use: bool,
+    pub installed_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentProgress {
+    pub id: String,
+    pub stage: String,
+    pub percent: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledComponent {
+    pub root: PathBuf,
+    pub entrypoint: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct InstalledRecord {
+    pub id: String,
+    pub version: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct InstalledStore {
+    pub version: u32,
+    pub items: Vec<InstalledRecord>,
+}
+
+pub struct ComponentManager {
+    root: PathBuf,
+    manifest: ComponentManifest,
+    installing: AtomicBool,
+    in_use: Mutex<HashSet<String>>,
+    min_free_bytes: Mutex<Option<u64>>,
+}
+
+impl ComponentManager {
+    pub fn load(root: impl AsRef<Path>, manifest: ComponentManifest) -> Result<Self, AppError> {
+        validate_manifest(&manifest)?;
+        let root = root.as_ref().to_path_buf();
+        fs::create_dir_all(root.join(DOWNLOADS_DIR)).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法创建组件目录", error.to_string())
+        })?;
+        Ok(Self {
+            root,
+            manifest,
+            installing: AtomicBool::new(false),
+            in_use: Mutex::new(HashSet::new()),
+            min_free_bytes: Mutex::new(None),
+        })
+    }
+
+    pub fn from_manifest_json(root: impl AsRef<Path>, json: &str) -> Result<Self, AppError> {
+        let manifest = parse_manifest(json)?;
+        Self::load(root, manifest)
+    }
+
+    pub fn status(&self) -> Vec<ComponentStatus> {
+        let installed = load_installed(&self.root).unwrap_or_default();
+        let in_use = self
+            .in_use
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        self.manifest
+            .components
+            .iter()
+            .map(|release| {
+                let current = installed
+                    .items
+                    .iter()
+                    .find(|item| item.id == release.id)
+                    .map(|item| item.version.clone());
+                let installed_now = current.as_deref() == Some(release.version.as_str());
+                ComponentStatus {
+                    id: release.id.clone(),
+                    version: release.version.clone(),
+                    installed: installed_now,
+                    installed_version: current,
+                    download_bytes: release.download_bytes,
+                    installed_bytes: release.installed_bytes,
+                    in_use: in_use.contains(&release.id),
+                    installed_path: if installed_now {
+                        Some(
+                            self.root
+                                .join(&release.id)
+                                .join(&release.version)
+                                .to_string_lossy()
+                                .into_owned(),
+                        )
+                    } else {
+                        None
+                    },
+                }
+            })
+            .collect()
+    }
+
+    pub fn mark_in_use(&self, id: &str, used: bool) {
+        if let Ok(mut guard) = self.in_use.lock() {
+            if used {
+                guard.insert(id.to_string());
+            } else {
+                guard.remove(id);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_min_free_bytes(&self, bytes: Option<u64>) {
+        if let Ok(mut guard) = self.min_free_bytes.lock() {
+            *guard = bytes;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn force_installing(&self) {
+        self.installing.store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub fn poison_in_use(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.in_use.lock().expect("in-use lock should be available");
+            panic!("poison in_use lock");
+        }));
+    }
+
+    pub fn installed_version(&self, id: &str) -> Option<String> {
+        load_installed(&self.root)
+            .ok()
+            .and_then(|store| store.items.into_iter().find(|item| item.id == id))
+            .map(|item| item.version)
+    }
+
+    pub fn resolve_installed(&self, id: &str) -> Result<InstalledComponent, AppError> {
+        let release = self
+            .manifest
+            .components
+            .iter()
+            .find(|release| release.id == id)
+            .ok_or_else(|| AppError::new("AI_COMPONENT_UNKNOWN", "未知的媒体组件"))?;
+        if self.installed_version(id).as_deref() != Some(release.version.as_str()) {
+            return Err(AppError::new(
+                "AI_COMPONENT_NOT_INSTALLED",
+                "AI 运行环境或所选模型尚未安装",
+            ));
+        }
+        let root = self.root.join(id).join(&release.version);
+        let canonical_root = fs::canonicalize(&root).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_INVALID", "AI 组件不可用", error.to_string())
+        })?;
+        let entrypoint = root.join(&release.entrypoint);
+        verify_entrypoint(&canonical_root, &entrypoint)?;
+        Ok(InstalledComponent {
+            root: canonical_root,
+            entrypoint: fs::canonicalize(entrypoint).map_err(|error| {
+                AppError::with_cause("AI_COMPONENT_INVALID", "AI 组件不可用", error.to_string())
+            })?,
+        })
+    }
+
+    pub fn remove(&self, id: &str) -> Result<(), AppError> {
+        match self.in_use.lock() {
+            Ok(guard) if guard.contains(id) => {
+                return Err(AppError::new(
+                    "AI_COMPONENT_IN_USE",
+                    "运行中的媒体任务正在使用该组件",
+                ));
+            }
+            Ok(_) => {}
+            Err(_) => {
+                return Err(AppError::new(
+                    "AI_COMPONENT_IN_USE",
+                    "运行中的媒体任务正在使用该组件",
+                ));
+            }
+        }
+        let mut store = load_installed(&self.root).unwrap_or_default();
+        store.items.retain(|item| item.id != id);
+        persist_installed(&self.root, &store)?;
+        let target = self.root.join(id);
+        if target.exists() {
+            fs::remove_dir_all(&target).map_err(|error| {
+                AppError::with_cause("AI_COMPONENT_IO", "无法删除组件", error.to_string())
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn install(
+        &self,
+        id: &str,
+        mut progress: impl FnMut(ComponentProgress),
+    ) -> Result<ComponentStatus, AppError> {
+        self.install_locked(id, &mut progress)
+    }
+
+    fn install_locked(
+        &self,
+        id: &str,
+        progress: &mut dyn FnMut(ComponentProgress),
+    ) -> Result<ComponentStatus, AppError> {
+        if self.installing.swap(true, Ordering::SeqCst) {
+            return Err(AppError::new(
+                "AI_COMPONENT_INSTALL_RUNNING",
+                "已有组件正在安装",
+            ));
+        }
+        struct InstallGuard<'a> {
+            flag: &'a AtomicBool,
+        }
+        impl Drop for InstallGuard<'_> {
+            fn drop(&mut self) {
+                self.flag.store(false, Ordering::SeqCst);
+            }
+        }
+        let _guard = InstallGuard {
+            flag: &self.installing,
+        };
+        let outcome = self.install_command_path(id, progress);
+        if let Err(error) = &outcome {
+            emit(progress, id, "failed", 100.0);
+            let _ = error;
+        }
+        outcome
+    }
+
+    fn install_command_path(
+        &self,
+        id: &str,
+        progress: &mut dyn FnMut(ComponentProgress),
+    ) -> Result<ComponentStatus, AppError> {
+        let release = self
+            .manifest
+            .components
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::new("AI_COMPONENT_UNKNOWN", "未知的媒体组件"))?;
+        emit(progress, id, "checking", 5.0);
+        let required = release.download_bytes.max(release.installed_bytes);
+        let free = self.available_bytes()?;
+        if free < required {
+            return Err(AppError::new(
+                "AI_COMPONENT_INSUFFICIENT_DISK",
+                "磁盘空间不足，无法安装媒体组件",
+            ));
+        }
+        emit(progress, id, "downloading", 20.0);
+        let part_path = self.root.join(DOWNLOADS_DIR).join(format!("{id}.part"));
+        stream_download(&release.url, &part_path)?;
+        emit(progress, id, "verifying", 45.0);
+        let actual = sha256_file(&part_path)?;
+        if actual != release.sha256 {
+            let _ = fs::remove_file(&part_path);
+            return Err(AppError::new(
+                "AI_COMPONENT_CHECKSUM_FAILED",
+                "组件校验失败，已保留当前版本",
+            ));
+        }
+        self.finish_verified_archive(id, &release, &part_path, progress)
+    }
+
+    fn finish_verified_archive(
+        &self,
+        id: &str,
+        release: &ComponentRelease,
+        part_path: &Path,
+        progress: &mut dyn FnMut(ComponentProgress),
+    ) -> Result<ComponentStatus, AppError> {
+        emit(progress, id, "extracting", 65.0);
+        let staging = unique_dir(&self.root.join(DOWNLOADS_DIR), &format!("{id}-stage"));
+        fs::create_dir_all(&staging).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法创建组件解压目录", error.to_string())
+        })?;
+        extract_archive(part_path, &staging)?;
+        let entrypoint = staging.join(&release.entrypoint);
+        verify_entrypoint(&staging, &entrypoint)?;
+        emit(progress, id, "selfTesting", 85.0);
+        run_self_test(&entrypoint)?;
+        publish_atomically(&self.root, &release.id, &release.version, &staging)?;
+        let _ = fs::remove_file(part_path);
+        let mut store = load_installed(&self.root).unwrap_or_default();
+        store.items.retain(|item| item.id != release.id);
+        store.items.push(InstalledRecord {
+            id: release.id.clone(),
+            version: release.version.clone(),
+        });
+        persist_installed(&self.root, &store)?;
+        emit(progress, id, "installed", 100.0);
+        self.status()
+            .into_iter()
+            .find(|item| item.id == id)
+            .ok_or_else(|| AppError::new("AI_COMPONENT_IO", "组件安装记录缺失"))
+    }
+
+    pub fn install_bytes(
+        &self,
+        id: &str,
+        bytes: &[u8],
+        sha256: &str,
+        mut progress: impl FnMut(ComponentProgress),
+    ) -> Result<ComponentStatus, AppError> {
+        if self.installing.swap(true, Ordering::SeqCst) {
+            return Err(AppError::new(
+                "AI_COMPONENT_INSTALL_RUNNING",
+                "已有组件正在安装",
+            ));
+        }
+        let result = self.install_bytes_inner(id, bytes, sha256, &mut progress);
+        self.installing.store(false, Ordering::SeqCst);
+        result
+    }
+
+    fn install_bytes_inner(
+        &self,
+        id: &str,
+        bytes: &[u8],
+        sha256: &str,
+        progress: &mut dyn FnMut(ComponentProgress),
+    ) -> Result<ComponentStatus, AppError> {
+        let release = self
+            .manifest
+            .components
+            .iter()
+            .find(|item| item.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::new("AI_COMPONENT_UNKNOWN", "未知的媒体组件"))?;
+        emit(progress, id, "checking", 5.0);
+        let required = release.download_bytes.max(release.installed_bytes);
+        let free = self.available_bytes()?;
+        if free < required {
+            return Err(AppError::new(
+                "AI_COMPONENT_INSUFFICIENT_DISK",
+                "磁盘空间不足，无法安装媒体组件",
+            ));
+        }
+        emit(progress, id, "downloading", 20.0);
+        let part_path = self.root.join(DOWNLOADS_DIR).join(format!("{id}.part"));
+        fs::write(&part_path, bytes).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
+        })?;
+        emit(progress, id, "verifying", 45.0);
+        let actual = sha256_file(&part_path)?;
+        if actual != sha256 || actual != release.sha256 {
+            let _ = fs::remove_file(&part_path);
+            return Err(AppError::new(
+                "AI_COMPONENT_CHECKSUM_FAILED",
+                "组件校验失败，已保留当前版本",
+            ));
+        }
+        self.finish_verified_archive(id, &release, &part_path, progress)
+    }
+
+    fn available_bytes(&self) -> Result<u64, AppError> {
+        if let Ok(guard) = self.min_free_bytes.lock() {
+            if let Some(forced) = *guard {
+                return Ok(forced);
+            }
+        }
+        unix_free_bytes(&self.root)
+    }
+}
+
+pub fn parse_manifest(json: &str) -> Result<ComponentManifest, AppError> {
+    let manifest: ComponentManifest = serde_json::from_str(json)
+        .map_err(|_| AppError::new("AI_COMPONENT_MANIFEST_INVALID", "组件清单格式无效"))?;
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn validate_manifest(manifest: &ComponentManifest) -> Result<(), AppError> {
+    if manifest.version != AI_COMPONENTS_MANIFEST_VERSION
+        || manifest.platform != AI_COMPONENT_PLATFORM
+    {
+        return Err(AppError::new(
+            "AI_COMPONENT_MANIFEST_INVALID",
+            "组件清单平台或版本不受支持",
+        ));
+    }
+    if manifest.components.is_empty() {
+        return Err(AppError::new(
+            "AI_COMPONENT_MANIFEST_INVALID",
+            "组件清单不能为空",
+        ));
+    }
+    let mut ids = HashSet::new();
+    for release in &manifest.components {
+        validate_release(release)?;
+        if !ids.insert(release.id.clone()) {
+            return Err(AppError::new(
+                "AI_COMPONENT_MANIFEST_INVALID",
+                "组件清单包含重复组件",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_release(release: &ComponentRelease) -> Result<(), AppError> {
+    if release.platform != AI_COMPONENT_PLATFORM {
+        return Err(AppError::new(
+            "AI_COMPONENT_UNSUPPORTED_PLATFORM",
+            "当前系统不支持该媒体组件",
+        ));
+    }
+    if !valid_id(&release.id) || release.version.is_empty() || release.version.len() > 64 {
+        return Err(AppError::new(
+            "AI_COMPONENT_MANIFEST_INVALID",
+            "组件标识或版本无效",
+        ));
+    }
+    if !valid_sha256(&release.sha256) {
+        return Err(AppError::new(
+            "AI_COMPONENT_MANIFEST_INVALID",
+            "组件校验值无效",
+        ));
+    }
+    if release.download_bytes == 0 || release.installed_bytes == 0 {
+        return Err(AppError::new(
+            "AI_COMPONENT_MANIFEST_INVALID",
+            "组件大小无效",
+        ));
+    }
+    let url = Url::parse(&release.url)
+        .map_err(|_| AppError::new("AI_COMPONENT_MANIFEST_INVALID", "组件下载地址无效"))?;
+    if !is_allowed_download_url(&url) {
+        return Err(AppError::new(
+            "AI_COMPONENT_MANIFEST_INVALID",
+            "组件必须通过 HTTPS 下载",
+        ));
+    }
+    validate_entrypoint(&release.entrypoint)?;
+    Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
+}
+
+fn is_allowed_download_url(url: &Url) -> bool {
+    match url.scheme() {
+        "https" => true,
+        "http" if cfg!(test) && url.host_str().is_some_and(is_loopback_host) => true,
+        _ => false,
+    }
+}
+
+fn component_download_client() -> Result<reqwest::blocking::Client, AppError> {
+    reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_DOWNLOAD_FAILED",
+                "无法创建下载客户端",
+                error.to_string(),
+            )
+        })
+}
+
+fn valid_id(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit())
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && value.len() <= 64
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f'))
+}
+
+fn validate_entrypoint(value: &str) -> Result<(), AppError> {
+    let path = Path::new(value);
+    if value.is_empty() || value.contains('\0') || path.is_absolute() {
+        return Err(AppError::new(
+            "AI_COMPONENT_MANIFEST_INVALID",
+            "组件入口路径无效",
+        ));
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                let name = part.to_string_lossy();
+                if name == "." || name == ".." || name.contains('\0') {
+                    return Err(AppError::new(
+                        "AI_COMPONENT_MANIFEST_INVALID",
+                        "组件入口路径无效",
+                    ));
+                }
+            }
+            _ => {
+                return Err(AppError::new(
+                    "AI_COMPONENT_MANIFEST_INVALID",
+                    "组件入口路径无效",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn emit(progress: &mut dyn FnMut(ComponentProgress), id: &str, stage: &str, percent: f64) {
+    progress(ComponentProgress {
+        id: id.to_string(),
+        stage: stage.to_string(),
+        percent,
+    });
+}
+
+#[cfg(test)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn unique_dir(parent: &Path, prefix: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!("{prefix}-{nonce}"))
+}
+
+fn load_installed(root: &Path) -> Result<InstalledStore, AppError> {
+    let path = root.join(INSTALLED_STORE);
+    if !path.exists() {
+        return Ok(InstalledStore {
+            version: 1,
+            items: Vec::new(),
+        });
+    }
+    let bytes = fs::read(&path).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法读取组件安装记录", error.to_string())
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| AppError::new("AI_COMPONENT_IO", "组件安装记录损坏"))
+}
+
+fn persist_installed(root: &Path, store: &InstalledStore) -> Result<(), AppError> {
+    let path = root.join(INSTALLED_STORE);
+    let temp = root.join(format!("{INSTALLED_STORE}.tmp"));
+    let bytes = serde_json::to_vec_pretty(store).map_err(|error| {
+        AppError::with_cause(
+            "AI_COMPONENT_IO",
+            "无法序列化组件安装记录",
+            error.to_string(),
+        )
+    })?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temp)
+        .map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法写入组件安装记录", error.to_string())
+        })?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(&bytes).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法写入组件安装记录", error.to_string())
+    })?;
+    writer.flush().map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法写入组件安装记录", error.to_string())
+    })?;
+    writer.get_ref().sync_all().map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法同步组件安装记录", error.to_string())
+    })?;
+    drop(writer);
+    fs::rename(&temp, &path).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法保存组件安装记录", error.to_string())
+    })?;
+    Ok(())
+}
+
+fn stream_download(url: &str, part_path: &Path) -> Result<(), AppError> {
+    let parsed = Url::parse(url)
+        .map_err(|_| AppError::new("AI_COMPONENT_DOWNLOAD_FAILED", "组件下载地址无效"))?;
+    if !is_allowed_download_url(&parsed) {
+        return Err(AppError::new(
+            "AI_COMPONENT_DOWNLOAD_FAILED",
+            "组件必须通过 HTTPS 下载",
+        ));
+    }
+    let client = component_download_client()?;
+    let mut response = client.get(url).send().map_err(|error| {
+        AppError::with_cause(
+            "AI_COMPONENT_DOWNLOAD_FAILED",
+            "无法下载媒体组件",
+            error.to_string(),
+        )
+    })?;
+    if response.status().is_redirection() || !response.status().is_success() {
+        return Err(AppError::new(
+            "AI_COMPONENT_DOWNLOAD_FAILED",
+            "媒体组件下载失败",
+        ));
+    }
+    if let Some(parent) = part_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法创建组件下载目录", error.to_string())
+        })?;
+    }
+    let mut file = File::create(part_path).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
+    })?;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = response.read(&mut buffer).map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_DOWNLOAD_FAILED",
+                "无法读取媒体组件",
+                error.to_string(),
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read]).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
+        })?;
+    }
+    file.flush().map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
+    })?;
+    file.sync_all().map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法同步组件下载文件", error.to_string())
+    })?;
+    Ok(())
+}
+
+fn sha256_file(path: &Path) -> Result<String, AppError> {
+    let mut file = File::open(path).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法读取组件下载文件", error.to_string())
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法读取组件下载文件", error.to_string())
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn publish_atomically(
+    root: &Path,
+    id: &str,
+    version: &str,
+    staging: &Path,
+) -> Result<(), AppError> {
+    let parent = root.join(id);
+    fs::create_dir_all(&parent).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法创建组件发布目录", error.to_string())
+    })?;
+    let published = parent.join(version);
+    let incoming = unique_dir(&parent, &format!(".{version}-new"));
+    fs::rename(staging, &incoming).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法发布组件", error.to_string())
+    })?;
+    if published.exists() {
+        let backup = unique_dir(&parent, &format!(".{version}-old"));
+        fs::rename(&published, &backup).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法替换组件目录", error.to_string())
+        })?;
+        if let Err(error) = fs::rename(&incoming, &published) {
+            let _ = fs::rename(&backup, &published);
+            return Err(AppError::with_cause(
+                "AI_COMPONENT_IO",
+                "无法发布组件",
+                error.to_string(),
+            ));
+        }
+        let _ = fs::remove_dir_all(&backup);
+    } else if let Err(error) = fs::rename(&incoming, &published) {
+        return Err(AppError::with_cause(
+            "AI_COMPONENT_IO",
+            "无法发布组件",
+            error.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn extract_archive(archive: &Path, destination: &Path) -> Result<(), AppError> {
+    let listing = Command::new("/usr/bin/tar")
+        .args(["-tf", &archive.to_string_lossy()])
+        .output()
+        .map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "无法读取组件归档",
+                error.to_string(),
+            )
+        })?;
+    if !listing.status.success() {
+        return Err(AppError::new(
+            "AI_COMPONENT_EXTRACT_FAILED",
+            "组件归档无法读取",
+        ));
+    }
+    let names = String::from_utf8_lossy(&listing.stdout);
+    for name in names.lines() {
+        if name.is_empty() {
+            continue;
+        }
+        if name.starts_with('/') || name.split('/').any(|part| part == "..") {
+            return Err(AppError::new(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "组件归档包含非法路径",
+            ));
+        }
+    }
+    let status = Command::new("/usr/bin/tar")
+        .args([
+            "-xf",
+            &archive.to_string_lossy(),
+            "-C",
+            &destination.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "无法解压组件归档",
+                error.to_string(),
+            )
+        })?;
+    if !status.success() {
+        return Err(AppError::new(
+            "AI_COMPONENT_EXTRACT_FAILED",
+            "组件归档解压失败",
+        ));
+    }
+    contain_extracted_tree(destination)
+}
+
+fn contain_extracted_tree(destination: &Path) -> Result<(), AppError> {
+    let canonical_root = fs::canonicalize(destination).map_err(|error| {
+        AppError::with_cause(
+            "AI_COMPONENT_EXTRACT_FAILED",
+            "无法验证组件目录",
+            error.to_string(),
+        )
+    })?;
+    fn walk(root: &Path, current: &Path) -> Result<(), AppError> {
+        let entries = fs::read_dir(current).map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "无法验证组件目录",
+                error.to_string(),
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| {
+                AppError::with_cause(
+                    "AI_COMPONENT_EXTRACT_FAILED",
+                    "无法验证组件目录",
+                    error.to_string(),
+                )
+            })?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                AppError::with_cause(
+                    "AI_COMPONENT_EXTRACT_FAILED",
+                    "无法验证组件目录",
+                    error.to_string(),
+                )
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(AppError::new(
+                    "AI_COMPONENT_EXTRACT_FAILED",
+                    "组件归档包含非法路径",
+                ));
+            }
+            let canonical = fs::canonicalize(&path).map_err(|_| {
+                AppError::new("AI_COMPONENT_EXTRACT_FAILED", "组件归档包含非法路径")
+            })?;
+            if !canonical.starts_with(root) {
+                return Err(AppError::new(
+                    "AI_COMPONENT_EXTRACT_FAILED",
+                    "组件归档包含非法路径",
+                ));
+            }
+            if metadata.is_dir() {
+                walk(root, &path)?;
+            }
+        }
+        Ok(())
+    }
+    walk(&canonical_root, destination)
+}
+
+fn verify_entrypoint(root: &Path, entrypoint: &Path) -> Result<(), AppError> {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        AppError::with_cause(
+            "AI_COMPONENT_EXTRACT_FAILED",
+            "无法验证组件目录",
+            error.to_string(),
+        )
+    })?;
+    let metadata = fs::symlink_metadata(entrypoint)
+        .map_err(|_| AppError::new("AI_COMPONENT_EXTRACT_FAILED", "组件入口不存在"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() == 0 {
+        return Err(AppError::new(
+            "AI_COMPONENT_EXTRACT_FAILED",
+            "组件入口不是有效的普通文件",
+        ));
+    }
+    let canonical = fs::canonicalize(entrypoint)
+        .map_err(|_| AppError::new("AI_COMPONENT_EXTRACT_FAILED", "无法验证组件入口"))?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(AppError::new(
+            "AI_COMPONENT_EXTRACT_FAILED",
+            "组件入口越出安装目录",
+        ));
+    }
+    Ok(())
+}
+
+fn run_self_test(entrypoint: &Path) -> Result<(), AppError> {
+    let metadata = fs::metadata(entrypoint)
+        .map_err(|_| AppError::new("AI_COMPONENT_SELF_TEST_FAILED", "无法读取组件入口"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Ok(());
+        }
+    }
+    let output = Command::new(entrypoint)
+        .arg("--self-test")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|_| AppError::new("AI_COMPONENT_SELF_TEST_FAILED", "组件自检无法启动"))?;
+    if !output.status.success() {
+        return Err(AppError::new(
+            "AI_COMPONENT_SELF_TEST_FAILED",
+            "组件自检失败",
+        ));
+    }
+    Ok(())
+}
+
+fn unix_free_bytes(path: &Path) -> Result<u64, AppError> {
+    let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| AppError::new("AI_COMPONENT_IO", "组件目录无效"))?;
+    unsafe {
+        let mut stats: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c_path.as_ptr(), &mut stats) != 0 {
+            return Err(AppError::new("AI_COMPONENT_IO", "无法读取磁盘空间"));
+        }
+        Ok(stats.f_bavail as u64 * stats.f_frsize as u64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::TcpListener,
+        os::unix::fs::PermissionsExt,
+        process::Command,
+        sync::{
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+            mpsc, Arc, Mutex,
+        },
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct Fixture {
+        root: PathBuf,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let unique = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "hongguo-ai-components-{}-{}-{unique}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            Self { root }
+        }
+
+        fn manager(&self, sha: &str) -> ComponentManager {
+            self.manager_with_url(sha, "https://example.invalid/runtime.tar")
+        }
+
+        fn manager_with_url(&self, sha: &str, url: &str) -> ComponentManager {
+            self.manager_with(sha, url, "hongguo-ai", 32)
+        }
+
+        fn manager_with(
+            &self,
+            sha: &str,
+            url: &str,
+            entrypoint: &str,
+            size: u64,
+        ) -> ComponentManager {
+            let manifest = json!({
+                "version": 1,
+                "platform": "aarch64-apple-darwin",
+                "components": [{
+                    "id": "runtime",
+                    "version": "1",
+                    "platform": "aarch64-apple-darwin",
+                    "url": url,
+                    "sha256": sha,
+                    "downloadBytes": size,
+                    "installedBytes": size,
+                    "entrypoint": entrypoint
+                }]
+            });
+            ComponentManager::from_manifest_json(&self.root, &manifest.to_string()).unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn archive_with_entrypoint(dir: &Path, script: &str) -> (Vec<u8>, String) {
+        archive_named(dir, "hongguo-ai", script, 0o755)
+    }
+
+    fn archive_named(dir: &Path, name: &str, script: &str, mode: u32) -> (Vec<u8>, String) {
+        let unique = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let source = dir.join(format!("src-{unique}"));
+        fs::create_dir_all(&source).unwrap();
+        let entry = source.join(name);
+        fs::write(&entry, format!("#!/bin/sh\n{script}\n")).unwrap();
+        fs::set_permissions(&entry, fs::Permissions::from_mode(mode)).unwrap();
+        let archive = dir.join(format!("runtime-{unique}.tar"));
+        Command::new("/usr/bin/tar")
+            .current_dir(&source)
+            .args(["-cf", &archive.to_string_lossy(), name])
+            .status()
+            .unwrap();
+        let bytes = fs::read(&archive).unwrap();
+        let digest = sha256_hex(&bytes);
+        (bytes, digest)
+    }
+
+    fn seed_previous_version(root: &Path) {
+        let published = root.join("runtime").join("1");
+        fs::create_dir_all(&published).unwrap();
+        fs::write(published.join("hongguo-ai"), b"previous-version").unwrap();
+        persist_installed(
+            root,
+            &InstalledStore {
+                version: 1,
+                items: vec![InstalledRecord {
+                    id: "runtime".into(),
+                    version: "1".into(),
+                }],
+            },
+        )
+        .unwrap();
+    }
+
+    struct MockHttp {
+        url: String,
+        requests: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+        shutdown: Arc<Mutex<bool>>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockHttp {
+        fn serve(body: Vec<u8>) -> Self {
+            Self::serve_with(body, false)
+        }
+
+        fn serve_with(body: Vec<u8>, slow: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("loopback mock should bind");
+            listener
+                .set_nonblocking(true)
+                .expect("loopback mock should be nonblocking");
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let max_in_flight = Arc::new(AtomicUsize::new(0));
+            let shutdown = Arc::new(Mutex::new(false));
+            let thread = thread::spawn({
+                let requests = requests.clone();
+                let in_flight = in_flight.clone();
+                let max_in_flight = max_in_flight.clone();
+                let shutdown = shutdown.clone();
+                move || loop {
+                    if *shutdown.lock().unwrap() {
+                        break;
+                    }
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            requests.fetch_add(1, Ordering::SeqCst);
+                            let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_in_flight.fetch_max(current, Ordering::SeqCst);
+                            let mut buf = [0u8; 1024];
+                            let _ = stream.read(&mut buf);
+                            if slow {
+                                thread::sleep(Duration::from_millis(250));
+                            }
+                            let header = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    body.len()
+                                );
+                            let _ = stream.write_all(header.as_bytes());
+                            let _ = stream.write_all(&body);
+                            let _ = stream.flush();
+                            in_flight.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                url: format!("http://127.0.0.1:{port}/runtime.tar"),
+                requests,
+                max_in_flight,
+                shutdown,
+                thread: Some(thread),
+            }
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+
+        fn max_in_flight(&self) -> usize {
+            self.max_in_flight.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for MockHttp {
+        fn drop(&mut self) {
+            *self.shutdown.lock().unwrap() = true;
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    #[test]
+    fn checksum_failure_never_replaces_the_current_component() {
+        // Production mutation caught: publishing a corrupt payload over an already installed version.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let manager = fixture.manager(&sha);
+        manager
+            .install_bytes("runtime", &good, &sha, |_| {})
+            .unwrap();
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+
+        let error = manager
+            .install_bytes("runtime", b"corrupt", "00", |_| {})
+            .unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_CHECKSUM_FAILED");
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+        assert!(!serde_json::to_string(&error)
+            .unwrap()
+            .contains(fixture.root.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn running_component_cannot_be_removed() {
+        // Production mutation caught: deleting a component while a media job still references it.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let manager = fixture.manager(&sha);
+        manager
+            .install_bytes("runtime", &good, &sha, |_| {})
+            .unwrap();
+        manager.mark_in_use("runtime", true);
+        assert_eq!(
+            manager.remove("runtime").unwrap_err().code,
+            "AI_COMPONENT_IN_USE"
+        );
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn unsupported_platform_and_invalid_manifest_are_rejected() {
+        // Production mutation caught: accepting a non-ARM64 platform or unknown JSON fields.
+        let error =
+            parse_manifest(r#"{"version":1,"platform":"x86_64-apple-darwin","components":[]}"#)
+                .unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_MANIFEST_INVALID");
+        let error = parse_manifest(r#"{"version":1,"platform":"aarch64-apple-darwin","components":[{"id":"runtime","version":"1","platform":"aarch64-apple-darwin","url":"https://example.invalid/a","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","downloadBytes":1,"installedBytes":1,"entrypoint":"hongguo-ai","extra":true}]}"#).unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_MANIFEST_INVALID");
+    }
+
+    #[test]
+    fn http_url_and_uppercase_sha_are_rejected() {
+        // Production mutation caught: allowing non-HTTPS URLs or non-canonical checksums.
+        let json = json!({
+            "version": 1,
+            "platform": "aarch64-apple-darwin",
+            "components": [{
+                "id": "runtime",
+                "version": "1",
+                "platform": "aarch64-apple-darwin",
+                "url": "http://example.invalid/runtime.tar",
+                "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                "downloadBytes": 1,
+                "installedBytes": 1,
+                "entrypoint": "hongguo-ai"
+            }]
+        });
+        assert_eq!(
+            parse_manifest(&json.to_string()).unwrap_err().code,
+            "AI_COMPONENT_MANIFEST_INVALID"
+        );
+    }
+
+    #[test]
+    fn insufficient_disk_is_rejected_before_install() {
+        // Production mutation caught: starting an install without a free-space precheck.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let manager = fixture.manager(&sha);
+        manager.set_min_free_bytes(Some(1));
+        assert_eq!(
+            manager
+                .install_bytes("runtime", &good, &sha, |_| {})
+                .unwrap_err()
+                .code,
+            "AI_COMPONENT_INSUFFICIENT_DISK"
+        );
+        assert!(manager.installed_version("runtime").is_none());
+    }
+
+    #[test]
+    fn archive_path_traversal_is_rejected() {
+        // Production mutation caught: extracting archive members that escape the staging directory.
+        let fixture = Fixture::new();
+        let source = fixture.root.join("evil-src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("hongguo-ai"), b"#!/bin/sh\nexit 0\n").unwrap();
+        let archive = fixture.root.join("evil.tar");
+        Command::new("/usr/bin/tar")
+            .current_dir(&source)
+            .args(["-cf", &archive.to_string_lossy(), "hongguo-ai"])
+            .status()
+            .unwrap();
+        // Rebuild a tar that includes a traversal name by copying bytes is hard; use tar with a crafted member via pax.
+        let traversal = fixture.root.join("traversal.tar");
+        let status = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import tarfile; tar=tarfile.open(r'{path}', 'w'); info=tarfile.TarInfo('../escape'); info.size=4; tar.addfile(info, __import__('io').BytesIO(b'data')); tar.close()",
+                    path = traversal.display()
+                ),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = fs::read(&traversal).unwrap();
+        let sha = sha256_hex(&bytes);
+        let manager = fixture.manager(&sha);
+        let error = manager
+            .install_bytes("runtime", &bytes, &sha, |_| {})
+            .unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_EXTRACT_FAILED");
+        assert!(manager.installed_version("runtime").is_none());
+    }
+
+    #[test]
+    fn failed_self_test_does_not_publish() {
+        // Production mutation caught: marking a component installed after a failing --self-test.
+        let fixture = Fixture::new();
+        let (bad, sha) = archive_with_entrypoint(&fixture.root, "exit 7");
+        let manager = fixture.manager(&sha);
+        assert_eq!(
+            manager
+                .install_bytes("runtime", &bad, &sha, |_| {})
+                .unwrap_err()
+                .code,
+            "AI_COMPONENT_SELF_TEST_FAILED"
+        );
+        assert!(manager.installed_version("runtime").is_none());
+        assert!(!fixture.root.join("runtime/1").exists());
+    }
+
+    #[test]
+    fn successful_install_is_atomic_and_reports_progress_stages() {
+        // Production mutation caught: skipping installed.json publish or reporting success without a self-test.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let manager = fixture.manager(&sha);
+        let mut stages = Vec::new();
+        let status = manager
+            .install_bytes("runtime", &good, &sha, |progress| {
+                stages.push(progress.stage)
+            })
+            .unwrap();
+        assert!(status.installed);
+        assert_eq!(status.installed_version.as_deref(), Some("1"));
+        assert!(fixture.root.join("installed.json").is_file());
+        assert!(fixture.root.join("runtime/1/hongguo-ai").is_file());
+        for required in [
+            "checking",
+            "downloading",
+            "verifying",
+            "extracting",
+            "selfTesting",
+            "installed",
+        ] {
+            assert!(
+                stages.iter().any(|stage| stage == required),
+                "missing {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_install_is_rejected() {
+        // Production mutation caught: allowing two installs to share the same download/publish path.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let manager = fixture.manager(&sha);
+        manager.force_installing();
+        assert_eq!(
+            manager
+                .install_bytes("runtime", &good, &sha, |_| {})
+                .unwrap_err()
+                .code,
+            "AI_COMPONENT_INSTALL_RUNNING"
+        );
+    }
+
+    #[test]
+    fn render_script_exits_nonzero_without_required_env() {
+        // Production mutation caught: emitting a blank/zero checksum manifest when release URLs are missing.
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/render-ai-component-manifest.sh");
+        let status = Command::new("/bin/bash")
+            .arg(&script)
+            .env_remove("HONGGUO_AI_RUNTIME_URL")
+            .status()
+            .unwrap();
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn concurrent_install_on_the_command_path_is_rejected() {
+        // Production mutation caught: two install() calls both downloading before the single-install lock.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let server = MockHttp::serve_with(good, true);
+        let manager = Arc::new(fixture.manager_with_url(&sha, &server.url));
+        let (started_tx, started_rx) = mpsc::channel();
+        let first = {
+            let manager = manager.clone();
+            thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                manager.install("runtime", |_| {})
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread::sleep(Duration::from_millis(40));
+        let second = manager.install("runtime", |_| {}).unwrap_err();
+        assert_eq!(second.code, "AI_COMPONENT_INSTALL_RUNNING");
+        let _ = first.join().unwrap();
+        assert!(
+            server.max_in_flight() <= 1,
+            "mock saw overlapping downloads: {}",
+            server.max_in_flight()
+        );
+        assert!(server.request_count() >= 1);
+    }
+
+    #[test]
+    fn insufficient_disk_on_the_command_path_does_not_touch_the_network() {
+        // Production mutation caught: install() downloading before the free-space check.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let server = MockHttp::serve(good);
+        let manager = fixture.manager_with_url(&sha, &server.url);
+        manager.set_min_free_bytes(Some(0));
+        let mut stages = Vec::new();
+        let error = manager
+            .install("runtime", |progress| stages.push(progress.stage))
+            .unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_INSUFFICIENT_DISK");
+        assert_eq!(server.request_count(), 0);
+        assert!(stages.iter().any(|stage| stage == "checking"));
+        assert!(stages.iter().any(|stage| stage == "failed"));
+    }
+
+    #[test]
+    fn leftover_part_file_is_never_marked_installed() {
+        // Production mutation caught: treating a leftover .downloads/<id>.part as a completed install.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        seed_previous_version(&fixture.root);
+        let server = MockHttp::serve(b"truncated-part".to_vec());
+        let manager = fixture.manager_with_url(&sha, &server.url);
+        fs::write(
+            fixture.root.join(".downloads").join("runtime.part"),
+            b"leftover",
+        )
+        .unwrap();
+        let error = manager.install("runtime", |_| {}).unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_CHECKSUM_FAILED");
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+        assert_eq!(manager.status()[0].installed_version.as_deref(), Some("1"));
+        assert_eq!(
+            fs::read(fixture.root.join("runtime/1/hongguo-ai")).unwrap(),
+            b"previous-version"
+        );
+        let _ = good;
+    }
+
+    #[test]
+    fn checksum_failure_on_the_command_path_never_replaces_current_version() {
+        // Production mutation caught: install() replacing the published directory after a checksum miss.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        seed_previous_version(&fixture.root);
+        let server = MockHttp::serve(b"not-the-archive".to_vec());
+        let manager = fixture.manager_with_url(&sha, &server.url);
+        let mut stages = Vec::new();
+        let error = manager
+            .install("runtime", |progress| stages.push(progress.stage))
+            .unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_CHECKSUM_FAILED");
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+        assert_eq!(
+            fs::read(fixture.root.join("runtime/1/hongguo-ai")).unwrap(),
+            b"previous-version"
+        );
+        assert!(stages.iter().any(|stage| stage == "failed"));
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(!serialized.contains(fixture.root.to_string_lossy().as_ref()));
+        let _ = good;
+    }
+
+    #[test]
+    fn path_traversal_archive_on_the_command_path_leaves_previous_version() {
+        // Production mutation caught: extracting archive members that escape staging, then publishing.
+        let fixture = Fixture::new();
+        seed_previous_version(&fixture.root);
+        let traversal = fixture.root.join("traversal.tar");
+        let status = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import tarfile, io; tar=tarfile.open(r'{path}', 'w'); info=tarfile.TarInfo('../escape'); info.size=4; tar.addfile(info, io.BytesIO(b'data')); tar.close()",
+                    path = traversal.display()
+                ),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = fs::read(&traversal).unwrap();
+        let sha = sha256_hex(&bytes);
+        let server = MockHttp::serve(bytes);
+        let manager = fixture.manager_with_url(&sha, &server.url);
+        let error = manager.install("runtime", |_| {}).unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_EXTRACT_FAILED");
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+        assert_eq!(
+            fs::read(fixture.root.join("runtime/1/hongguo-ai")).unwrap(),
+            b"previous-version"
+        );
+        assert!(!fixture.root.join("escape").exists());
+    }
+
+    #[test]
+    fn symlink_escape_archive_on_the_command_path_is_rejected() {
+        // Production mutation caught: list-only tar -tf then unrestricted tar -xf of a symlink member.
+        let fixture = Fixture::new();
+        seed_previous_version(&fixture.root);
+        let outside = fixture.root.join("outside-secret");
+        fs::write(&outside, b"secret").unwrap();
+        let archive = fixture.root.join("symlink.tar");
+        let status = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import tarfile; tar=tarfile.open(r'{path}', 'w'); info=tarfile.TarInfo('hongguo-ai'); info.type=tarfile.SYMTYPE; info.linkname=r'{target}'; tar.addfile(info); tar.close()",
+                    path = archive.display(),
+                    target = outside.display()
+                ),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = fs::read(&archive).unwrap();
+        let sha = sha256_hex(&bytes);
+        let server = MockHttp::serve(bytes);
+        let manager = fixture.manager_with_url(&sha, &server.url);
+        let error = manager.install("runtime", |_| {}).unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_EXTRACT_FAILED");
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+        assert_eq!(
+            fs::read(fixture.root.join("runtime/1/hongguo-ai")).unwrap(),
+            b"previous-version"
+        );
+    }
+
+    #[test]
+    fn successful_install_on_the_command_path_sets_installed_path_and_clears_part() {
+        // Production mutation caught: deleting the current version before the new directory is in place, or leaving .part behind.
+        let fixture = Fixture::new();
+        seed_previous_version(&fixture.root);
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let server = MockHttp::serve(good);
+        let manager = fixture.manager_with_url(&sha, &server.url);
+        let mut stages = Vec::new();
+        let status = manager
+            .install("runtime", |progress| stages.push(progress.stage))
+            .unwrap();
+        assert!(status.installed);
+        let installed_path = status.installed_path.expect("installedPath should be Some");
+        assert!(
+            installed_path.ends_with("runtime/1"),
+            "installedPath={installed_path}"
+        );
+        assert!(!fixture
+            .root
+            .join(".downloads")
+            .join("runtime.part")
+            .exists());
+        assert_eq!(
+            fs::read(fixture.root.join("runtime/1/hongguo-ai")).unwrap()[..2],
+            b"#!"[..]
+        );
+        for required in [
+            "checking",
+            "downloading",
+            "verifying",
+            "extracting",
+            "selfTesting",
+            "installed",
+        ] {
+            assert!(
+                stages.iter().any(|stage| stage == required),
+                "missing {required}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_entrypoint_is_rejected_on_its_own() {
+        // Production mutation caught: accepting an entrypoint that escapes with parent components.
+        let json = json!({
+            "version": 1,
+            "platform": "aarch64-apple-darwin",
+            "components": [{
+                "id": "runtime",
+                "version": "1",
+                "platform": "aarch64-apple-darwin",
+                "url": "https://example.invalid/runtime.tar",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "downloadBytes": 1,
+                "installedBytes": 1,
+                "entrypoint": "foo/../hongguo-ai"
+            }]
+        });
+        assert_eq!(
+            parse_manifest(&json.to_string()).unwrap_err().code,
+            "AI_COMPONENT_MANIFEST_INVALID"
+        );
+    }
+
+    #[test]
+    fn unsupported_component_platform_maps_to_unsupported_platform() {
+        // Production mutation caught: collapsing a bad component.platform into MANIFEST_INVALID.
+        let json = json!({
+            "version": 1,
+            "platform": "aarch64-apple-darwin",
+            "components": [{
+                "id": "runtime",
+                "version": "1",
+                "platform": "x86_64-apple-darwin",
+                "url": "https://example.invalid/runtime.tar",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "downloadBytes": 1,
+                "installedBytes": 1,
+                "entrypoint": "hongguo-ai"
+            }]
+        });
+        assert_eq!(
+            parse_manifest(&json.to_string()).unwrap_err().code,
+            "AI_COMPONENT_UNSUPPORTED_PLATFORM"
+        );
+    }
+
+    #[test]
+    fn download_client_does_not_follow_http_redirects() {
+        // Production mutation caught: following https redirects onto an http URL.
+        let client = component_download_client().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let thread = thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+                let body = b"redirected";
+                let header = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/next\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        let result = client
+            .get(format!("http://127.0.0.1:{port}/runtime.tar"))
+            .send()
+            .unwrap();
+        assert!(result.status().is_redirection());
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn poisoned_in_use_lock_fails_closed() {
+        // Production mutation caught: treating a poisoned in-use lock as not in use.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let manager = fixture.manager(&sha);
+        manager
+            .install_bytes("runtime", &good, &sha, |_| {})
+            .unwrap();
+        manager.poison_in_use();
+        assert_eq!(
+            manager.remove("runtime").unwrap_err().code,
+            "AI_COMPONENT_IN_USE"
+        );
+        assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+    }
+}

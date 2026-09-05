@@ -1,0 +1,7 @@
+torch==2.5.1
+torchaudio==2.5.1
+soundfile==0.13.1
+numpy==1.26.4
+demucs==4.0.1
+openai-whisper==20250625
+pyinstaller==6.22.2

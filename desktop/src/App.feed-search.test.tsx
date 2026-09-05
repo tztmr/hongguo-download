@@ -1,0 +1,244 @@
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App from "./App";
+import type { DiscoveryPage, RankPage, SearchPage, SeriesItem } from "./types";
+
+const apiMocks = vi.hoisted(() => ({
+  chooseSaveDir: vi.fn(),
+  downloadEpisode: vi.fn(),
+  fetchCatalog: vi.fn(),
+  fetchCategoryGroups: vi.fn(),
+  fetchDiscovery: vi.fn(),
+  fetchDiscoveryByCategory: vi.fn(),
+  fetchDiscoveryMore: vi.fn(),
+  fetchHealth: vi.fn(),
+  fetchRank: vi.fn(),
+  fetchSearch: vi.fn(),
+  fetchSeriesMetrics: vi.fn(),
+  fetchNewReleases: vi.fn(),
+  getAiComponents: vi.fn(),
+  getSettings: vi.fn(),
+  installAiComponent: vi.fn(),
+  removeAiComponent: vi.fn(),
+  subscribeAiComponentProgress: vi.fn(),
+  updateSettings: vi.fn(),
+  getSaveDir: vi.fn(),
+  openSaveDir: vi.fn(),
+  revealPath: vi.fn(),
+}));
+
+vi.mock("./api", () => apiMocks);
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(() => undefined) }));
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
+
+function series(index: number, title = `资讯 ${index}`): SeriesItem {
+  return {
+    bookId: `book-${index}`,
+    seriesId: `book-${index}`,
+    title,
+    cover: "",
+    firstVid: "",
+    contentTypeCode: 1,
+    episodeCount: 1,
+    abstract: "",
+    score: "8.0",
+    category: "真人剧",
+    author: "",
+    rankTags: [],
+  };
+}
+
+function discoveryPage(items: SeriesItem[], nextOffset: number, hasMore: boolean): DiscoveryPage {
+  return {
+    items,
+    cellId: "discover-cell",
+    nextOffset,
+    hasMore,
+    sessionId: `discover-session-${nextOffset}`,
+    planId: "discover-plan",
+    filterIds: items.map((item) => item.bookId).join(","),
+    selectedItems: "",
+    categories: [],
+    rankBoards: [],
+  };
+}
+
+function rankPage(items: SeriesItem[], nextOffset: number, hasMore: boolean): RankPage {
+  return {
+    items,
+    nextCursor: hasMore ? `rank-cursor-${nextOffset}` : "",
+    hasMore,
+    board: "ranklist_hot_sc",
+    boardName: "推荐榜",
+    boards: [
+      { id: "ranklist_hot_sc", name: "推荐榜" },
+      { id: "ranklist_hot_play_sc", name: "热播榜" },
+      { id: "ranklist_prestige", name: "臻果榜" },
+      { id: "ranklist_subscribe", name: "预约榜" },
+      { id: "ranklist_new_rank_sc", name: "新剧榜" },
+      { id: "ranklist_hot_search_sc", name: "热搜榜" },
+      { id: "ranklist_must_watch", name: "必看榜" },
+      { id: "ranklist_followed", name: "收藏榜" },
+    ],
+  };
+}
+
+describe("App feed and search controls", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.defineProperty(window, "localStorage", { configurable: true, value: memoryStorage() });
+    window.history.replaceState({}, "", "/");
+    apiMocks.fetchCatalog.mockResolvedValue([]);
+    apiMocks.fetchCategoryGroups.mockResolvedValue([]);
+    apiMocks.fetchHealth.mockResolvedValue({ status: "ok", pool_size: 1, active_count: 1 });
+    apiMocks.getAiComponents.mockResolvedValue([]);
+    apiMocks.subscribeAiComponentProgress.mockResolvedValue(() => undefined);
+    apiMocks.getSettings.mockResolvedValue({ version: 1, saveDir: "/tmp/downloads", definition: "auto", notifyDownloadComplete: true, notifyNewReleases: true });
+    apiMocks.updateSettings.mockImplementation(async (patch) => ({ version: 1, saveDir: "/tmp/downloads", definition: "auto", notifyDownloadComplete: true, notifyNewReleases: true, ...patch }));
+    apiMocks.fetchNewReleases.mockResolvedValue({ items: [], nextCursor: "", hasMore: false, date: "2026-09-02", refreshedAt: "" });
+    apiMocks.fetchSeriesMetrics.mockResolvedValue({ seriesId: "", contentTypeCode: 1 });
+    apiMocks.getSaveDir.mockResolvedValue("/tmp/downloads");
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage([series(1)], 0, false));
+    apiMocks.fetchDiscoveryByCategory.mockResolvedValue(discoveryPage([series(1)], 0, false));
+    apiMocks.fetchDiscoveryMore.mockResolvedValue(discoveryPage([], 0, false));
+    apiMocks.fetchRank.mockResolvedValue(rankPage([series(1)], 0, false));
+    apiMocks.fetchSearch.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
+  });
+
+  it("shows search modes and keeps only an exact title in matching mode", async () => {
+    const searchResult: SearchPage = {
+      items: [series(101, "天下第一纨绔"), series(102, "天下第一纨绔3")],
+      hasMore: false,
+      nextOffset: 0,
+      nextPassback: "",
+    };
+    apiMocks.fetchSearch.mockResolvedValue(searchResult);
+    const view = render(<App />);
+
+    const form = view.container.querySelector(".search-form");
+    expect(form).not.toBeNull();
+    const search = within(form as HTMLElement);
+    expect(search.getByRole("button", { name: "模糊识别" })).toBeTruthy();
+    fireEvent.click(search.getByRole("button", { name: "匹配识别" }));
+    fireEvent.change(search.getByRole("textbox", { name: "搜索短剧或漫剧" }), { target: { value: "天下第一纨绔" } });
+    fireEvent.click(search.getByRole("button", { name: "搜索" }));
+
+    await waitFor(() => expect(view.getAllByText("天下第一纨绔").length).toBeGreaterThan(0));
+    expect(view.container.querySelectorAll(".poster-card")).toHaveLength(1);
+    expect(view.queryByText("天下第一纨绔3")).toBeNull();
+  });
+
+  it("shows a visible loading layer while a search replaces existing cards", async () => {
+    let resolveSearch!: (value: SearchPage) => void;
+    const pending = new Promise<SearchPage>((resolve) => { resolveSearch = resolve; });
+    apiMocks.fetchSearch.mockReturnValue(pending);
+    const view = render(<App />);
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(1));
+
+    const form = view.container.querySelector(".search-form") as HTMLElement;
+    fireEvent.change(within(form).getByRole("textbox", { name: "搜索短剧或漫剧" }), { target: { value: "新剧" } });
+    fireEvent.click(within(form).getByRole("button", { name: "搜索" }));
+
+    expect(view.getByRole("status", { name: "正在加载内容" })).toBeTruthy();
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(1));
+    resolveSearch({ items: [series(2, "新剧")], hasMore: false, nextOffset: 0, nextPassback: "" });
+    await waitFor(() => expect(view.getAllByText("新剧").length).toBeGreaterThan(0));
+  });
+
+  it("fills the home feed to twenty unique items on first load", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(
+      Array.from({ length: 6 }, (_, index) => series(index + 1)),
+      6,
+      true,
+    ));
+    apiMocks.fetchDiscoveryMore
+      .mockResolvedValueOnce(discoveryPage(Array.from({ length: 6 }, (_, index) => series(index + 7)), 12, true))
+      .mockResolvedValueOnce(discoveryPage(Array.from({ length: 6 }, (_, index) => series(index + 13)), 18, true))
+      .mockResolvedValueOnce(discoveryPage(Array.from({ length: 6 }, (_, index) => series(index + 19)), 24, true))
+      .mockResolvedValueOnce(discoveryPage(Array.from({ length: 6 }, (_, index) => series(index + 25)), 30, true))
+      .mockResolvedValueOnce(discoveryPage(Array.from({ length: 6 }, (_, index) => series(index + 31)), 36, true))
+      .mockResolvedValueOnce(discoveryPage(Array.from({ length: 6 }, (_, index) => series(index + 37)), 42, false));
+    const view = render(<App />);
+
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(20));
+    expect(view.getByRole("heading", { name: "首页推荐" })).toBeTruthy();
+    expect(view.queryByText("资讯 21")).toBeNull();
+
+    const scroller = view.container.querySelector(".library-main") as HTMLElement;
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1200 },
+      scrollTop: { configurable: true, value: 760 },
+    });
+    fireEvent.scroll(scroller);
+
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(40));
+    expect(view.getAllByText("资讯 40").length).toBeGreaterThan(0);
+  });
+
+  it("numbers twenty initial rank items and auto-loads the next page near the bottom", async () => {
+    const first = rankPage(Array.from({ length: 10 }, (_, index) => series(index + 1)), 10, true);
+    const second = rankPage(Array.from({ length: 10 }, (_, index) => series(index + 11)), 20, true);
+    const third = rankPage(Array.from({ length: 20 }, (_, index) => series(index + 21)), 40, false);
+    apiMocks.fetchRank.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third);
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "榜单" }));
+
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(20));
+    expect(view.getByText("NO.1")).toBeTruthy();
+    expect(view.getByText("NO.20")).toBeTruthy();
+
+    const scroller = view.container.querySelector(".library-main") as HTMLElement;
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1200 },
+      scrollTop: { configurable: true, value: 760 },
+    });
+    fireEvent.scroll(scroller);
+
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(40));
+    expect(view.getByText("NO.40")).toBeTruthy();
+  });
+
+  it("continues rank numbering past NO.100 until upstream ends", async () => {
+    for (let pageIndex = 0; pageIndex < 12; pageIndex += 1) {
+      const start = pageIndex * 10 + 1;
+      apiMocks.fetchRank.mockResolvedValueOnce(rankPage(
+        Array.from({ length: 10 }, (_, index) => series(start + index)),
+        start + 9,
+        pageIndex < 11,
+      ));
+    }
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "榜单" }));
+    await waitFor(() => expect(view.getByText("NO.20")).toBeTruthy());
+
+    const scroller = view.container.querySelector(".library-main") as HTMLElement;
+    Object.defineProperties(scroller, {
+      clientHeight: { configurable: true, value: 400 },
+      scrollHeight: { configurable: true, value: 1200 },
+      scrollTop: { configurable: true, value: 760 },
+    });
+    for (const count of [40, 60, 80, 100, 120]) {
+      fireEvent.scroll(scroller);
+      await waitFor(() => expect(view.getByText(`NO.${count}`)).toBeTruthy());
+    }
+    expect(view.getByText("NO.101")).toBeTruthy();
+    expect(view.queryByText("范围")).toBeNull();
+    for (const label of ["推荐榜", "热播榜", "臻果榜", "预约榜", "新剧榜", "热搜榜", "必看榜", "收藏榜"]) {
+      expect(view.getByRole("button", { name: label })).toBeTruthy();
+    }
+    expect(apiMocks.fetchRank).toHaveBeenCalledTimes(12);
+  });
+});

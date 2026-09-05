@@ -1,0 +1,119 @@
+export type ContentType = "drama" | "manju";
+export type NavId = "discover" | "search" | "rank" | "monitor" | "queue" | "settings";
+export type DefinitionPreference = "auto" | "1080p" | "720p";
+export type DemucsModel = "htdemucs" | "htdemucs_ft";
+export type WhisperModel = "small" | "medium";
+export type NewReleaseType = "playlet" | "comic_series_rank" | "ai_playlet";
+
+export type SeriesMetrics = {
+  seriesId: string;
+  contentTypeCode: number;
+  onlineTime?: number;
+  playCount?: number;
+  hotCount?: number;
+  collectCount?: number;
+  likeCount?: number;
+};
+
+export type SeriesItem = {
+  bookId: string;
+  seriesId: string;
+  title: string;
+  cover: string;
+  firstVid: string;
+  contentTypeCode: number;
+  episodeCount: number;
+  abstract: string;
+  score: string;
+  category: string;
+  categoryTags?: string[];
+  releaseType?: NewReleaseType;
+  author: string;
+  rankTags: Array<{ label: string; schema: string }>;
+  onlineTime?: number;
+  playCount?: number;
+  hotCount?: number;
+  collectCount?: number;
+  likeCount?: number;
+};
+
+export type CategoryGroup = {
+  id: string;
+  name: string;
+  items: Array<{ id: string; name: string }>;
+};
+
+export type NewReleasePage = {
+  items: SeriesItem[];
+  nextCursor: string;
+  hasMore: boolean;
+  date: string;
+  refreshedAt: string;
+};
+
+export type AppSettings = {
+  version: 1 | 2 | 3;
+  saveDir: string;
+  definition: DefinitionPreference;
+  notifyDownloadComplete: boolean;
+  notifyNewReleases: boolean;
+  notifyMediaComplete?: boolean;
+  notifyYouTubeResult?: boolean;
+  demucsModel: DemucsModel;
+  whisperModel: WhisperModel;
+  warning?: string;
+};
+
+export type AIComponentStatus = {
+  id: string;
+  version: string;
+  installed: boolean;
+  installedVersion: string | null;
+  installedPath: string | null;
+  downloadBytes: number;
+  installedBytes: number;
+  inUse: boolean;
+  stage?: string;
+  percent?: number;
+};
+
+export type AIComponentProgress = {
+  id: string;
+  stage: string;
+  percent: number;
+};
+
+export type EpisodeItem = {
+  index: number;
+  itemId: string;
+  title: string;
+};
+
+export type DiscoveryPage = {
+  items: SeriesItem[];
+  cellId: string;
+  nextOffset: number;
+  hasMore: boolean;
+  sessionId: string;
+  planId: string;
+  filterIds: string;
+  selectedItems: string;
+  categories: Array<{ id: string; name: string; group: string }>;
+  rankBoards: Array<{ label: string; schema: string }>;
+};
+
+export type RankPage = {
+  items: SeriesItem[];
+  nextCursor: string;
+  hasMore: boolean;
+  board: string;
+  boardName: string;
+  boards: Array<{ id: string; name: string }>;
+};
+
+export type SearchPage = {
+  items: SeriesItem[];
+  hasMore: boolean;
+  nextOffset: number;
+  nextPassback: string;
+};
