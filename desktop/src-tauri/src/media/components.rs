@@ -1065,11 +1065,11 @@ fn verify_entrypoint(root: &Path, entrypoint: &Path) -> Result<(), AppError> {
 }
 
 fn run_self_test(entrypoint: &Path) -> Result<(), AppError> {
-    let metadata = fs::metadata(entrypoint)
-        .map_err(|_| AppError::new("AI_COMPONENT_SELF_TEST_FAILED", "无法读取组件入口"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let metadata = fs::metadata(entrypoint)
+            .map_err(|_| AppError::new("AI_COMPONENT_SELF_TEST_FAILED", "无法读取组件入口"))?;
         if metadata.permissions().mode() & 0o111 == 0 {
             return Ok(());
         }

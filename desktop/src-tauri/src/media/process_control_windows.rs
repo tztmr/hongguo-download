@@ -27,11 +27,21 @@ use windows_sys::Win32::{
 };
 
 #[derive(Debug)]
-struct JobHandle(HANDLE);
+struct JobHandle(usize);
+
+impl JobHandle {
+    fn new(handle: HANDLE) -> Self {
+        Self(handle as usize)
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.0 as HANDLE
+    }
+}
 
 impl Drop for JobHandle {
     fn drop(&mut self) {
-        unsafe { CloseHandle(self.0) };
+        unsafe { CloseHandle(self.raw()) };
     }
 }
 
@@ -58,7 +68,8 @@ impl ProcessControl {
 
     pub fn register_child(&self, child: &mut Child) -> Result<(), AppError> {
         let job = create_kill_on_close_job()?;
-        let assigned = unsafe { AssignProcessToJobObject(job.0, child.as_raw_handle() as HANDLE) };
+        let assigned =
+            unsafe { AssignProcessToJobObject(job.raw(), child.as_raw_handle() as HANDLE) };
         if assigned == 0 {
             return Err(control_error(std::io::Error::last_os_error()));
         }
@@ -105,6 +116,10 @@ impl ProcessControl {
         self.terminate_current();
     }
 
+    pub fn kill(&self) {
+        self.terminate_current();
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
     }
@@ -124,7 +139,7 @@ impl ProcessControl {
     fn terminate_current(&self) {
         if let Ok(guard) = self.0.process.lock() {
             if let Some((_, job)) = guard.as_ref() {
-                unsafe { TerminateJobObject(job.0, 1) };
+                unsafe { TerminateJobObject(job.raw(), 1) };
             }
         }
     }
@@ -135,12 +150,12 @@ fn create_kill_on_close_job() -> Result<JobHandle, AppError> {
     if handle.is_null() {
         return Err(control_error(std::io::Error::last_os_error()));
     }
-    let job = JobHandle(handle);
+    let job = JobHandle::new(handle);
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
     let configured = unsafe {
         SetInformationJobObject(
-            job.0,
+            job.raw(),
             JobObjectExtendedLimitInformation,
             &limits as *const _ as *const _,
             size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
@@ -176,28 +191,27 @@ fn visit_process_threads(
     pid: u32,
     mut action: impl FnMut(HANDLE) -> Result<(), std::io::Error>,
 ) -> Result<(), AppError> {
-    let snapshot =
-        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }.map_err(control_error)?;
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(control_error(std::io::Error::last_os_error()));
     }
-    let snapshot_guard = JobHandle(snapshot);
+    let snapshot_guard = JobHandle::new(snapshot);
     let mut entry = THREADENTRY32 {
         dwSize: size_of::<THREADENTRY32>() as u32,
         ..Default::default()
     };
     let mut found = false;
-    let mut has_entry = unsafe { Thread32First(snapshot_guard.0, &mut entry) }.is_ok();
+    let mut has_entry = unsafe { Thread32First(snapshot_guard.raw(), &mut entry) } != 0;
     while has_entry {
         if entry.th32OwnerProcessID == pid {
             found = true;
             let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
             if !thread.is_null() {
-                let thread_guard = JobHandle(thread);
-                action(thread_guard.0).map_err(control_error)?;
+                let thread_guard = JobHandle::new(thread);
+                action(thread_guard.raw()).map_err(control_error)?;
             }
         }
-        has_entry = unsafe { Thread32Next(snapshot_guard.0, &mut entry) }.is_ok();
+        has_entry = unsafe { Thread32Next(snapshot_guard.raw(), &mut entry) } != 0;
     }
     if !found {
         return Err(control_error("media process has no controllable threads"));

@@ -119,6 +119,7 @@ impl AIExecutor for NativeAIExecutor {
         };
         for (position, input) in request.inputs.iter().enumerate() {
             if cancellation.is_cancelled() {
+                cancellation.kill();
                 return Err(AppError::new("AI_CANCELLED", "AI 媒体任务已取消"));
             }
             let start = position as f64 / total * 100.0;

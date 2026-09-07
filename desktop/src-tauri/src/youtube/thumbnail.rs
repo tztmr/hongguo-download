@@ -1,11 +1,13 @@
 use super::config::SecretString;
 use crate::{media::MediaTools, AppError};
 use reqwest::{Client, StatusCode};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
 };
 use url::Url;
 

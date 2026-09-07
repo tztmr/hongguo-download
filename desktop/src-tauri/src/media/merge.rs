@@ -1448,6 +1448,7 @@ fn run_ffmpeg(
     let status = loop {
         drain_progress(&line_receiver, tracker, start.elapsed(), progress);
         if cancellation.is_cancelled() {
+            cancellation.kill();
             terminate_and_wait(&mut child);
             cancellation.clear_child(child_id);
             let _ = stdout_thread.join();

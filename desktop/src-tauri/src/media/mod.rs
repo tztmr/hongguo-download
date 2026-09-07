@@ -1789,6 +1789,7 @@ mod tests {
         assert_eq!(non_file_error.code, "MEDIA_INPUT_CHANGED");
     }
 
+    #[cfg(unix)]
     #[test]
     fn merge_validation_canonicalizes_real_inputs_and_contains_every_path_under_series_root() {
         // Production mutation caught: hashing lexical aliases or allowing an input/symlink destination to escape the selected series.

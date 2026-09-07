@@ -82,6 +82,13 @@ impl ProcessControl {
         }
     }
 
+    pub fn kill(&self) {
+        if let Ok(Some(pgid)) = self.current_process_group() {
+            let _ = signal_group(pgid, libc::SIGCONT);
+            let _ = signal_group(pgid, libc::SIGKILL);
+        }
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
     }

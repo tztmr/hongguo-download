@@ -150,6 +150,7 @@ fn controlled_read<T: Send + 'static>(
     });
     let status = loop {
         if control.is_cancelled() {
+            control.kill();
             terminate_and_wait(&mut child);
             break Err(cancelled_error());
         }
