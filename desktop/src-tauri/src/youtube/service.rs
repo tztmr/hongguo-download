@@ -12,12 +12,13 @@ use super::{
 };
 use crate::{
     media::{MediaJobService, MediaTools},
+    platform_fs::{replace_file, sync_directory},
     AppError,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -729,10 +730,8 @@ fn persist_uploads(data_dir: &Path, items: &[StoredUpload]) -> Result<(), AppErr
         .and_then(|_| writer.get_ref().sync_all())
         .map_err(service_io)?;
     drop(writer);
-    fs::rename(temporary, target).map_err(service_io)?;
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(service_io)
+    replace_file(&temporary, &target).map_err(service_io)?;
+    sync_directory(&directory).map_err(service_io)
 }
 
 fn state_lock_error<T>(_error: std::sync::PoisonError<T>) -> AppError {

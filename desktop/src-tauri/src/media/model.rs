@@ -129,6 +129,8 @@ pub struct StartAIJobRequest {
     pub scope: MediaJobScope,
     pub inputs: Vec<StartMergeInput>,
     pub model: String,
+    #[serde(default = "default_ai_device")]
+    pub device: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -141,7 +143,13 @@ pub struct ValidatedAIJobRequest {
     pub series_root: PathBuf,
     pub inputs: Vec<MergeInput>,
     pub model: String,
+    #[serde(default = "default_ai_device")]
+    pub device: String,
     pub dedupe_key: String,
+}
+
+fn default_ai_device() -> String {
+    "auto".into()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +302,7 @@ mod ai_request_tests {
                 modified_unix_nanos: 20,
             }],
             model: "htdemucs".into(),
+            device: "cuda".into(),
             dedupe_key: "ai-key".into(),
         };
 
@@ -303,5 +312,6 @@ mod ai_request_tests {
         assert_eq!(decoded, request);
         assert_eq!(decoded.scope, MediaJobScope::Episodes);
         assert_eq!(decoded.kind, MediaJobKind::SeparateBackgroundMusic);
+        assert_eq!(decoded.device, "cuda");
     }
 }

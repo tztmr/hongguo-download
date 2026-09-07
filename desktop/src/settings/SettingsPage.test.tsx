@@ -6,13 +6,14 @@ import { SettingsPage } from "./SettingsPage";
 function model(overrides: Partial<UseAppSettingsResult> = {}): UseAppSettingsResult {
   return {
     settings: {
-      version: 2,
+      version: 4,
       saveDir: "/Downloads/红果下载",
       definition: "auto",
       notifyDownloadComplete: true,
       notifyNewReleases: true,
       demucsModel: "htdemucs",
       whisperModel: "small",
+      aiDevice: "auto",
     },
     loading: false,
     warning: "上次设置文件损坏，已使用默认值",
@@ -40,14 +41,17 @@ describe("SettingsPage", () => {
     expect((view.getByRole("checkbox", { name: /新剧通知/ }) as HTMLInputElement).checked).toBe(true);
     expect(view.getByText(/macOS 系统设置/)).toBeTruthy();
     expect(view.getByText(/上次设置文件损坏/)).toBeTruthy();
+    expect((view.getByRole("radio", { name: /自动选择计算设备/ }) as HTMLInputElement).checked).toBe(true);
 
     fireEvent.click(view.getByRole("button", { name: "选择目录" }));
     fireEvent.click(view.getByRole("radio", { name: /^720p/ }));
     fireEvent.click(view.getByRole("checkbox", { name: /新剧通知/ }));
+    fireEvent.click(view.getByRole("radio", { name: /NVIDIA GPU/ }));
 
     expect(settings.chooseDirectory).toHaveBeenCalledTimes(1);
     expect(settings.update).toHaveBeenCalledWith({ definition: "720p" });
     expect(settings.update).toHaveBeenCalledWith({ notifyNewReleases: false });
+    expect(settings.update).toHaveBeenCalledWith({ aiDevice: "cuda" });
   });
 
   it("shows component progress and refuses model deletion while in use", () => {

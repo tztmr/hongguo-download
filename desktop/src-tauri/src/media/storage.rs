@@ -4,8 +4,9 @@ use super::model::{
     MEDIA_JOBS_VERSION,
 };
 use crate::app_error::AppError;
+use crate::platform_fs::{replace_file, sync_directory};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
@@ -600,10 +601,8 @@ fn persist_jobs(store_dir: &Path, jobs: &[MediaJob]) -> Result<(), AppError> {
         return Err(storage_error(error));
     }
     drop(writer);
-    fs::rename(&temporary_path, &canonical_path).map_err(storage_error)?;
-    File::open(store_dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(storage_error)
+    replace_file(&temporary_path, &canonical_path).map_err(storage_error)?;
+    sync_directory(store_dir).map_err(storage_error)
 }
 
 fn quarantine_corrupt_store(store_dir: &Path, store_path: &Path) -> Result<(), AppError> {
@@ -621,9 +620,7 @@ fn quarantine_corrupt_store(store_dir: &Path, store_path: &Path) -> Result<(), A
         suffix = suffix.saturating_add(1);
     };
     fs::rename(store_path, quarantine_path).map_err(storage_error)?;
-    File::open(store_dir)
-        .and_then(|directory| directory.sync_all())
-        .map_err(storage_error)
+    sync_directory(store_dir).map_err(storage_error)
 }
 
 fn next_job_id() -> String {

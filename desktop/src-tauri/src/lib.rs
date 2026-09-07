@@ -22,6 +22,7 @@ use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 pub mod app_error;
 pub mod media;
+mod platform_fs;
 mod settings;
 pub mod youtube;
 use app_error::AppError;
@@ -345,7 +346,10 @@ mod tests {
         // Production mutation caught: reintroducing runtime discovery or omitting python3 -B -m uvicorn.
         let command = development_api_command(49152);
 
-        assert_eq!(command.program, "python3");
+        assert_eq!(
+            command.program,
+            if cfg!(windows) { "python" } else { "python3" }
+        );
         assert_eq!(
             command.args,
             vec![
@@ -405,6 +409,7 @@ mod tests {
         assert!(!error.message.contains("pip install"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn api_sidecar_shutdown_terminates_and_reaps_child() {
         // Production mutation caught: dropping the child handle without killing and waiting for it.
@@ -489,9 +494,12 @@ mod tests {
         let cover_url = format!("http://{}/cover", listener.local_addr().unwrap());
         let server = thread::spawn(move || {
             let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = connection.read(&mut request);
             connection
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n\xff\xd8\xff\xe0")
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n\xff\xd8\xff\xe0")
                 .unwrap();
+            connection.flush().unwrap();
         });
         let root = std::env::temp_dir().join(format!(
             "hongguo-series-assets-{}",
@@ -959,15 +967,20 @@ fn start_merge_job(state: State<AppState>, request: StartMergeRequest) -> AppRes
 #[tauri::command]
 fn start_audio_separation_job(
     state: State<AppState>,
-    request: StartAIJobRequest,
+    mut request: StartAIJobRequest,
 ) -> AppResult<MediaJob> {
+    request.device = state.settings.lock().unwrap().ai_device.as_str().into();
     state
         .media_jobs
         .start_ai(request, MediaJobKind::SeparateBackgroundMusic)
 }
 
 #[tauri::command]
-fn start_subtitle_job(state: State<AppState>, request: StartAIJobRequest) -> AppResult<MediaJob> {
+fn start_subtitle_job(
+    state: State<AppState>,
+    mut request: StartAIJobRequest,
+) -> AppResult<MediaJob> {
+    request.device = state.settings.lock().unwrap().ai_device.as_str().into();
     state
         .media_jobs
         .start_ai(request, MediaJobKind::ExtractSubtitles)

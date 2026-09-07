@@ -1,8 +1,9 @@
 use super::models::{AccountSummary, CredentialSummary, YouTubeSnapshot};
+use crate::platform_fs::{replace_file, sync_directory};
 use crate::AppError;
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::Mutex,
@@ -141,10 +142,8 @@ fn persist(path: &Path, state: &PersistedState) -> Result<(), AppError> {
         .and_then(|_| writer.get_ref().sync_all())
         .map_err(state_error)?;
     drop(writer);
-    fs::rename(&temporary, path).map_err(state_error)?;
-    File::open(directory)
-        .and_then(|file| file.sync_all())
-        .map_err(state_error)
+    replace_file(&temporary, path).map_err(state_error)?;
+    sync_directory(directory).map_err(state_error)
 }
 
 fn state_error(error: impl std::fmt::Display) -> AppError {

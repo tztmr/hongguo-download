@@ -155,6 +155,12 @@ pub fn validate_ai_request(
     if !supported_model {
         return Err(AppError::new("AI_MODEL_UNSUPPORTED", "不支持所选 AI 模型"));
     }
+    if !matches!(request.device.as_str(), "auto" | "cpu" | "cuda") {
+        return Err(AppError::new(
+            "AI_DEVICE_UNSUPPORTED",
+            "不支持所选 AI 计算设备",
+        ));
+    }
 
     let canonical_root = fs::canonicalize(&request.series_root).map_err(input_changed)?;
     if !fs::metadata(&canonical_root)
@@ -194,6 +200,7 @@ pub fn validate_ai_request(
         kind,
         request.scope,
         &request.model,
+        &request.device,
     );
     Ok(ValidatedAIJobRequest {
         book_id: request.book_id.clone(),
@@ -203,6 +210,7 @@ pub fn validate_ai_request(
         series_root: canonical_root,
         inputs,
         model: request.model.clone(),
+        device: request.device.clone(),
         dedupe_key,
     })
 }
@@ -213,6 +221,7 @@ fn ai_dedupe_key(
     kind: MediaJobKind,
     scope: MediaJobScope,
     model: &str,
+    device: &str,
 ) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for bytes in [
@@ -220,6 +229,7 @@ fn ai_dedupe_key(
         format!("{scope:?}").into_bytes(),
         book_id.as_bytes().to_vec(),
         model.as_bytes().to_vec(),
+        device.as_bytes().to_vec(),
     ] {
         for byte in bytes {
             hash ^= u64::from(byte);
@@ -330,6 +340,7 @@ fn revalidate_ai_request(
             })
             .collect(),
         model: request.model.clone(),
+        device: request.device.clone(),
     };
     let validated = validate_ai_request(&start, request.kind)?;
     if &validated != request {
@@ -1685,6 +1696,7 @@ mod tests {
             scope: MediaJobScope::Episodes,
             inputs: vec![input.clone()],
             model: "htdemucs".into(),
+            device: "auto".into(),
         };
 
         let separation = validate_ai_request(&request, MediaJobKind::SeparateBackgroundMusic)
@@ -1754,6 +1766,7 @@ mod tests {
                     scope: MediaJobScope::Episodes,
                     inputs: vec![input],
                     model: "small".into(),
+                    device: "auto".into(),
                 },
                 MediaJobKind::ExtractSubtitles,
             )

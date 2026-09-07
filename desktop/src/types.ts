@@ -5,6 +5,7 @@ export type NavId = "discover" | "search" | "rank" | "monitor" | "queue" | "sett
 export type DefinitionPreference = "auto" | "1080p" | "720p";
 export type DemucsModel = "htdemucs" | "htdemucs_ft";
 export type WhisperModel = "small" | "medium";
+export type AIDevicePreference = "auto" | "cpu" | "cuda";
 export type NewReleaseType = "playlet" | "comic_series_rank" | "ai_playlet";
 
 export type SeriesMetrics = {
@@ -55,7 +56,7 @@ export type NewReleasePage = {
 };
 
 export type AppSettings = {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   saveDir: string;
   definition: DefinitionPreference;
   notifyDownloadComplete: boolean;
@@ -64,6 +65,7 @@ export type AppSettings = {
   notifyYouTubeResult?: boolean;
   demucsModel: DemucsModel;
   whisperModel: WhisperModel;
+  aiDevice: AIDevicePreference;
   downloadProxy?: string;
   downloadMirror?: string;
   warning?: string;

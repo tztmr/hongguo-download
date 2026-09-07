@@ -1,10 +1,11 @@
+use crate::platform_fs::replace_file;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use url::Url;
 
-pub const SETTINGS_VERSION: u8 = 3;
+pub const SETTINGS_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DefinitionPreference {
@@ -50,6 +51,33 @@ pub enum WhisperModel {
     Small,
     #[serde(rename = "medium")]
     Medium,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AIDevicePreference {
+    Auto,
+    Cpu,
+    Cuda,
+}
+
+impl AIDevicePreference {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::Cpu),
+            "cuda" => Ok(Self::Cuda),
+            _ => Err(format!("不支持的 AI 计算设备: {value}")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cpu => "cpu",
+            Self::Cuda => "cuda",
+        }
+    }
 }
 
 impl WhisperModel {
@@ -104,6 +132,8 @@ pub struct AppSettings {
     pub demucs_model: DemucsModel,
     #[serde(default = "default_whisper_model")]
     pub whisper_model: WhisperModel,
+    #[serde(default = "default_ai_device")]
+    pub ai_device: AIDevicePreference,
     /// Optional proxy for upstream API and component downloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_proxy: Option<String>,
@@ -126,6 +156,7 @@ impl AppSettings {
             notify_youtube_result: true,
             demucs_model: DemucsModel::HtDemucs,
             whisper_model: WhisperModel::Small,
+            ai_device: AIDevicePreference::Auto,
             download_proxy: None,
             download_mirror: None,
             warning: None,
@@ -161,6 +192,9 @@ impl AppSettings {
         if let Some(value) = patch.whisper_model {
             next.whisper_model = WhisperModel::parse(&value)?;
         }
+        if let Some(value) = patch.ai_device {
+            next.ai_device = AIDevicePreference::parse(&value)?;
+        }
         if let Some(value) = patch.download_proxy {
             next.download_proxy = normalize_proxy(&value)?;
         }
@@ -185,6 +219,7 @@ pub struct UpdateSettings {
     pub notify_youtube_result: Option<bool>,
     pub demucs_model: Option<String>,
     pub whisper_model: Option<String>,
+    pub ai_device: Option<String>,
     /// Empty string clears the proxy. Supported schemes: http, https, socks5, socks5h.
     pub download_proxy: Option<String>,
     /// Empty string clears the component mirror. Must be an HTTPS directory URL.
@@ -231,6 +266,9 @@ pub fn default_demucs_model() -> DemucsModel {
 }
 fn default_whisper_model() -> WhisperModel {
     WhisperModel::Small
+}
+fn default_ai_device() -> AIDevicePreference {
+    AIDevicePreference::Auto
 }
 fn default_true() -> bool {
     true
@@ -285,6 +323,7 @@ pub fn load_settings(path: &Path, default_save_dir: PathBuf) -> AppSettings {
         }
     };
     let mut invalid_ai_model = false;
+    let mut invalid_ai_device = false;
     if let Some(object) = value.as_object_mut() {
         let invalid_demucs = object.get("demucsModel").is_some_and(|stored| {
             stored
@@ -310,14 +349,29 @@ pub fn load_settings(path: &Path, default_save_dir: PathBuf) -> AppSettings {
             );
             invalid_ai_model = true;
         }
+        let invalid_device = object.get("aiDevice").is_some_and(|stored| {
+            stored
+                .as_str()
+                .is_none_or(|value| !matches!(value, "auto" | "cpu" | "cuda"))
+        });
+        if invalid_device {
+            object.insert("aiDevice".into(), serde_json::Value::String("auto".into()));
+            invalid_ai_device = true;
+        }
     }
     match serde_json::from_value::<AppSettings>(value) {
-        Ok(settings) if matches!(settings.version, 1 | 2 | SETTINGS_VERSION) => {
+        Ok(settings) if matches!(settings.version, 1 | 2 | 3 | SETTINGS_VERSION) => {
             let mut settings = migrate_settings(settings, default_save_dir);
             if invalid_ai_model {
                 settings.warning = Some(match settings.warning.take() {
                     Some(existing) => format!("{existing}；AI 模型设置无效，已恢复默认模型"),
                     None => "AI 模型设置无效，已恢复默认模型".into(),
+                });
+            }
+            if invalid_ai_device {
+                settings.warning = Some(match settings.warning.take() {
+                    Some(existing) => format!("{existing}；AI 计算设备设置无效，已恢复自动选择"),
+                    None => "AI 计算设备设置无效，已恢复自动选择".into(),
                 });
             }
             settings
@@ -354,7 +408,7 @@ pub fn save_settings(path: &Path, settings: &AppSettings) -> Result<(), String> 
     file.sync_all()
         .map_err(|error| format!("同步设置失败: {error}"))?;
     drop(file);
-    fs::rename(&temp_path, path).map_err(|error| format!("保存设置失败: {error}"))?;
+    replace_file(&temp_path, path).map_err(|error| format!("保存设置失败: {error}"))?;
     if let Ok(directory) = OpenOptions::new().read(true).open(parent) {
         let _ = directory.sync_all();
     }
@@ -387,7 +441,7 @@ mod tests {
         )
         .expect("write v1");
         let restored = load_settings(&path, std::path::PathBuf::from("/tmp/default"));
-        assert_eq!(restored.version, 3);
+        assert_eq!(restored.version, 4);
         assert_eq!(restored.save_dir, std::path::PathBuf::from("/tmp/keep"));
         assert_eq!(restored.definition, DefinitionPreference::P720);
         assert!(!restored.notify_download_complete);
@@ -412,7 +466,7 @@ mod tests {
         )
         .expect("write v2");
         let restored = load_settings(&path, std::path::PathBuf::from("/tmp/default"));
-        assert_eq!(restored.version, 3);
+        assert_eq!(restored.version, 4);
         assert!(restored.notify_media_complete);
         assert!(restored.notify_youtube_result);
         assert!(!restored.notify_download_complete);
@@ -431,7 +485,28 @@ mod tests {
         assert_eq!(settings.save_dir, std::path::PathBuf::from("/tmp/default"));
         assert!(settings.notify_download_complete);
         assert!(settings.notify_new_releases);
+        assert_eq!(settings.ai_device.as_str(), "auto");
         assert!(settings.warning.is_none());
+    }
+
+    #[test]
+    fn ai_device_patch_accepts_supported_values_and_rejects_unknown_values() {
+        let mut settings = AppSettings::default_for(std::path::PathBuf::from("/tmp/default"));
+
+        settings
+            .apply(UpdateSettings {
+                ai_device: Some("cuda".into()),
+                ..Default::default()
+            })
+            .expect("CUDA preference");
+        assert_eq!(settings.ai_device.as_str(), "cuda");
+
+        let result = settings.apply(UpdateSettings {
+            ai_device: Some("directml".into()),
+            ..Default::default()
+        });
+        assert!(result.is_err());
+        assert_eq!(settings.ai_device.as_str(), "cuda");
     }
 
     #[test]

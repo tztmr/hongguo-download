@@ -4,13 +4,14 @@ import { describe, expect, it, vi } from "vitest";
 import { useAppSettings, type AppSettingsDependencies, type AppSettingsPatch } from "./useAppSettings";
 
 const defaultSettings: AppSettings = {
-  version: 2,
+  version: 4,
   saveDir: "/Downloads/红果下载",
   definition: "auto",
   notifyDownloadComplete: true,
   notifyNewReleases: true,
   demucsModel: "htdemucs",
   whisperModel: "small",
+  aiDevice: "auto",
 };
 
 function dependencies(overrides: Partial<AppSettingsDependencies> = {}): AppSettingsDependencies {

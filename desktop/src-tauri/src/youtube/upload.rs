@@ -2,7 +2,7 @@ use super::{
     config::SecretString,
     models::{PrivacyStatus, ThumbnailState, UploadIntent, UploadResult, YouTubeJobStatus},
 };
-use crate::AppError;
+use crate::{platform_fs::replace_file, AppError};
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE},
     Client, Response, StatusCode,
@@ -677,7 +677,7 @@ fn save_checkpoint(path: &Path, value: &UploadCheckpoint) -> Result<(), AppError
         .and_then(|_| file.sync_all())
         .map_err(upload_io)?;
     drop(file);
-    fs::rename(temporary, path).map_err(upload_io)
+    replace_file(&temporary, path).map_err(upload_io)
 }
 
 fn checkpoint_write_options() -> OpenOptions {

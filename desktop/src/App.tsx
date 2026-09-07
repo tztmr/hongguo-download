@@ -80,7 +80,7 @@ const DEFAULT_RANK_BOARDS = [
 ];
 const liveMonitorApi = { fetchNewReleases };
 const previewSettings: AppSettings = {
-  version: 2,
+  version: 4,
   saveDir: "/Users/edking/Downloads/红果下载",
   definition: "auto",
   notifyDownloadComplete: true,
@@ -89,6 +89,7 @@ const previewSettings: AppSettings = {
   notifyYouTubeResult: true,
   demucsModel: "htdemucs",
   whisperModel: "small",
+  aiDevice: "auto",
   downloadProxy: "",
   downloadMirror: "",
 };

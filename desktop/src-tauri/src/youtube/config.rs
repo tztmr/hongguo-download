@@ -1,5 +1,5 @@
 use super::models::CredentialSummary;
-use crate::AppError;
+use crate::{platform_fs::replace_file, AppError};
 use serde::Deserialize;
 use serde_json::Value;
 #[cfg(unix)]
@@ -182,7 +182,7 @@ pub fn import_private(
             )
         })?;
     drop(file);
-    fs::rename(&temporary, &target).map_err(|error| {
+    replace_file(&temporary, &target).map_err(|error| {
         AppError::with_cause(
             "OAUTH_CONFIG_WRITE_FAILED",
             "无法发布 OAuth 凭证",

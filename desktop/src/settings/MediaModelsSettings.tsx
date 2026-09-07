@@ -48,6 +48,18 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
   return (
     <section className="settings-section media-model-settings" id="settings-media">
       <div className="settings-section-title settings-component-header"><div><h2>媒体处理模型</h2><p>为音频和字幕选择默认模型，新建任务时使用。</p></div><span className="model-local-badge">本机处理</span></div>
+      <fieldset className="model-choice-group"><legend>计算设备 <span>AI</span></legend><p>自动模式会优先使用通过运行测试的 NVIDIA CUDA，失败时改用 CPU。</p>
+        <div className="model-options">
+          {([
+            ["auto", "自动选择计算设备", "推荐；CUDA 可用时使用显卡，否则使用 CPU"],
+            ["cpu", "仅使用 CPU", "兼容性最好，处理速度通常较慢"],
+            ["cuda", "NVIDIA GPU", "要求已安装匹配的 Windows CUDA 运行环境和驱动"],
+          ] as const).map(([value, label, hint]) => <label className={(settings.aiDevice || "auto") === value ? "selected" : ""} key={value}>
+            <input type="radio" name="aiDevice" checked={(settings.aiDevice || "auto") === value} onChange={() => void model.update({ aiDevice: value })} />
+            <span><strong>{label}</strong><small>{value}</small><em>{hint}</em></span>
+          </label>)}
+        </div>
+      </fieldset>
       <div className="model-choice-grid">
         <fieldset className="model-choice-group"><legend>音频分离 <span>Demucs</span></legend><p>分离人声与背景音乐，生成去背景音乐视频。</p>
           <div className="model-options">
