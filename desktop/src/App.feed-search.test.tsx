@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { DiscoveryPage, RankPage, SearchPage, SeriesItem } from "./types";
@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   fetchHealth: vi.fn(),
   fetchRank: vi.fn(),
   fetchSearch: vi.fn(),
+  fetchSearchAll: vi.fn(),
   fetchSeriesMetrics: vi.fn(),
   fetchNewReleases: vi.fn(),
   getAiComponents: vi.fn(),
@@ -81,6 +82,7 @@ function rankPage(items: SeriesItem[], nextOffset: number, hasMore: boolean): Ra
     hasMore,
     board: "ranklist_hot_sc",
     boardName: "推荐榜",
+    releaseType: "all",
     boards: [
       { id: "ranklist_hot_sc", name: "推荐榜" },
       { id: "ranklist_hot_play_sc", name: "热播榜" },
@@ -114,6 +116,7 @@ describe("App feed and search controls", () => {
     apiMocks.fetchDiscoveryMore.mockResolvedValue(discoveryPage([], 0, false));
     apiMocks.fetchRank.mockResolvedValue(rankPage([series(1)], 0, false));
     apiMocks.fetchSearch.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
+    apiMocks.fetchSearchAll.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
   });
 
   it("shows search modes and keeps only an exact title in matching mode", async () => {
@@ -123,13 +126,19 @@ describe("App feed and search controls", () => {
       nextOffset: 0,
       nextPassback: "",
     };
-    apiMocks.fetchSearch.mockResolvedValue(searchResult);
+    apiMocks.fetchSearchAll.mockResolvedValue(searchResult);
     const view = render(<App />);
 
     const form = view.container.querySelector(".search-form");
     expect(form).not.toBeNull();
     const search = within(form as HTMLElement);
     expect(search.getByRole("button", { name: "模糊识别" })).toBeTruthy();
+    const contentSegment = view.container.querySelector(".content-segment");
+    expect(contentSegment).not.toBeNull();
+    expect(within(contentSegment as HTMLElement).getByRole("button", { name: "真人剧" })).toBeTruthy();
+    expect(within(contentSegment as HTMLElement).getByRole("button", { name: "漫剧" })).toBeTruthy();
+    expect(within(contentSegment as HTMLElement).getByRole("button", { name: "全部" })).toBeTruthy();
+    expect(within(contentSegment as HTMLElement).getByRole("button", { name: "AI剧" })).toHaveProperty("disabled", true);
     fireEvent.click(search.getByRole("button", { name: "匹配识别" }));
     fireEvent.change(search.getByRole("textbox", { name: "搜索短剧或漫剧" }), { target: { value: "天下第一纨绔" } });
     fireEvent.click(search.getByRole("button", { name: "搜索" }));
@@ -139,10 +148,69 @@ describe("App feed and search controls", () => {
     expect(view.queryByText("天下第一纨绔3")).toBeNull();
   });
 
+  it("opens search immediately from rank and restores cached results after visiting settings", async () => {
+    let resolve!: (page: SearchPage) => void;
+    apiMocks.fetchSearchAll.mockReturnValue(new Promise((done) => { resolve = done; }));
+    const view = render(<App />);
+    const navigation = within(view.getByRole("navigation", { name: "主导航" }));
+    fireEvent.click(navigation.getByRole("button", { name: "榜单" }));
+    await waitFor(() => expect(apiMocks.fetchRank).toHaveBeenCalledWith(expect.objectContaining({ type: "all" })));
+    const input = view.getByRole("textbox", { name: "搜索短剧或漫剧" });
+    fireEvent.change(input, { target: { value: "缓存剧" } });
+    fireEvent.submit(input.closest("form")!);
+    expect(view.getByRole("heading", { name: "搜索结果" })).toBeTruthy();
+    expect(view.getByRole("status", { name: "正在加载内容" })).toBeTruthy();
+    await waitFor(() => expect(apiMocks.fetchSearchAll).toHaveBeenCalledTimes(1));
+    await act(async () => resolve({ items: [series(501, "缓存剧")], hasMore: false, nextOffset: 0, nextPassback: "" }));
+    await waitFor(() => expect(view.getAllByText("缓存剧").length).toBeGreaterThan(0));
+    fireEvent.click(navigation.getByRole("button", { name: "设置" }));
+    expect(view.getByRole("heading", { name: "设置" })).toBeTruthy();
+    fireEvent.click(navigation.getByRole("button", { name: "搜索" }));
+    await waitFor(() => expect(view.getAllByText("缓存剧").length).toBeGreaterThan(0));
+    expect(apiMocks.fetchSearchAll).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(view.getByRole("textbox", { name: "搜索短剧或漫剧" }));
+    expect(view.queryByRole("status", { name: "正在加载内容" })).toBeNull();
+  });
+
+  it("defaults to all and does not use a new input draft for pagination", async () => {
+    apiMocks.fetchSearchAll.mockImplementation(async (_query, cursor) => ({
+      items: cursor ? [series(999, "第二页")] : Array.from({ length: 20 }, (_, i) => series(600 + i, `原词 ${i}`)),
+      hasMore: !cursor, nextOffset: 20, nextPassback: cursor ? "" : "next",
+    }));
+    const view = render(<App />);
+    const types = within(view.container.querySelector(".content-segment") as HTMLElement);
+    expect(types.getByRole("button", { name: "全部" }).getAttribute("aria-pressed")).toBe("true");
+    const input = view.getByRole("textbox", { name: "搜索短剧或漫剧" });
+    fireEvent.change(input, { target: { value: "原词" } }); fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(20));
+    fireEvent.change(input, { target: { value: "尚未提交" } });
+    fireEvent.click(view.getByRole("button", { name: "加载更多" }));
+    await waitFor(() => expect(apiMocks.fetchSearchAll).toHaveBeenLastCalledWith("原词", "next"));
+    expect(view.getByText("第二页")).toBeTruthy();
+  });
+
+  it("searches both supported content types from the all option", async () => {
+    apiMocks.fetchSearchAll.mockResolvedValue({
+      items: [series(301, "全部搜索结果")],
+      hasMore: false,
+      nextOffset: 0,
+      nextPassback: "",
+    });
+    const view = render(<App />);
+    const form = view.container.querySelector(".search-form") as HTMLElement;
+    const contentSegment = view.container.querySelector(".content-segment") as HTMLElement;
+    fireEvent.click(within(contentSegment).getByRole("button", { name: "全部" }));
+    fireEvent.change(within(form).getByRole("textbox", { name: "搜索短剧或漫剧" }), { target: { value: "全部搜索" } });
+    fireEvent.click(within(form).getByRole("button", { name: "搜索" }));
+
+    await waitFor(() => expect(apiMocks.fetchSearchAll).toHaveBeenCalledWith("全部搜索", ""));
+    expect(view.getAllByText("全部搜索结果").length).toBeGreaterThan(0);
+  });
+
   it("shows a visible loading layer while a search replaces existing cards", async () => {
     let resolveSearch!: (value: SearchPage) => void;
     const pending = new Promise<SearchPage>((resolve) => { resolveSearch = resolve; });
-    apiMocks.fetchSearch.mockReturnValue(pending);
+    apiMocks.fetchSearchAll.mockReturnValue(pending);
     const view = render(<App />);
     await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(1));
 
@@ -151,12 +219,13 @@ describe("App feed and search controls", () => {
     fireEvent.click(within(form).getByRole("button", { name: "搜索" }));
 
     expect(view.getByRole("status", { name: "正在加载内容" })).toBeTruthy();
-    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(1));
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(0));
     resolveSearch({ items: [series(2, "新剧")], hasMore: false, nextOffset: 0, nextPassback: "" });
     await waitFor(() => expect(view.getAllByText("新剧").length).toBeGreaterThan(0));
   });
 
-  it("fills the home feed to twenty unique items on first load", async () => {
+  it("shows the first home page without waiting for categories or extra pages", async () => {
+    apiMocks.fetchCategoryGroups.mockReturnValue(new Promise(() => {}));
     apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(
       Array.from({ length: 6 }, (_, index) => series(index + 1)),
       6,
@@ -171,7 +240,9 @@ describe("App feed and search controls", () => {
       .mockResolvedValueOnce(discoveryPage(Array.from({ length: 6 }, (_, index) => series(index + 37)), 42, false));
     const view = render(<App />);
 
-    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(20));
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(6));
+    expect(apiMocks.fetchDiscoveryMore).not.toHaveBeenCalled();
+    expect(view.queryByRole("status", { name: "正在加载内容" })).toBeNull();
     expect(view.getByRole("heading", { name: "首页推荐" })).toBeTruthy();
     expect(view.queryByText("资讯 21")).toBeNull();
 
@@ -183,8 +254,8 @@ describe("App feed and search controls", () => {
     });
     fireEvent.scroll(scroller);
 
-    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(40));
-    expect(view.getAllByText("资讯 40").length).toBeGreaterThan(0);
+    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(26));
+    expect(view.getAllByText("资讯 26").length).toBeGreaterThan(0);
   });
 
   it("numbers twenty initial rank items and auto-loads the next page near the bottom", async () => {
@@ -209,6 +280,21 @@ describe("App feed and search controls", () => {
 
     await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(40));
     expect(view.getByText("NO.40")).toBeTruthy();
+  });
+
+  it("requests the selected hot-search board for the manju rank", async () => {
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "榜单" }));
+    await waitFor(() => expect(apiMocks.fetchRank).toHaveBeenCalled());
+
+    fireEvent.click(view.getByRole("button", { name: "漫剧" }));
+    await waitFor(() => expect(apiMocks.fetchRank.mock.lastCall?.[0]).toMatchObject({ type: "comic_series_rank" }));
+
+    fireEvent.click(view.getByRole("button", { name: "热搜榜" }));
+    await waitFor(() => expect(apiMocks.fetchRank.mock.lastCall?.[0]).toMatchObject({
+      board: "ranklist_hot_search_sc",
+      type: "comic_series_rank",
+    }));
   });
 
   it("continues rank numbering past NO.100 until upstream ends", async () => {

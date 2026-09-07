@@ -219,6 +219,8 @@ struct InstalledCredentials {
     auth_uri: Option<String>,
     token_uri: Option<String>,
     redirect_uris: Option<Vec<String>>,
+    #[serde(rename = "auth_provider_x509_cert_url")]
+    _auth_provider_x509_cert_url: Option<String>,
     #[serde(rename = "project_id")]
     _project_id: Option<String>,
 }
@@ -311,5 +313,12 @@ mod tests {
                 .code,
             "OAUTH_DESKTOP_CREDENTIAL_REQUIRED"
         );
+    }
+
+    #[test]
+    fn accepts_standard_google_desktop_metadata_fields() {
+        let json = r#"{"installed":{"client_id":"synthetic.apps.googleusercontent.com","client_secret":"secret","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","redirect_uris":["http://localhost"],"project_id":"synthetic-project","auth_provider_x509_cert_url":"https://www.googleapis.com/oauth2/v1/certs"}}"#;
+        let config = OAuthClientConfig::from_json(json).unwrap();
+        assert_eq!(config.client_id_suffix(), "…nt.com");
     }
 }

@@ -88,6 +88,8 @@ pub struct ComponentManager {
     installing: AtomicBool,
     in_use: Mutex<HashSet<String>>,
     min_free_bytes: Mutex<Option<u64>>,
+    download_proxy: Mutex<Option<Url>>,
+    download_mirror: Mutex<Option<Url>>,
 }
 
 impl ComponentManager {
@@ -103,6 +105,8 @@ impl ComponentManager {
             installing: AtomicBool::new(false),
             in_use: Mutex::new(HashSet::new()),
             min_free_bytes: Mutex::new(None),
+            download_proxy: Mutex::new(None),
+            download_mirror: Mutex::new(None),
         })
     }
 
@@ -187,6 +191,50 @@ impl ComponentManager {
             .ok()
             .and_then(|store| store.items.into_iter().find(|item| item.id == id))
             .map(|item| item.version)
+    }
+
+    /// Applies the user-selected network route to future component downloads.
+    /// The API sidecar receives the same proxy at startup for video/API traffic.
+    pub fn configure_network(
+        &self,
+        proxy: Option<&str>,
+        mirror: Option<&str>,
+    ) -> Result<(), AppError> {
+        let proxy = proxy
+            .map(Url::parse)
+            .transpose()
+            .map_err(|_| AppError::new("AI_COMPONENT_NETWORK_INVALID", "代理地址无效"))?;
+        if let Some(url) = &proxy {
+            if !is_allowed_proxy_url(url) {
+                return Err(AppError::new(
+                    "AI_COMPONENT_NETWORK_INVALID",
+                    "代理地址无效，请填写 http://、https://、socks5:// 或 socks5h:// 地址",
+                ));
+            }
+        }
+        let mirror = mirror
+            .map(Url::parse)
+            .transpose()
+            .map_err(|_| AppError::new("AI_COMPONENT_NETWORK_INVALID", "国内镜像地址无效"))?;
+        if let Some(url) = &mirror {
+            if !is_allowed_mirror_url(url) {
+                return Err(AppError::new(
+                    "AI_COMPONENT_NETWORK_INVALID",
+                    "国内镜像地址无效，请填写公开的 HTTPS 目录地址",
+                ));
+            }
+        }
+        *self
+            .download_proxy
+            .lock()
+            .map_err(|_| AppError::new("AI_COMPONENT_NETWORK_INVALID", "无法更新下载网络设置"))? =
+            proxy;
+        *self
+            .download_mirror
+            .lock()
+            .map_err(|_| AppError::new("AI_COMPONENT_NETWORK_INVALID", "无法更新下载网络设置"))? =
+            mirror;
+        Ok(())
     }
 
     pub fn resolve_installed(&self, id: &str) -> Result<InstalledComponent, AppError> {
@@ -305,9 +353,34 @@ impl ComponentManager {
         }
         emit(progress, id, "downloading", 20.0);
         let part_path = self.root.join(DOWNLOADS_DIR).join(format!("{id}.part"));
-        stream_download(&release.url, &part_path)?;
+        let download_url = self.resolve_download_url(&release.url);
+        let proxy = self
+            .download_proxy
+            .lock()
+            .map_err(|_| AppError::new("AI_COMPONENT_DOWNLOAD_FAILED", "无法读取下载网络设置"))?
+            .clone();
+        let reuse_verified_part = fs::symlink_metadata(&part_path).is_ok_and(|metadata| {
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() == release.download_bytes
+        }) && sha256_file(&part_path)
+            .is_ok_and(|actual| actual == release.sha256);
+        if !reuse_verified_part {
+            stream_download(
+                &download_url,
+                &part_path,
+                release.download_bytes,
+                id,
+                progress,
+                proxy.as_ref(),
+            )?;
+        }
         emit(progress, id, "verifying", 45.0);
-        let actual = sha256_file(&part_path)?;
+        let actual = if reuse_verified_part {
+            release.sha256.clone()
+        } else {
+            sha256_file(&part_path)?
+        };
         if actual != release.sha256 {
             let _ = fs::remove_file(&part_path);
             return Err(AppError::new(
@@ -330,6 +403,13 @@ impl ComponentManager {
         fs::create_dir_all(&staging).map_err(|error| {
             AppError::with_cause("AI_COMPONENT_IO", "无法创建组件解压目录", error.to_string())
         })?;
+        struct StagingCleanup(PathBuf);
+        impl Drop for StagingCleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _staging_cleanup = StagingCleanup(staging.clone());
         extract_archive(part_path, &staging)?;
         let entrypoint = staging.join(&release.entrypoint);
         verify_entrypoint(&staging, &entrypoint)?;
@@ -417,6 +497,36 @@ impl ComponentManager {
         }
         unix_free_bytes(&self.root)
     }
+
+    fn resolve_download_url(&self, original: &str) -> String {
+        let mirror = self
+            .download_mirror
+            .lock()
+            .ok()
+            .and_then(|value| value.clone());
+        let Some(mirror) = mirror else {
+            return original.to_string();
+        };
+        let Ok(source) = Url::parse(original) else {
+            return original.to_string();
+        };
+        let Some(filename) = source
+            .path_segments()
+            .and_then(|mut segments| segments.next_back())
+        else {
+            return original.to_string();
+        };
+        let mut path = mirror.path().to_string();
+        if !path.ends_with('/') {
+            path.push('/');
+        }
+        path.push_str(filename);
+        let mut target = mirror;
+        target.set_path(&path);
+        target.set_query(None);
+        target.set_fragment(None);
+        target.to_string()
+    }
 }
 
 pub fn parse_manifest(json: &str) -> Result<ComponentManifest, AppError> {
@@ -503,24 +613,57 @@ fn is_allowed_download_url(url: &Url) -> bool {
     }
 }
 
-fn component_download_client() -> Result<reqwest::blocking::Client, AppError> {
-    reqwest::blocking::Client::builder()
+fn is_allowed_proxy_url(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+        && url.host_str().is_some()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn is_allowed_mirror_url(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
+fn component_download_client(proxy: Option<&Url>) -> Result<reqwest::blocking::Client, AppError> {
+    let mut builder = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| {
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if is_safe_component_redirect(attempt.previous().last(), attempt.url()) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }));
+    if let Some(proxy) = proxy {
+        let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|error| {
             AppError::with_cause(
-                "AI_COMPONENT_DOWNLOAD_FAILED",
-                "无法创建下载客户端",
+                "AI_COMPONENT_NETWORK_INVALID",
+                "代理地址无效",
                 error.to_string(),
             )
-        })
+        })?;
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(|error| {
+        AppError::with_cause(
+            "AI_COMPONENT_DOWNLOAD_FAILED",
+            "无法创建下载客户端",
+            error.to_string(),
+        )
+    })
+}
+
+fn is_safe_component_redirect(previous: Option<&Url>, current: &Url) -> bool {
+    previous.is_some_and(|url| url.scheme() == "https") && current.scheme() == "https"
 }
 
 fn valid_id(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(first) if first.is_ascii_lowercase() || first.is_ascii_digit())
-        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
         && value.len() <= 64
 }
 
@@ -634,7 +777,14 @@ fn persist_installed(root: &Path, store: &InstalledStore) -> Result<(), AppError
     Ok(())
 }
 
-fn stream_download(url: &str, part_path: &Path) -> Result<(), AppError> {
+fn stream_download(
+    url: &str,
+    part_path: &Path,
+    expected_bytes: u64,
+    id: &str,
+    progress: &mut dyn FnMut(ComponentProgress),
+    proxy: Option<&Url>,
+) -> Result<(), AppError> {
     let parsed = Url::parse(url)
         .map_err(|_| AppError::new("AI_COMPONENT_DOWNLOAD_FAILED", "组件下载地址无效"))?;
     if !is_allowed_download_url(&parsed) {
@@ -643,7 +793,7 @@ fn stream_download(url: &str, part_path: &Path) -> Result<(), AppError> {
             "组件必须通过 HTTPS 下载",
         ));
     }
-    let client = component_download_client()?;
+    let client = component_download_client(proxy)?;
     let mut response = client.get(url).send().map_err(|error| {
         AppError::with_cause(
             "AI_COMPONENT_DOWNLOAD_FAILED",
@@ -654,7 +804,7 @@ fn stream_download(url: &str, part_path: &Path) -> Result<(), AppError> {
     if response.status().is_redirection() || !response.status().is_success() {
         return Err(AppError::new(
             "AI_COMPONENT_DOWNLOAD_FAILED",
-            "媒体组件下载失败",
+            format!("媒体组件下载失败（HTTP {}）", response.status()),
         ));
     }
     if let Some(parent) = part_path.parent() {
@@ -665,7 +815,10 @@ fn stream_download(url: &str, part_path: &Path) -> Result<(), AppError> {
     let mut file = File::create(part_path).map_err(|error| {
         AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
     })?;
-    let mut buffer = [0u8; 8192];
+    let total_bytes = response.content_length().unwrap_or(expected_bytes).max(1);
+    let mut downloaded_bytes = 0u64;
+    let mut last_percent = 20.0;
+    let mut buffer = [0u8; 256 * 1024];
     loop {
         let read = response.read(&mut buffer).map_err(|error| {
             AppError::with_cause(
@@ -680,6 +833,12 @@ fn stream_download(url: &str, part_path: &Path) -> Result<(), AppError> {
         file.write_all(&buffer[..read]).map_err(|error| {
             AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
         })?;
+        downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
+        let percent = 20.0 + (downloaded_bytes as f64 / total_bytes as f64).min(1.0) * 25.0;
+        if percent - last_percent >= 1.0 || percent >= 45.0 {
+            emit(progress, id, "downloading", percent);
+            last_percent = percent;
+        }
     }
     file.flush().map_err(|error| {
         AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
@@ -836,12 +995,6 @@ fn contain_extracted_tree(destination: &Path) -> Result<(), AppError> {
                     error.to_string(),
                 )
             })?;
-            if metadata.file_type().is_symlink() {
-                return Err(AppError::new(
-                    "AI_COMPONENT_EXTRACT_FAILED",
-                    "组件归档包含非法路径",
-                ));
-            }
             let canonical = fs::canonicalize(&path).map_err(|_| {
                 AppError::new("AI_COMPONENT_EXTRACT_FAILED", "组件归档包含非法路径")
             })?;
@@ -850,6 +1003,25 @@ fn contain_extracted_tree(destination: &Path) -> Result<(), AppError> {
                     "AI_COMPONENT_EXTRACT_FAILED",
                     "组件归档包含非法路径",
                 ));
+            }
+            if metadata.file_type().is_symlink() {
+                let target = fs::read_link(&path).map_err(|_| {
+                    AppError::new("AI_COMPONENT_EXTRACT_FAILED", "组件归档包含非法路径")
+                })?;
+                if target.is_absolute()
+                    || target.components().any(|component| {
+                        matches!(
+                            component,
+                            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                        )
+                    })
+                {
+                    return Err(AppError::new(
+                        "AI_COMPONENT_EXTRACT_FAILED",
+                        "组件归档包含非法路径",
+                    ));
+                }
+                continue;
             }
             if metadata.is_dir() {
                 walk(root, &path)?;
@@ -1483,6 +1655,66 @@ mod tests {
             fs::read(fixture.root.join("runtime/1/hongguo-ai")).unwrap(),
             b"previous-version"
         );
+        assert!(fs::read_dir(fixture.root.join(".downloads"))
+            .unwrap()
+            .all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("runtime-stage-")));
+    }
+
+    #[test]
+    fn contained_relative_symlink_archive_installs_successfully() {
+        // Production mutation caught: rejecting PyInstaller's relative aliases even
+        // when both the link and canonical target remain inside the component root.
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new();
+        let source = fixture.root.join("contained-symlink-src");
+        fs::create_dir_all(source.join("internal/lib")).unwrap();
+        fs::write(source.join("hongguo-ai"), b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(source.join("hongguo-ai"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(source.join("internal/lib/real.dylib"), b"library").unwrap();
+        symlink("lib/real.dylib", source.join("internal/alias.dylib")).unwrap();
+        let archive = fixture.root.join("contained-symlink.tar");
+        assert!(Command::new("/usr/bin/tar")
+            .current_dir(&source)
+            .args(["-cf", &archive.to_string_lossy(), "."])
+            .status()
+            .unwrap()
+            .success());
+        let bytes = fs::read(archive).unwrap();
+        let sha = sha256_hex(&bytes);
+        let manager = fixture.manager(&sha);
+
+        let status = manager
+            .install_bytes("runtime", &bytes, &sha, |_| {})
+            .unwrap();
+
+        assert!(status.installed);
+        let alias = fixture.root.join("runtime/1/internal/alias.dylib");
+        assert!(fs::symlink_metadata(&alias)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(alias).unwrap(), b"library");
+    }
+
+    #[test]
+    fn verified_partial_archive_is_reused_without_downloading_again() {
+        // Production mutation caught: truncating a complete verified .part file
+        // after a post-download failure and forcing the user to download it again.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let server = MockHttp::serve(good.clone());
+        let manager = fixture.manager_with(&sha, &server.url, "hongguo-ai", good.len() as u64);
+        fs::write(fixture.root.join(".downloads/runtime.part"), &good).unwrap();
+
+        let status = manager.install("runtime", |_| {}).unwrap();
+
+        assert!(status.installed);
+        assert_eq!(server.request_count(), 0);
     }
 
     #[test]
@@ -1576,7 +1808,7 @@ mod tests {
     #[test]
     fn download_client_does_not_follow_http_redirects() {
         // Production mutation caught: following https redirects onto an http URL.
-        let client = component_download_client().unwrap();
+        let client = component_download_client(None).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let thread = thread::spawn(move || {
@@ -1598,6 +1830,46 @@ mod tests {
             .unwrap();
         assert!(result.status().is_redirection());
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn component_redirects_only_follow_https_to_https() {
+        let previous = Url::parse("https://github.com/tztmr/hongguo-download").unwrap();
+        let https = Url::parse("https://release-assets.githubusercontent.com/file").unwrap();
+        let http = Url::parse("http://127.0.0.1/file").unwrap();
+        assert!(is_safe_component_redirect(Some(&previous), &https));
+        assert!(!is_safe_component_redirect(Some(&previous), &http));
+        assert!(!is_safe_component_redirect(None, &https));
+    }
+
+    #[test]
+    fn network_configuration_resolves_component_mirror_and_accepts_socks_proxy() {
+        let fixture = Fixture::new();
+        let manager =
+            fixture.manager("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        manager
+            .configure_network(
+                Some("socks5://127.0.0.1:7890"),
+                Some("https://mirror.example/ai-components"),
+            )
+            .unwrap();
+        assert_eq!(
+            manager.resolve_download_url("https://github.com/org/release/runtime.tar.gz"),
+            "https://mirror.example/ai-components/runtime.tar.gz"
+        );
+        let proxy = manager.download_proxy.lock().unwrap().clone();
+        assert_eq!(proxy.as_ref().and_then(Url::host_str), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn network_configuration_rejects_insecure_mirror() {
+        let fixture = Fixture::new();
+        let manager =
+            fixture.manager("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        let error = manager
+            .configure_network(None, Some("http://mirror.example/ai"))
+            .unwrap_err();
+        assert_eq!(error.code, "AI_COMPONENT_NETWORK_INVALID");
     }
 
     #[test]

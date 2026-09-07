@@ -87,7 +87,7 @@ async def root():
             "duanju_categories": "/api/duanju/discovery/categories",
             "duanju_discovery": "/api/duanju/discovery?content_type=drama|manju",
             "duanju_discovery_more": "/api/duanju/discovery/more?cell_id=..&offset=..&session_id=..&plan_id=..&filter_ids=..",
-            "duanju_rank": "/api/duanju/rank?board=ranklist_hot_sc&limit=20",
+            "duanju_rank": "/api/duanju/rank?board=ranklist_hot_sc&type=playlet|comic_series_rank|ai_playlet|all&limit=20",
             "duanju_new_releases": "/api/duanju/new-releases?type=playlet&limit=20",
             "--- PSeries 无签名短剧 ---": "",
             "pseries_detail": "/api/pseries/detail?pseries_id=7657524778131000344",

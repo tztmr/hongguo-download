@@ -2,11 +2,10 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
-from types import ModuleType
 from unittest.mock import patch
 
 from ai_worker.protocol import WorkerError, WorkerRequest
-from ai_worker.separate import _demucs_separator, separate_audio
+from ai_worker.separate import separate_audio
 
 
 def write_silence(path: Path, seconds: float = 1.0):
@@ -49,44 +48,21 @@ class SeparationTests(unittest.TestCase):
             self.assertEqual(percents, sorted(percents))
             self.assertEqual(percents[-1], 100)
 
-    def test_packaged_runtime_invokes_demucs_in_process_instead_of_reexecuting_itself(self):
-        # Production mutation caught: a frozen PyInstaller executable cannot use
-        # `sys.executable -m demucs.separate`; that re-enters the worker CLI.
+    def test_default_separator_receives_live_progress_callback(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "input.wav"
-            write_silence(source)
-            output = root / "output"
-            output.mkdir()
-            model_root = root / "model"
-            model_root.mkdir()
-            demucs_package = ModuleType("demucs")
-            demucs_cli = ModuleType("demucs.separate")
+            request = self.request(Path(directory))
+            events = []
 
-            def fake_main(arguments):
-                self.assertIn("--repo", arguments)
-                nested = output / "htdemucs" / "input"
-                nested.mkdir(parents=True)
-                write_silence(nested / "vocals.wav")
-                write_silence(nested / "no_vocals.wav")
+            def backend(source, output, model, device, model_root, *, emit):
+                emit({"type": "progress", "stage": "分离第 1/2 段", "percent": 40})
+                paths = output / "vocals.wav", output / "background_music.wav"
+                for path in paths:
+                    write_silence(path)
+                return paths
 
-            demucs_cli.main = fake_main
-            with (
-                patch.dict(
-                    "sys.modules",
-                    {"demucs": demucs_package, "demucs.separate": demucs_cli},
-                ),
-                patch(
-                    "subprocess.run",
-                    side_effect=AssertionError("frozen worker must not re-execute itself"),
-                ),
-            ):
-                vocals, background = _demucs_separator(
-                    source, output, "htdemucs", "cpu", model_root
-                )
-
-            self.assertTrue(vocals.is_file())
-            self.assertTrue(background.is_file())
+            with patch("ai_worker.separate._demucs_separator", side_effect=backend):
+                separate_audio(request, emit=events.append)
+            self.assertIn(40, [event["percent"] for event in events])
 
     def test_missing_or_zero_length_stem_is_rejected(self):
         # Production mutation caught: treating incomplete Demucs output as success.

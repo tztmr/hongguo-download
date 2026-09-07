@@ -2,6 +2,7 @@ import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { getDownloadStats, type DownloadManagerState } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
+import type { YouTubeModel } from "../youtube/types";
 import type { MediaJobsModel } from "../media/types";
 import { DownloadManagerPage } from "./DownloadManagerPage";
 
@@ -112,6 +113,10 @@ function mediaFixture(overrides: Partial<MediaJobsModel> = {}): MediaJobsModel {
     startAudioSeparation: vi.fn().mockResolvedValue({ id: "separation" }),
     startSubtitleExtraction: vi.fn().mockResolvedValue({ id: "subtitles" }),
     cancel: vi.fn().mockResolvedValue(undefined),
+    pause: vi.fn().mockResolvedValue(undefined),
+    resume: vi.fn().mockResolvedValue(undefined),
+    deleteJob: vi.fn().mockResolvedValue(undefined),
+    hasMergedVideo: vi.fn().mockResolvedValue(false),
     retry: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -135,6 +140,21 @@ function managerFixture(): DownloadManager {
     clearCompleted: vi.fn(),
   };
 }
+
+it("filters download tasks by failures and title and resets filters for notifications", () => {
+  const props = { manager: managerFixture(), media: mediaFixture(), saveDir: "/Downloads", onOpenDir: vi.fn(), onChooseDir: vi.fn(), onRevealPath: vi.fn() };
+  const view = render(<DownloadManagerPage {...props} />);
+  fireEvent.click(within(view.getByRole("group", { name: "下载状态筛选" })).getByRole("button", { name: /有失败/ }));
+  expect(view.getAllByTestId("download-batch-row").map((row) => row.textContent)).toEqual([expect.stringContaining("天下第一纨绔")]);
+  fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), { target: { value: "女子" } });
+  expect(view.getByRole("heading", { name: "没有匹配的下载任务" })).toBeTruthy();
+  fireEvent.click(view.getByRole("button", { name: "显示全部下载任务" }));
+  expect(view.getAllByTestId("download-batch-row")).toHaveLength(2);
+  fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), { target: { value: "无匹配" } });
+  view.rerender(<DownloadManagerPage {...props} focusTarget={{ kind: "downloadBatch", id: "batch-b" }} />);
+  expect(view.getAllByTestId("download-batch-row")).toHaveLength(2);
+  expect(view.getByRole("searchbox", { name: "搜索下载任务" }).getAttribute("value")).toBe("");
+});
 
 describe("DownloadManagerPage", () => {
   it("renders one row per series and switches the fixed episode detail", () => {
@@ -182,7 +202,7 @@ describe("DownloadManagerPage", () => {
     expect(manager.clearCompleted).toHaveBeenCalledTimes(1);
   });
 
-  it("enables merge only for completed batches and routes media cancel/retry", async () => {
+  it("enables merge only for completed batches and routes media pause/retry", async () => {
     const manager = managerFixture();
     const media = mediaFixture();
     const view = render(
@@ -193,20 +213,33 @@ describe("DownloadManagerPage", () => {
     fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
     fireEvent.click(view.getByRole("button", { name: "合并视频" }));
     expect(view.getByRole("dialog", { name: "合并视频" })).toBeTruthy();
-    expect((view.getByRole("checkbox", { name: "转为 H.264" }) as HTMLInputElement).checked).toBe(true);
+    expect((view.getByRole("combobox", { name: "合并方式" }) as HTMLSelectElement).value).toBe("auto");
     fireEvent.click(view.getByRole("button", { name: "开始合并" }));
     await waitFor(() => expect(media.startMerge).toHaveBeenCalledWith(
       expect.objectContaining({ id: "batch-b" }),
-      expect.objectContaining({ transcodeH264: true, conflictPolicy: "failIfExists" }),
+      expect.objectContaining({ mode: "auto", quality: "high", conflictPolicy: "failIfExists" }),
     ));
 
     fireEvent.click(view.getByRole("tab", { name: "媒体处理" }));
-    fireEvent.click(view.getByRole("button", { name: "取消" }));
-    expect(media.cancel).toHaveBeenCalledWith("media-running");
+    const runningRow = view.container.querySelector<HTMLElement>('[data-focus-id="media-running"]');
+    expect(runningRow).toBeTruthy();
+    fireEvent.click(within(runningRow as HTMLElement).getByRole("button", { name: "暂停" }));
+    expect(media.pause).toHaveBeenCalledWith("media-running");
     fireEvent.click(view.getByRole("button", { name: "重试" }));
     expect(media.retry).toHaveBeenCalledWith("media-failed");
     fireEvent.click(view.getByRole("tab", { name: "YouTube 上传" }));
     expect(view.getByText("尚无上传任务")).toBeTruthy();
+  });
+
+  it("shows 已合并 and blocks the dialog when the filesystem reports a merged MP4", async () => {
+    const media = mediaFixture({ hasMergedVideo: vi.fn().mockResolvedValue(true) });
+    const view = render(
+      <DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    await waitFor(() => expect((view.getByRole("button", { name: "已合并" }) as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(view.getByRole("button", { name: "已合并" }));
+    expect(view.queryByRole("dialog", { name: "合并视频" })).toBeNull();
   });
 
   it("routes the two AI buttons to independent jobs and offers a matching merged video", async () => {
@@ -227,5 +260,69 @@ describe("DownloadManagerPage", () => {
     fireEvent.click(view.getByRole("button", { name: "开始提取" }));
     await waitFor(() => expect(media.startSubtitleExtraction).toHaveBeenCalledTimes(1));
     expect(media.startAudioSeparation).toHaveBeenCalledTimes(1);
+  });
+  it("filters media by status and title, then clears an empty search", () => {
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={mediaFixture()} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("tab", { name: "媒体处理" }));
+    expect(view.getAllByTestId("media-job-row")).toHaveLength(4);
+    fireEvent.click(view.getByRole("button", { name: /需处理/ }));
+    expect(view.getAllByTestId("media-job-row")).toHaveLength(1);
+    expect(view.getByText("合并失败，可重试")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: /全部任务/ }));
+    fireEvent.change(view.getByRole("searchbox", { name: "搜索媒体任务" }), { target: { value: "女子爱财" } });
+    expect(view.getAllByTestId("media-job-row")).toHaveLength(1);
+    fireEvent.change(view.getByRole("searchbox"), { target: { value: "没有这部剧" } });
+    expect(view.getByText("没有匹配的媒体任务")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "清除筛选" }));
+    expect(view.getAllByTestId("media-job-row")).toHaveLength(4);
+  });
+
+  it("keeps saved series titles after download records are removed and shows action errors", async () => {
+    const media = mediaFixture();
+    media.jobs = [{ ...media.jobs[3], mergeRequest: { title: "保留的剧名" } }];
+    media.retry = vi.fn().mockRejectedValue(new Error("暂时无法重试"));
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("tab", { name: "媒体处理" }));
+    expect(view.getByText("保留的剧名")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(view.getByRole("alert").textContent).toBe("暂时无法重试"));
+  });
+
+});
+
+
+describe("YouTube separated upload source", () => {
+  const youtube = {
+    credential: { configured: true, clientIdSuffix: "test" },
+    activeChannelId: "channel", channels: [], jobs: [],
+    loading: false, busy: false, startUpload: vi.fn(),
+  } as unknown as YouTubeModel;
+
+  it.each([
+    ["completed merged separation after merge record deletion", "merged", "completed", "book-b", "/Downloads", true],
+    ["prefers separated MP4 over the original merge", "merged", "completed", "book-b", "/Downloads", true, true],
+    ["legacy separation linked to retained merge", "merged", "completed", undefined, undefined, true, true],
+    ["episode separation", "episodes", "completed", "book-b", "/Downloads", false],
+    ["unfinished separation", "merged", "running", "book-b", "/Downloads", false],
+    ["another book in same directory", "merged", "completed", "other", "/Downloads", false],
+    ["same book in another directory", "merged", "completed", "book-b", "/Elsewhere", false],
+  ] as const)("handles %s", async (_, scope, status, bookId, seriesRoot, enabled, retainMerge: boolean = false) => {
+    const separation = {
+      ...mediaFixture().jobs[2], kind: "separateBackgroundMusic" as const, status,
+      aiRequest: { title: "女子爱财，取之有道", scope, model: "htdemucs" as const, bookId, seriesRoot },
+      inputs: [{ path: scope === "episodes" ? "/Downloads/e21.mp4" : "/Downloads/merged.mp4", sizeBytes: 100 }],
+      outputPath: "/Downloads/音频分离/人声.wav",
+      outputs: [{ episodeIndex: 1, kind: "noBackgroundMusicVideo" as const, path: "/Downloads/音频分离/去背景音乐.mp4" }],
+    };
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={mediaFixture({ jobs: [...(retainMerge ? [mediaFixture().jobs[2]] : []), separation] })}
+      youtube={youtube} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    const button = view.getByRole("button", { name: "上传 YouTube" }) as HTMLButtonElement;
+    await waitFor(() => expect(button.disabled).toBe(!enabled));
+    if (enabled) {
+      fireEvent.click(button);
+      expect(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByText("上传文件：/Downloads/音频分离/去背景音乐.mp4")).toBeTruthy();
+      expect(youtube.startUpload).not.toHaveBeenCalled();
+    }
   });
 });

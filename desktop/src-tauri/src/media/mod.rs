@@ -2,6 +2,7 @@ pub mod ai;
 pub mod components;
 pub mod merge;
 pub mod model;
+pub mod process_control;
 pub mod storage;
 pub mod tools;
 
@@ -12,15 +13,16 @@ pub use components::{
     InstalledComponent,
 };
 pub use merge::{
-    can_stream_copy, probe_media, run_merge, CancellationToken, MediaProbe, MergeProgress,
-    MergeResult, StreamSignature,
+    can_stream_copy, probe_media, run_merge, MediaProbe, MergeProgress, MergeResult,
+    StreamSignature,
 };
 pub use model::{
-    InputSnapshot, MediaJob, MediaJobKind, MediaJobOutput, MediaJobOutputKind, MediaJobRequest,
-    MediaJobScope, MediaJobStatus, MediaJobTransition, MediaJobsSnapshot, MergeConflictPolicy,
-    MergeInput, MergeRequest, StartAIJobRequest, StartMergeInput, StartMergeRequest,
-    ValidatedAIJobRequest, ValidatedMergeRequest,
+    InputSnapshot, MediaJob, MediaJobKind, MediaJobOutput, MediaJobOutputKind, MediaJobPauseOrigin,
+    MediaJobRequest, MediaJobScope, MediaJobStatus, MediaJobTransition, MediaJobsSnapshot,
+    MergeConflictPolicy, MergeInput, MergeRequest, StartAIJobRequest, StartMergeInput,
+    StartMergeRequest, ValidatedAIJobRequest, ValidatedMergeRequest,
 };
+pub use process_control::{CancellationToken, ProcessControl};
 pub use storage::MediaJobManager;
 pub use tools::MediaTools;
 
@@ -96,6 +98,11 @@ pub fn validate_merge_request(
         request.transcode_h264,
     );
 
+    let dedupe_key = match request.mode {
+        Some(mode) => format!("{dedupe_key}-{mode:?}-{:?}", request.quality),
+        None => dedupe_key,
+    };
+
     Ok(ValidatedMergeRequest {
         book_id: request.book_id.clone(),
         title: request.title.clone(),
@@ -104,6 +111,8 @@ pub fn validate_merge_request(
         output_file_name: request.output_file_name.clone(),
         inputs,
         transcode_h264: request.transcode_h264,
+        mode: request.mode,
+        quality: request.quality,
         conflict_policy: request.conflict_policy,
         dedupe_key,
     })
@@ -276,6 +285,11 @@ fn revalidate_merge_request(
         request.transcode_h264,
     );
 
+    let dedupe_key = match request.mode {
+        Some(mode) => format!("{dedupe_key}-{mode:?}-{:?}", request.quality),
+        None => dedupe_key,
+    };
+
     Ok(ValidatedMergeRequest {
         book_id: request.book_id.clone(),
         title: request.title.clone(),
@@ -284,6 +298,8 @@ fn revalidate_merge_request(
         output_file_name: request.output_file_name.clone(),
         inputs,
         transcode_h264: request.transcode_h264,
+        mode: request.mode,
+        quality: request.quality,
         conflict_policy: request.conflict_policy,
         dedupe_key,
     })
@@ -507,6 +523,8 @@ pub struct MediaJobService {
     event_sink: Arc<dyn MediaJobEventSink>,
     wake_sender: Option<mpsc::Sender<()>>,
     running: Arc<Mutex<Option<(String, CancellationToken)>>>,
+    pending_removals: Arc<Mutex<HashSet<String>>>,
+    merge_request_lock: Mutex<()>,
     shutting_down: Arc<AtomicBool>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
@@ -538,30 +556,28 @@ impl MediaJobService {
             .any(|job| job.status == MediaJobStatus::Queued);
         let (wake_sender, wake_receiver) = mpsc::channel();
         let running = Arc::new(Mutex::new(None));
+        let pending_removals = Arc::new(Mutex::new(HashSet::new()));
         let shutting_down = Arc::new(AtomicBool::new(false));
-        let worker_manager = manager.clone();
-        let worker_running = running.clone();
-        let worker_event_sink = event_sink.clone();
-        let worker_shutting_down = shutting_down.clone();
+        let worker_context = MediaWorkerContext {
+            manager: manager.clone(),
+            executor,
+            ai_executor,
+            event_sink: event_sink.clone(),
+            running: running.clone(),
+            pending_removals: pending_removals.clone(),
+            shutting_down: shutting_down.clone(),
+        };
         let worker = thread::Builder::new()
             .name("media-job-worker".into())
-            .spawn(move || {
-                worker_loop(
-                    worker_manager,
-                    executor,
-                    ai_executor,
-                    worker_event_sink,
-                    worker_running,
-                    worker_shutting_down,
-                    wake_receiver,
-                )
-            })
+            .spawn(move || worker_loop(worker_context, wake_receiver))
             .expect("media worker thread should start");
         let service = Self {
             manager,
             event_sink,
             wake_sender: Some(wake_sender),
             running,
+            pending_removals,
+            merge_request_lock: Mutex::new(()),
             shutting_down,
             worker: Mutex::new(Some(worker)),
         };
@@ -612,7 +628,17 @@ impl MediaJobService {
     }
 
     pub fn start_merge(&self, request: StartMergeRequest) -> Result<MediaJob, AppError> {
-        let validated = validate_merge_request(&request)?;
+        let _guard = self.merge_request_lock.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
+        if self.has_merged_video(&request.series_root)? {
+            return Err(AppError::new(
+                "MERGE_OUTPUT_EXISTS",
+                "已存在合并视频，请先移走或删除后再合并",
+            ));
+        }
+        let mut validated = validate_merge_request(&request)?;
+        validated.conflict_policy = MergeConflictPolicy::FailIfExists;
         let job = self.manager.enqueue_merge(validated)?;
         safe_emit(&self.event_sink, job.clone());
         self.wake_worker();
@@ -646,10 +672,141 @@ impl MediaJobService {
         self.manager.job(job_id)
     }
 
+    pub fn pause(&self, job_id: &str) -> Result<MediaJob, AppError> {
+        let running = self.running.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
+        let current = self.manager.job(job_id)?;
+        let job = match current.status {
+            MediaJobStatus::Queued => self.manager.pause_queued(job_id)?,
+            MediaJobStatus::Running => {
+                let token = running
+                    .as_ref()
+                    .filter(|(running_id, _)| running_id == job_id)
+                    .map(|(_, token)| token)
+                    .ok_or_else(|| {
+                        AppError::new(
+                            "MEDIA_JOB_INVALID_TRANSITION",
+                            "媒体任务当前状态不允许该操作",
+                        )
+                    })?;
+                token.pause()?;
+                match self.manager.pause_running(job_id) {
+                    Ok(job) => job,
+                    Err(error) => {
+                        let _ = token.resume();
+                        return Err(error);
+                    }
+                }
+            }
+            _ => {
+                return Err(AppError::new(
+                    "MEDIA_JOB_INVALID_TRANSITION",
+                    "媒体任务当前状态不允许该操作",
+                ))
+            }
+        };
+        drop(running);
+        safe_emit(&self.event_sink, job.clone());
+        Ok(job)
+    }
+
+    pub fn resume(&self, job_id: &str) -> Result<MediaJob, AppError> {
+        let running = self.running.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
+        let current = self.manager.job(job_id)?;
+        let (job, wake_worker) = match (current.status, current.pause_origin) {
+            (MediaJobStatus::Paused, Some(MediaJobPauseOrigin::Queued)) => {
+                (self.manager.resume_queued(job_id)?, true)
+            }
+            (MediaJobStatus::Paused, Some(MediaJobPauseOrigin::Running)) => {
+                let token = running
+                    .as_ref()
+                    .filter(|(running_id, _)| running_id == job_id)
+                    .map(|(_, token)| token)
+                    .ok_or_else(|| {
+                        AppError::new(
+                            "MEDIA_JOB_INVALID_TRANSITION",
+                            "媒体任务当前状态不允许该操作",
+                        )
+                    })?;
+                token.resume()?;
+                match self.manager.resume_running(job_id) {
+                    Ok(job) => (job, false),
+                    Err(error) => {
+                        let _ = token.pause();
+                        return Err(error);
+                    }
+                }
+            }
+            _ => {
+                return Err(AppError::new(
+                    "MEDIA_JOB_INVALID_TRANSITION",
+                    "媒体任务当前状态不允许该操作",
+                ))
+            }
+        };
+        drop(running);
+        safe_emit(&self.event_sink, job.clone());
+        if wake_worker {
+            self.wake_worker();
+        }
+        Ok(job)
+    }
+
+    pub fn delete(&self, job_id: &str) -> Result<(), AppError> {
+        let running = self.running.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
+        let current = self.manager.job(job_id)?;
+        let is_active_process = current.status == MediaJobStatus::Running
+            || (current.status == MediaJobStatus::Paused
+                && current.pause_origin == Some(MediaJobPauseOrigin::Running));
+        if is_active_process {
+            let token = running
+                .as_ref()
+                .filter(|(running_id, _)| running_id == job_id)
+                .map(|(_, token)| token)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "MEDIA_JOB_INVALID_TRANSITION",
+                        "媒体任务当前状态不允许该操作",
+                    )
+                })?;
+            if token.is_paused() {
+                token.resume()?;
+            }
+            self.pending_removals
+                .lock()
+                .map_err(|_| {
+                    AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+                })?
+                .insert(job_id.to_string());
+            token.cancel();
+        } else {
+            self.manager.remove(job_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn has_merged_video(&self, series_root: &Path) -> Result<bool, AppError> {
+        has_merged_video_in_series(series_root)
+    }
+
     pub fn retry(&self, job_id: &str) -> Result<MediaJob, AppError> {
         let original_job = self.manager.job(job_id)?;
         let job = if original_job.kind == MediaJobKind::Merge {
+            let _guard = self.merge_request_lock.lock().map_err(|_| {
+                AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+            })?;
             let original = self.manager.merge_request(job_id)?;
+            if self.has_merged_video(&original.series_root)? {
+                return Err(AppError::new(
+                    "MERGE_OUTPUT_EXISTS",
+                    "已存在合并视频，请先移走或删除后再合并",
+                ));
+            }
             let revalidated = revalidate_merge_request(&original)?;
             self.manager.retry_merge(job_id, revalidated)?
         } else {
@@ -686,15 +843,26 @@ impl Drop for MediaJobService {
     }
 }
 
-fn worker_loop(
+struct MediaWorkerContext {
     manager: Arc<MediaJobManager>,
     executor: Arc<dyn MergeExecutor>,
     ai_executor: Arc<dyn AIExecutor>,
     event_sink: Arc<dyn MediaJobEventSink>,
     running: Arc<Mutex<Option<(String, CancellationToken)>>>,
+    pending_removals: Arc<Mutex<HashSet<String>>>,
     shutting_down: Arc<AtomicBool>,
-    wake_receiver: mpsc::Receiver<()>,
-) {
+}
+
+fn worker_loop(context: MediaWorkerContext, wake_receiver: mpsc::Receiver<()>) {
+    let MediaWorkerContext {
+        manager,
+        executor,
+        ai_executor,
+        event_sink,
+        running,
+        pending_removals,
+        shutting_down,
+    } = context;
     while wake_receiver.recv().is_ok() {
         loop {
             if shutting_down.load(AtomicOrdering::Acquire) {
@@ -752,6 +920,13 @@ fn worker_loop(
                     if progress.terminal {
                         return;
                     }
+                    if pending_removals
+                        .lock()
+                        .map(|pending| pending.contains(&progress_job_id))
+                        .unwrap_or(true)
+                    {
+                        return;
+                    }
                     match progress_manager.update_progress(
                         &progress_job_id,
                         progress.stage,
@@ -788,6 +963,19 @@ fn worker_loop(
                     ))
                 }
             }));
+
+            let remove_after_stop = pending_removals
+                .lock()
+                .map(|pending| pending.contains(&job.id))
+                .unwrap_or(false);
+            if remove_after_stop {
+                let _ = manager.remove(&job.id);
+                if let Ok(mut pending) = pending_removals.lock() {
+                    pending.remove(&job.id);
+                }
+                clear_running(&running, &job.id);
+                continue;
+            }
 
             let progress_error = progress_failure
                 .lock()
@@ -831,6 +1019,41 @@ fn worker_loop(
             }
         }
     }
+}
+
+fn has_merged_video_in_series(series_root: &Path) -> Result<bool, AppError> {
+    let canonical_root = fs::canonicalize(series_root).map_err(output_invalid)?;
+    if !fs::metadata(&canonical_root)
+        .map_err(output_invalid)?
+        .is_dir()
+    {
+        return Err(output_invalid("series root is not a directory"));
+    }
+    let merged_dir = canonical_root.join("合并视频");
+    let metadata = match fs::symlink_metadata(&merged_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(output_invalid(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(output_invalid("merge output directory is unsafe"));
+    }
+    for entry in fs::read_dir(&merged_dir).map_err(output_invalid)? {
+        let entry = entry.map_err(output_invalid)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(output_invalid)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        if entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn clear_running(running: &Mutex<Option<(String, CancellationToken)>>, completed_job_id: &str) {
@@ -926,6 +1149,7 @@ mod tests {
         match status {
             MediaJobStatus::Queued => "queued",
             MediaJobStatus::Running => "running",
+            MediaJobStatus::Paused => "paused",
             MediaJobStatus::Completed => "completed",
             MediaJobStatus::Failed => "failed",
             MediaJobStatus::Cancelled => "cancelled",
@@ -1249,6 +1473,8 @@ mod tests {
                 output_file_name: format!("{book_id}.mp4"),
                 inputs,
                 transcode_h264: true,
+                mode: None,
+                quality: model::MergeQuality::High,
                 conflict_policy: MergeConflictPolicy::FailIfExists,
             }
         }
@@ -1656,6 +1882,8 @@ mod tests {
         );
         let input = fixture.write_input("retry.mp4", b"retry");
         let mut request = fixture.request("book-retry", vec![input]);
+        request.mode = Some(model::MergeMode::Auto);
+        request.quality = model::MergeQuality::Compact;
         request.title = "原始标题".into();
         request.output_file_name = "原始输出.mp4".into();
         request.transcode_h264 = false;
@@ -2151,5 +2379,107 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("private panic"));
+    }
+
+    #[test]
+    fn service_pauses_and_resumes_queued_and_running_jobs() {
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let (started_tx, started_rx) = mpsc::channel();
+        let service = MediaJobService::new(
+            manager,
+            Arc::new(CancellingExecutor {
+                started: started_tx,
+            }),
+            Arc::new(RecordingSink::default()),
+        );
+        let running = service
+            .start_merge(fixture.request(
+                "pause-running",
+                vec![fixture.write_input("pause-running.mp4", b"running")],
+            ))
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let queued = service
+            .start_merge(fixture.request(
+                "pause-queued",
+                vec![fixture.write_input("pause-queued.mp4", b"queued")],
+            ))
+            .unwrap();
+
+        let queued_paused = service.pause(&queued.id).unwrap();
+        assert_eq!(queued_paused.status, MediaJobStatus::Paused);
+        assert_eq!(
+            queued_paused.pause_origin,
+            Some(MediaJobPauseOrigin::Queued)
+        );
+        let queued_resumed = service.resume(&queued.id).unwrap();
+        assert_eq!(queued_resumed.status, MediaJobStatus::Queued);
+
+        let running_paused = service.pause(&running.id).unwrap();
+        assert_eq!(running_paused.status, MediaJobStatus::Paused);
+        assert_eq!(
+            running_paused.pause_origin,
+            Some(MediaJobPauseOrigin::Running)
+        );
+        let running_resumed = service.resume(&running.id).unwrap();
+        assert_eq!(running_resumed.status, MediaJobStatus::Running);
+        service.cancel(&running.id).unwrap();
+    }
+
+    #[test]
+    fn deleting_running_job_removes_record_after_worker_stops_and_keeps_source() {
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let (started_tx, started_rx) = mpsc::channel();
+        let service = MediaJobService::new(
+            manager,
+            Arc::new(CancellingExecutor {
+                started: started_tx,
+            }),
+            Arc::new(RecordingSink::default()),
+        );
+        let input = fixture.write_input("delete-running.mp4", b"keep-source");
+        let job = service
+            .start_merge(fixture.request("delete-running", vec![input.clone()]))
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        service.delete(&job.id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.snapshot().jobs.iter().any(|item| item.id == job.id) {
+            assert!(Instant::now() < deadline, "deleted job record remained");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(fs::read(input.path).unwrap(), b"keep-source");
+    }
+
+    #[test]
+    fn merged_mp4_blocks_new_merge_until_file_is_removed() {
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let service = MediaJobService::new(
+            manager,
+            Arc::new(ImmediateExecutor),
+            Arc::new(RecordingSink::default()),
+        );
+        let merged_dir = fixture.series.join("合并视频");
+        fs::create_dir(&merged_dir).unwrap();
+        let existing = merged_dir.join("existing.MP4");
+        fs::write(&existing, b"merged").unwrap();
+        let input = fixture.write_input("guard-input.mp4", b"input");
+        let request = fixture.request("guard", vec![input]);
+
+        assert!(service.has_merged_video(&fixture.series).unwrap());
+        assert_eq!(
+            service.start_merge(request.clone()).unwrap_err().code,
+            "MERGE_OUTPUT_EXISTS"
+        );
+        fs::remove_file(existing).unwrap();
+        assert!(!service.has_merged_video(&fixture.series).unwrap());
+        assert_eq!(
+            service.start_merge(request).unwrap().status,
+            MediaJobStatus::Queued
+        );
     }
 }

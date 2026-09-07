@@ -17,10 +17,12 @@ const seriesA: SeriesItem = {
   firstVid: "",
   contentTypeCode: 1,
   episodeCount: 4,
+  durationSeconds: 3723,
   abstract: "",
   score: "",
   category: "真人剧",
   author: "",
+  onlineTime: 1_787_760_360,
   rankTags: [],
 };
 
@@ -54,6 +56,11 @@ describe("download model", () => {
       abstract: seriesA.abstract,
       category: seriesA.category,
       contentTypeCode: seriesA.contentTypeCode,
+      episodeCount: seriesA.episodeCount,
+      durationSeconds: seriesA.durationSeconds,
+      author: seriesA.author,
+      onlineTime: seriesA.onlineTime,
+      releaseType: seriesA.releaseType,
     });
   });
 
@@ -78,7 +85,7 @@ describe("download model", () => {
     const first = enqueueEpisodes(initial, seriesA, episodes.slice(0, 2), "auto", ids("first"), 1000);
     const second = enqueueEpisodes(first.state, seriesA, episodes.slice(1, 3), "auto", ids("second"), 2000);
 
-    expect(initial.concurrency).toBe(5);
+    expect(initial.concurrency).toBe(8);
     expect(second.state.batches).toHaveLength(1);
     expect(second.state.batches[0].items.map((item) => item.itemId)).toEqual(["e1", "e2", "e3"]);
     expect(second.added).toBe(1);

@@ -25,6 +25,7 @@ export type DownloadAdapter = {
     title: string;
     episodeTitle: string;
     definition: string;
+    series: DownloadBatch["series"];
   }): Promise<{ taskId: string; path: string; definition: string; bytes: number }>;
   subscribeProgress(listener: (progress: DownloadProgress) => void): Promise<() => void>;
 };
@@ -38,6 +39,13 @@ type UseDownloadManagerOptions = {
   onBatchCompleted?: (batch: DownloadBatch) => Promise<void> | void;
 };
 
+const MAX_AUTO_RETRIES = 3;
+const AUTO_RETRY_DELAYS_MS = [1_000, 3_000, 8_000] as const;
+
+function isRetryableDownloadError(error: string) {
+  return !/(?:HTTP\s*(?:400|404|422)|内容过小|视频解密失败|item_id.*无效)/i.test(error);
+}
+
 export function useDownloadManager({ adapter, storage, initialState, enabled = true, definition = "auto", onBatchCompleted }: UseDownloadManagerOptions) {
   const [loaded] = useState(() => (initialState ? { state: initialState } : loadDownloadState(storage)));
   const [state, setState] = useState(loaded.state);
@@ -47,6 +55,8 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
   const mountedRef = useRef(true);
   const activeRef = useRef(new Map<string, Promise<void>>());
   const cursorRef = useRef(0);
+  const retryAttemptsRef = useRef(new Map<string, number>());
+  const retryTimersRef = useRef(new Map<string, number>());
   const persistTimerRef = useRef<number | undefined>(undefined);
   const completionClaimedRef = useRef(new Set<string>());
   const onBatchCompletedRef = useRef(onBatchCompleted);
@@ -88,6 +98,45 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
     [replaceState],
   );
 
+  const clearRetryTimer = useCallback((itemId: string) => {
+    const timer = retryTimersRef.current.get(itemId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      retryTimersRef.current.delete(itemId);
+    }
+  }, []);
+
+  const scheduleAutomaticRetry = useCallback((itemId: string, error: string) => {
+    const previousAttempts = retryAttemptsRef.current.get(itemId) || 0;
+    const nextAttempt = previousAttempts + 1;
+    if (nextAttempt > MAX_AUTO_RETRIES || !isRetryableDownloadError(error)) {
+      retryAttemptsRef.current.delete(itemId);
+      commit({ type: "mark-error", itemId, error });
+      return;
+    }
+
+    retryAttemptsRef.current.set(itemId, nextAttempt);
+    commit({
+      type: "mark-error",
+      itemId,
+      error: `自动重试中（第 ${nextAttempt}/${MAX_AUTO_RETRIES} 次）：${error}`,
+    });
+    clearRetryTimer(itemId);
+    const timer = setTimeout(() => {
+      retryTimersRef.current.delete(itemId);
+      if (!mountedRef.current) return;
+      const current = stateRef.current.batches
+        .flatMap((batch) => batch.items)
+        .find((item) => item.id === itemId);
+      if (!current || current.status !== "error") {
+        retryAttemptsRef.current.delete(itemId);
+        return;
+      }
+      commit({ type: "retry-item", itemId });
+    }, AUTO_RETRY_DELAYS_MS[nextAttempt - 1]);
+    retryTimersRef.current.set(itemId, timer);
+  }, [clearRetryTimer, commit]);
+
   useEffect(() => {
     if (!enabled) return;
     mountedRef.current = true;
@@ -108,6 +157,8 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
     return () => {
       mountedRef.current = false;
       unsubscribe?.();
+      for (const timer of retryTimersRef.current.values()) clearTimeout(timer);
+      retryTimersRef.current.clear();
       if (persistTimerRef.current !== undefined) window.clearTimeout(persistTimerRef.current);
     };
   }, [adapter, commit, enabled]);
@@ -130,9 +181,11 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
           title: batch.title,
           episodeTitle: item.episodeTitle,
           definition: item.definition,
+          series: batch.series,
         })
         .then((result) => {
           if (!mountedRef.current) return;
+          retryAttemptsRef.current.delete(item.id);
           commit({
             type: "mark-done",
             itemId: item.id,
@@ -144,7 +197,7 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
         })
         .catch((error) => {
           if (!mountedRef.current) return;
-          commit({ type: "mark-error", itemId: item.id, error: error instanceof Error ? error.message : String(error) });
+          scheduleAutomaticRetry(item.id, error instanceof Error ? error.message : String(error));
         })
         .finally(() => {
           activeRef.current.delete(item.id);
@@ -152,7 +205,7 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
         });
       activeRef.current.set(item.id, operation);
     }
-  }, [adapter, commit, enabled, schedulerTick, state]);
+  }, [adapter, commit, enabled, schedulerTick, scheduleAutomaticRetry, state]);
 
   const enqueue = useCallback(
     (series: SeriesItem, episodes: EpisodeItem[]) => {
@@ -164,6 +217,23 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
   );
 
   const stats = useMemo(() => getDownloadStats(state), [state]);
+
+  const retryItem = useCallback((itemId: string) => {
+    clearRetryTimer(itemId);
+    retryAttemptsRef.current.delete(itemId);
+    commit({ type: "retry-item", itemId });
+  }, [clearRetryTimer, commit]);
+
+  const retryBatch = useCallback((batchId: string) => {
+    const batch = stateRef.current.batches.find((candidate) => candidate.id === batchId);
+    for (const item of batch?.items || []) {
+      if (item.status === "error") {
+        clearRetryTimer(item.id);
+        retryAttemptsRef.current.delete(item.id);
+      }
+    }
+    commit({ type: "retry-batch", batchId });
+  }, [clearRetryTimer, commit]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -194,8 +264,8 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
     setConcurrency: (value: number) => commit({ type: "set-concurrency", value }),
     pauseBatch: (batchId: string) => commit({ type: "pause-batch", batchId }),
     resumeBatch: (batchId: string) => commit({ type: "resume-batch", batchId }),
-    retryItem: (itemId: string) => commit({ type: "retry-item", itemId }),
-    retryBatch: (batchId: string) => commit({ type: "retry-batch", batchId }),
+    retryItem,
+    retryBatch,
     removeItem: (itemId: string) => commit({ type: "remove-item", itemId }),
     removeBatch: (batchId: string) => commit({ type: "remove-batch", batchId }),
     clearCompleted: () => commit({ type: "clear-completed" }),

@@ -172,8 +172,15 @@ async def collect_today_releases(
     limit: int = 20,
     now: datetime | None = None,
     cursor_store: CursorStore,
+    only_today: bool = True,
 ) -> dict:
-    """Collect one visible group while retaining over-fetched matching rows."""
+    """Collect one visible group while retaining over-fetched matching rows.
+
+    The live-action subscribe feed has a reliable daily schedule, while the
+    comic/AI new-release rank only exposes its latest ranked rows. Callers can
+    disable the calendar filter for the latter feed without changing cursor
+    handling or de-duplication.
+    """
 
     if limit < 1 or limit > 20:
         raise ValueError("limit must be between 1 and 20")
@@ -227,9 +234,13 @@ async def collect_today_releases(
             unique.append({**item, "series_id": series_id})
         if unique:
             enriched = await asyncio.gather(*(enrich(item) for item in unique))
-            matches.extend(
-                item for item in enriched if is_shanghai_today(item.get("online_time"), current)
-            )
+            if only_today:
+                matches.extend(
+                    item for item in enriched
+                    if is_shanghai_today(item.get("online_time"), current)
+                )
+            else:
+                matches.extend(enriched)
 
     matches.sort(
         key=lambda item: (_optional_int(item.get("online_time")) or 0, _series_id(item)),

@@ -8,6 +8,12 @@ const filters: Array<{ id: NewReleaseType; label: string }> = [
   { id: "ai_playlet", label: "AI剧" },
 ];
 
+const typeLabels: Record<NewReleaseType, string> = {
+  playlet: "真人剧",
+  comic_series_rank: "漫剧",
+  ai_playlet: "AI剧",
+};
+
 function count(value: number | undefined) {
   if (value === undefined) return "—";
   if (value >= 100_000_000) return `${Number((value / 100_000_000).toFixed(1))}亿`;
@@ -22,13 +28,14 @@ function onlineTime(value: number | undefined) {
 
 export function NewReleasesPage({ model, onSelect }: { model: NewReleaseMonitor; onSelect: (item: NewReleaseMonitor["items"][number]) => void }) {
   const emptyForCategory = model.items.length > 0 && model.filteredItems.length === 0;
+  const isDailyFeed = model.type === "playlet";
   return (
     <main className="monitor-page" data-testid="monitor-scroll">
       <header className="monitor-header">
         <div>
           <span>NEW RELEASE MONITOR</span>
           <h1>新剧监听</h1>
-          <p>仅显示北京时间今天上线的剧目 · 已收录 {model.items.length} 部</p>
+          <p>{isDailyFeed ? "仅显示北京时间今天上线的剧目" : "按新剧榜最新收录展示"} · 已收录 {model.items.length} 部</p>
         </div>
         <button type="button" className="secondary-button" onClick={() => void model.refresh()} disabled={model.loading}>{model.loading ? "刷新中…" : "立即刷新"}</button>
       </header>
@@ -42,14 +49,14 @@ export function NewReleasesPage({ model, onSelect }: { model: NewReleaseMonitor;
         </div>
       ) : null}
       {model.error ? <div className="inline-error">{model.error}</div> : null}
-      {!model.loading && !model.items.length ? <div className="empty-monitor"><h2>今天还没有新上线剧目</h2><p>已完整检查当前类型的上新列表，应用打开期间每 5 分钟继续检查</p></div> : null}
+      {!model.loading && !model.items.length ? <div className="empty-monitor"><h2>{isDailyFeed ? "今天还没有新上线剧目" : "当前暂无可用新剧"}</h2><p>已完整检查当前类型的上新列表，应用打开期间每 5 分钟继续检查</p></div> : null}
       {!model.loading && emptyForCategory ? <div className="empty-monitor"><h2>当前分类暂无剧目</h2><p>可以切换“全部”或其他详细分类</p></div> : null}
       <section className="monitor-grid">
         {model.filteredItems.map((item) => (
           <button type="button" className="monitor-card" key={`${item.contentTypeCode}-${item.seriesId}`} onClick={() => onSelect(item)}>
             <div className="monitor-cover"><Cover src={item.cover} title={item.title} /><span>上线 {onlineTime(item.onlineTime)}</span></div>
             <h2>{item.title}</h2>
-            <p>{item.episodeCount || "--"} 集 · {item.category || "其他"}</p>
+            <p>{typeLabels[model.type]} · {item.episodeCount || "--"} 集 · {item.category || "其他"}</p>
             <div className="monitor-metrics"><span>播放 {count(item.playCount)}</span><span>热度 {count(item.hotCount)}</span><span>收藏 {count(item.collectCount)}</span><span>点赞 {count(item.likeCount)}</span></div>
           </button>
         ))}

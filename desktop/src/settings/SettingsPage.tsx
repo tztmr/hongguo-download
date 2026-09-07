@@ -1,22 +1,23 @@
-import type { DefinitionPreference, DemucsModel, WhisperModel } from "../types";
+import { useState } from "react";
+import type { DefinitionPreference } from "../types";
 import type { UseAppSettingsResult } from "./useAppSettings";
 import type { YouTubeModel } from "../youtube/types";
 import { YouTubeSettings } from "../youtube/YouTubeSettings";
-
-function formatBytes(value?: number) {
-  if (value === undefined) return "未知";
-  if (value === 0) return "0 B";
-  const compact = (amount: number) => amount.toFixed(1).replace(/\.0$/, "");
-  if (value < 1024 * 1024) return `${compact(value / 1024)} KB`;
-  if (value < 1024 * 1024 * 1024) return `${compact(value / 1024 / 1024)} MB`;
-  return `${compact(value / 1024 / 1024 / 1024)} GB`;
-}
+import { MediaModelsSettings } from "./MediaModelsSettings";
 
 export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; youtube?: YouTubeModel }) {
+  const [proxyDraft, setProxyDraft] = useState<string | undefined>(undefined);
+  const [mirrorDraft, setMirrorDraft] = useState<string | undefined>(undefined);
   if (model.loading || !model.settings) {
     return <main className="settings-page loading-state">正在加载设置…</main>;
   }
   const settings = model.settings;
+  const saveNetworkSettings = () => {
+    void model.update({
+      downloadProxy: (proxyDraft ?? settings.downloadProxy ?? "").trim(),
+      downloadMirror: (mirrorDraft ?? settings.downloadMirror ?? "").trim(),
+    });
+  };
   const resolutions: Array<{ value: DefinitionPreference; label: string; hint: string }> = [
     { value: "auto", label: "自动最高", hint: "优先 1080p，不可用时自动降档" },
     { value: "1080p", label: "1080p", hint: "优先全高清" },
@@ -32,11 +33,25 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
       <header className="settings-header">
         <span>APP SETTINGS</span>
         <h1>设置</h1>
-        <p>下载配置保存在本机应用目录中</p>
+        <p>管理下载偏好、媒体模型与账号配置</p>
       </header>
+      <div className="settings-overview" aria-label="当前设置概览">
+        <a href="#settings-download"><span>默认画质</span><strong>{resolutions.find((item) => item.value === settings.definition)?.label}</strong><small>新任务自动使用</small></a>
+        <a href="#settings-media"><span>媒体组件</span><strong>{model.components.filter((item) => item.installed).length} / {model.components.length} 已就绪</strong><small>音频分离与字幕识别</small></a>
+        <a href="#settings-youtube"><span>YouTube 频道</span><strong>{youtube?.channels.find((item) => item.channelId === youtube.activeChannelId)?.title || "尚未连接"}</strong><small>最多 5 个并发上传</small></a>
+      </div>
+      <div className="settings-layout">
+      <nav className="settings-jump-nav" aria-label="设置分类">
+        <a href="#settings-download"><span>01</span>下载偏好<small>保存位置与画质</small></a>
+        <a href="#settings-notifications"><span>02</span>系统通知<small>任务完成与新剧提醒</small></a>
+        <a href="#settings-network"><span>03</span>下载网络<small>代理与镜像</small></a>
+        <a href="#settings-media"><span>04</span>媒体处理模型<small>安装与管理组件</small></a>
+        {youtube ? <a href="#settings-youtube"><span>05</span>YouTube<small>凭证与频道授权</small></a> : null}
+      </nav>
+      <div className="settings-content">
       {model.warning ? <div className="warning-banner">{model.warning}</div> : null}
 
-      <section className="settings-section">
+      <section className="settings-section" id="settings-download">
         <div className="settings-section-title">
           <div><h2>下载目录</h2><p>新启动的任务使用当前目录</p></div>
         </div>
@@ -68,7 +83,7 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
         </div>
       </section>
 
-      <section className="settings-section">
+      <section className="settings-section" id="settings-notifications">
         <div className="settings-section-title"><div><h2>系统通知</h2><p>{permissionCopy}</p></div></div>
         <div className="settings-toggle-list">
           <label>
@@ -90,53 +105,41 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
         </div>
       </section>
 
-      <section className="settings-section">
-        <div className="settings-section-title"><div><h2>媒体处理模型</h2><p>AI 运行环境和模型按需下载，不进入基础安装包</p></div></div>
-        <div className="resolution-options">
-          {(["htdemucs", "htdemucs_ft"] as DemucsModel[]).map((value) => (
-            <label className={(settings.demucsModel || "htdemucs") === value ? "selected" : ""} key={value}>
-              <input type="radio" name="demucsModel" value={value} checked={settings.demucsModel === value} onChange={() => void model.update({ demucsModel: value })} />
-              <strong>{value}</strong>
-              <span>{value === "htdemucs" ? "默认人声/伴奏分离" : "更高质量，体积更大"}</span>
-            </label>
-          ))}
+      <section className="settings-section" id="settings-network">
+        <div className="settings-section-title">
+          <div><h2>下载网络</h2><p>支持大陆直连、公开国内镜像和本机代理；AI 组件下载立即使用新配置</p></div>
         </div>
-        <div className="resolution-options" style={{ marginTop: 12 }}>
-          {(["small", "medium"] as WhisperModel[]).map((value) => (
-            <label className={(settings.whisperModel || "small") === value ? "selected" : ""} key={value}>
-              <input type="radio" name="whisperModel" value={value} checked={settings.whisperModel === value} onChange={() => void model.update({ whisperModel: value })} />
-              <strong>Whisper {value}</strong>
-              <span>{value === "small" ? "默认字幕识别" : "更准，速度更慢"}</span>
-            </label>
-          ))}
-        </div>
-        <div className="settings-toggle-list" style={{ marginTop: 16 }}>
-          {model.components.length ? model.components.map((item) => (
-            <article key={item.id} className="settings-component-card">
-              <div className="settings-component-row">
-                <div>
-                  <strong>{item.id}</strong>
-                  <p className="settings-component-meta">
-                    {item.installed ? `已安装 ${item.installedVersion || item.version}` : "未安装"} · 下载 {formatBytes(item.downloadBytes)} · 占用 {formatBytes(item.installedBytes)}
-                    {item.stage ? ` · ${item.stage} ${Math.round(item.percent || 0)}%` : ""}
-                  </p>
-                  {item.installedPath ? <code className="settings-component-path">{item.installedPath}</code> : null}
-                </div>
-                <div>
-                  <button type="button" className="secondary-button" onClick={() => {
-                    const approved = window.confirm(`安装 ${item.id}？\n下载：${formatBytes(item.downloadBytes)}\n安装后占用：${formatBytes(item.installedBytes)}`);
-                    if (approved) void model.installComponent(item.id);
-                  }}>安装 / 重下</button>
-                  <button type="button" className="secondary-button" onClick={() => void model.removeComponent(item.id)} disabled={item.inUse} aria-label="删除模型">
-                    删除模型
-                  </button>
-                </div>
-              </div>
-            </article>
-          )) : <p style={{ color: "var(--muted)", fontSize: 12 }}>尚未配置可安装的媒体组件清单</p>}
+        <div className="settings-network-form">
+          <label>
+            <span>代理地址</span>
+            <input
+              value={proxyDraft ?? settings.downloadProxy ?? ""}
+              onChange={(event) => setProxyDraft(event.target.value)}
+              placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
+              spellCheck={false}
+            />
+          </label>
+          <label>
+            <span>国内镜像地址（可选）</span>
+            <input
+              value={mirrorDraft ?? settings.downloadMirror ?? ""}
+              onChange={(event) => setMirrorDraft(event.target.value)}
+              placeholder="https://你的镜像域名/ai-components/"
+              spellCheck={false}
+            />
+          </label>
+          <div className="settings-network-actions">
+            <button type="button" className="primary-button" onClick={saveNetworkSettings}>保存网络设置</button>
+            <button type="button" className="secondary-button" onClick={() => { setProxyDraft(""); setMirrorDraft(""); void model.update({ downloadProxy: "", downloadMirror: "" }); }}>恢复直连</button>
+          </div>
+          <p className="settings-network-help">代理支持 HTTP、HTTPS、SOCKS5。视频/API 下载的代理在重启应用后生效；留空时使用系统代理环境。</p>
         </div>
       </section>
-      {youtube ? <YouTubeSettings model={youtube} /> : null}
+
+      <MediaModelsSettings model={model} />
+      {youtube ? <div id="settings-youtube"><YouTubeSettings model={youtube} /></div> : null}
+      </div>
+      </div>
     </main>
   );
 }

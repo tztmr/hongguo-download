@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { deriveBatchStatus, type DownloadBatch, type DownloadItem } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
-import { isCompletedBatch } from "../media/paths";
-import type { MediaJob, MediaJobsModel, MergeSubmitOptions } from "../media/types";
+import { completedMergeInputs, isCompletedBatch, seriesRootFromInputs } from "../media/paths";
+import type { MediaJobsModel, MergeSubmitOptions } from "../media/types";
 import type { MediaJobScope } from "../media/types";
 import type { AIComponentStatus, DemucsModel, WhisperModel } from "../types";
 import type { NotificationTarget } from "../notifications";
@@ -13,6 +13,7 @@ import { Cover } from "./Cover";
 import { AlertIcon, CheckIcon, ChevronLeftIcon, FolderIcon, PauseIcon, PlayIcon, RetryIcon, TrashIcon } from "./icons";
 import { MergeVideoDialog } from "./MergeVideoDialog";
 import { MediaScopeDialog } from "./MediaScopeDialog";
+import { MediaJobsPanel } from "./MediaJobsPanel";
 
 type ManagerSection = "downloads" | "media" | "youtube";
 
@@ -55,25 +56,6 @@ function batchProgress(batch: DownloadBatch) {
   return batch.items.reduce((sum, item) => sum + (item.status === "done" ? 100 : item.percent), 0) / batch.items.length;
 }
 
-function mediaStatusCopy(job: MediaJob) {
-  return {
-    queued: "排队中",
-    running: "处理中",
-    completed: "已完成",
-    failed: "失败",
-    cancelled: "已取消",
-    interrupted: "已中断",
-  }[job.status];
-}
-
-function mediaKindCopy(job: MediaJob) {
-  return {
-    merge: "合并视频",
-    separateBackgroundMusic: "分离背景音乐",
-    extractSubtitles: "提取字幕",
-  }[job.kind];
-}
-
 export function DownloadManagerPage({
   manager,
   media,
@@ -89,6 +71,17 @@ export function DownloadManagerPage({
   focusTarget,
 }: DownloadManagerPageProps) {
   const [section, setSection] = useState<ManagerSection>("downloads");
+  const [batchFilter, setBatchFilter] = useState("all");
+  const [batchQuery, setBatchQuery] = useState("");
+  const batchFilters = [
+    { id: "all", label: "全部", match: (_batch: DownloadBatch) => true },
+    { id: "active", label: "进行中", match: (batch: DownloadBatch) => ["running", "queued"].includes(deriveBatchStatus(batch)) },
+    { id: "paused", label: "已暂停", match: (batch: DownloadBatch) => deriveBatchStatus(batch) === "paused" },
+    { id: "done", label: "已完成", match: (batch: DownloadBatch) => deriveBatchStatus(batch) === "done" },
+    { id: "error", label: "有失败", match: (batch: DownloadBatch) => batch.items.some((item) => item.status === "error") },
+  ];
+  const visibleBatches = manager.state.batches.filter((batch) => batchFilters.find((filter) => filter.id === batchFilter)!.match(batch)
+    && batch.title.toLocaleLowerCase().includes(batchQuery.trim().toLocaleLowerCase()));
   const [selectedBatchId, setSelectedBatchId] = useState(manager.state.batches[0]?.id || "");
   const [detailOpen, setDetailOpen] = useState(false);
   const [mergingBatchId, setMergingBatchId] = useState<string | null>(null);
@@ -96,18 +89,42 @@ export function DownloadManagerPage({
   const [pendingInstall, setPendingInstall] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; scope: MediaJobScope; ids: string[] } | null>(null);
   const [installing, setInstalling] = useState(false);
   const [uploadingBatchId, setUploadingBatchId] = useState<string | null>(null);
+  const [selectedHasMergedVideo, setSelectedHasMergedVideo] = useState(false);
   const selectedBatch = manager.state.batches.find((batch) => batch.id === selectedBatchId) || manager.state.batches[0];
   const mergingBatch = manager.state.batches.find((batch) => batch.id === mergingBatchId) || null;
   const completedPaths = new Set((selectedBatch?.items || []).filter((item) => item.status === "done" && item.path).map((item) => item.path as string));
   const mergedPath = media.jobs.slice().reverse().find((job) =>
     job.kind === "merge" && job.status === "completed" && Boolean(job.outputPath)
       && job.inputs.some((input) => completedPaths.has(input.path)))?.outputPath || undefined;
+  const selectedSeriesRoot = selectedBatch && isCompletedBatch(selectedBatch)
+    ? seriesRootFromInputs(completedMergeInputs(selectedBatch))
+    : "";
   const noBackgroundPath = media.jobs.slice().reverse().find((job) =>
     job.kind === "separateBackgroundMusic" && job.status === "completed"
-      && job.inputs.some((input) => completedPaths.has(input.path) || input.path === mergedPath)
+      && job.aiRequest?.scope === "merged"
+      && (job.aiRequest.bookId && job.aiRequest.seriesRoot
+        ? job.aiRequest.bookId === selectedBatch?.bookId && job.aiRequest.seriesRoot === selectedSeriesRoot
+        : Boolean(mergedPath) && job.inputs.some((input) => input.path === mergedPath))
       && job.outputs?.some((output) => output.kind === "noBackgroundMusicVideo"))
     ?.outputs?.find((output) => output.kind === "noBackgroundMusicVideo")?.path;
   const uploadSourcePath = noBackgroundPath || mergedPath;
+  const uploadDisabledReason = !uploadSourcePath
+    ? "请先完成合并视频或整季背景音乐分离"
+    : !youtube?.credential.configured
+      ? "请先在设置中导入 YouTube OAuth 凭证"
+      : !youtube.activeChannelId ? "请先在设置中授权并选择 YouTube 频道" : undefined;
+  useEffect(() => {
+    let active = true;
+    if (!selectedSeriesRoot) {
+      setSelectedHasMergedVideo(false);
+      return () => { active = false; };
+    }
+    void media.hasMergedVideo(selectedSeriesRoot).then(
+      (exists) => { if (active) setSelectedHasMergedVideo(exists); },
+      () => { if (active) setSelectedHasMergedVideo(false); },
+    );
+    return () => { active = false; };
+  }, [media.hasMergedVideo, media.jobs, selectedSeriesRoot]);
   useEffect(() => {
     if (!selectedBatch && selectedBatchId) setSelectedBatchId("");
     else if (selectedBatch && selectedBatch.id !== selectedBatchId) setSelectedBatchId(selectedBatch.id);
@@ -116,6 +133,8 @@ export function DownloadManagerPage({
     if (!focusTarget) return;
     if (focusTarget.kind === "downloadBatch") {
       setSection("downloads");
+      setBatchFilter("all");
+      setBatchQuery("");
       if (manager.state.batches.some((batch) => batch.id === focusTarget.id)) {
         setSelectedBatchId(focusTarget.id);
         setDetailOpen(true);
@@ -193,10 +212,12 @@ export function DownloadManagerPage({
         </div>
         <div className="global-actions">
           <button type="button" className="secondary-button" onClick={onOpenDir}><FolderIcon />打开目录</button>
-          <button type="button" className="secondary-button" onClick={manager.clearCompleted} disabled={!hasCompletedBatch}><TrashIcon />清理已完成</button>
-          <button type="button" className="primary-button compact" onClick={manager.state.globallyPaused ? manager.resumeAll : manager.pauseAll}>
-            {manager.state.globallyPaused ? <PlayIcon /> : <PauseIcon />}{manager.state.globallyPaused ? "全部继续" : "全部暂停"}
-          </button>
+          {section === "downloads" ? <>
+            <button type="button" className="secondary-button" onClick={manager.clearCompleted} disabled={!hasCompletedBatch}><TrashIcon />清理已完成</button>
+            <button type="button" className="primary-button compact" onClick={manager.state.globallyPaused ? manager.resumeAll : manager.pauseAll}>
+              {manager.state.globallyPaused ? <PlayIcon /> : <PauseIcon />}{manager.state.globallyPaused ? "全部继续" : "全部暂停"}
+            </button>
+          </> : null}
         </div>
       </header>
 
@@ -231,12 +252,18 @@ export function DownloadManagerPage({
 
           <section className={`download-workspace ${detailOpen ? "detail-open" : ""}`}>
             <div className="batch-panel">
-              <div className="panel-title"><div><span className="title-marker" /><h2>批量任务</h2></div><span>共 {manager.state.batches.length} 个任务</span></div>
+              <div className="panel-title"><div><span className="title-marker" /><h2>批量任务</h2></div><span>显示 {visibleBatches.length} / {manager.state.batches.length} 个任务</span></div>
+              {manager.state.batches.length ? <div className="batch-filter-toolbar">
+                <input type="search" aria-label="搜索下载任务" placeholder="搜索已添加的剧名" value={batchQuery} onChange={(event) => setBatchQuery(event.target.value)} />
+                <div className="upload-filters" role="group" aria-label="下载状态筛选">{batchFilters.map((filter) => <button type="button" key={filter.id} aria-pressed={batchFilter === filter.id} className={batchFilter === filter.id ? "active" : ""} onClick={() => setBatchFilter(filter.id)}>{filter.label}<span>{manager.state.batches.filter(filter.match).length}</span></button>)}</div>
+              </div> : null}
               {!manager.state.batches.length ? (
                 <div className="download-empty"><div className="empty-download-icon"><FolderIcon size={26} /></div><h3>还没有下载任务</h3><p>从首页、搜索或榜单中选择剧集加入队列</p></div>
+              ) : !visibleBatches.length ? (
+                <div className="download-empty"><h3>没有匹配的下载任务</h3><p>试试其他状态或剧名</p><button type="button" className="secondary-button" onClick={() => { setBatchFilter("all"); setBatchQuery(""); }}>显示全部下载任务</button></div>
               ) : (
                 <div className="batch-list">
-                  {manager.state.batches.map((batch) => {
+                  {visibleBatches.map((batch) => {
                     const completed = batch.items.filter((item) => item.status === "done").length;
                     const failed = batch.items.filter((item) => item.status === "error").length;
                     const progress = batchProgress(batch);
@@ -275,14 +302,20 @@ export function DownloadManagerPage({
                       {selectedBatch.paused ? <PlayIcon /> : <PauseIcon />}{selectedBatch.paused ? "继续此任务" : "暂停此任务"}
                     </button>
                     <button type="button" className="secondary-button" onClick={() => manager.retryBatch(selectedBatch.id)} disabled={!selectedBatch.items.some((item) => item.status === "error")}><RetryIcon />重试失败项</button>
-                    <button type="button" className="primary-button" onClick={() => setMergingBatchId(selectedBatch.id)} disabled={!isCompletedBatch(selectedBatch)}>合并视频</button>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      title={selectedHasMergedVideo ? "已存在合并视频，请先移走或删除后再合并" : undefined}
+                      onClick={() => { if (!selectedHasMergedVideo) setMergingBatchId(selectedBatch.id); }}
+                      disabled={!isCompletedBatch(selectedBatch) || selectedHasMergedVideo}
+                    >{selectedHasMergedVideo ? "已合并" : "合并视频"}</button>
                     <button type="button" className="secondary-button" disabled={!isCompletedBatch(selectedBatch)} onClick={() => setMediaDialogKind("audioSeparation")}>分离背景音乐</button>
                     <button type="button" className="secondary-button" disabled={!isCompletedBatch(selectedBatch)} onClick={() => setMediaDialogKind("subtitleExtraction")}>提取字幕</button>
                     <button
                       type="button"
                       className="secondary-button"
-                      disabled={!uploadSourcePath || !youtube?.credential.configured || !youtube.activeChannelId}
-                      title={!uploadSourcePath ? "请先完成合并视频" : !youtube?.activeChannelId ? "请先在设置中授权并选择 YouTube 频道" : undefined}
+                      disabled={Boolean(uploadDisabledReason)}
+                      title={uploadDisabledReason}
                       onClick={() => setUploadingBatchId(selectedBatch.id)}
                     >上传 YouTube</button>
                   </div>
@@ -314,49 +347,12 @@ export function DownloadManagerPage({
       ) : null}
 
       {section === "media" ? (
-        <section className="media-job-panel" aria-label="媒体处理">
-          {!media.jobs.length ? (
-            <div className="download-empty"><h3>还没有媒体任务</h3><p>完成下载后，可以在任务详情中合并视频</p></div>
-          ) : (
-            <div className="media-job-list">
-              {media.jobs.map((job) => (
-                <article className={`media-job-row status-${job.status}`} data-testid="media-job-row" data-focus-id={job.id} key={job.id}>
-                  <div className="media-job-copy">
-                    <div className="media-job-title">
-                      <strong>{mediaKindCopy(job)}</strong>
-                      <span className={`status-${job.status}`}>{mediaStatusCopy(job)}</span>
-                    </div>
-                    <div className="progress-track" role="progressbar" aria-label={`${mediaKindCopy(job)}进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.status === "completed" ? 100 : job.percent)}><span style={{ width: `${job.status === "completed" ? 100 : job.percent}%` }} /></div>
-                    <small>{job.stage} · {Math.round(job.percent)}%</small>
-                    {job.outputPath ? <small>输出 {job.outputPath}</small> : null}
-                    {job.outputs?.map((output) => (
-                      <small className="media-output" key={`${output.kind}-${output.episodeIndex}-${output.path}`}>
-                        第 {output.episodeIndex} 集 · {output.kind === "vocals" ? "人声" : output.kind === "backgroundMusic" ? "背景音乐" : output.kind === "noBackgroundMusicVideo" ? "去背景音乐视频" : "SRT 字幕"}
-                        <button type="button" className="text-action" onClick={() => onRevealPath(output.path)}>定位</button>
-                      </small>
-                    ))}
-                    {job.kind === "separateBackgroundMusic" ? <small className="copyright-note">分离可能残留或失真，不保证规避 Content ID 或版权责任。</small> : null}
-                    {job.errorMessage ? <small className="error-copy">{job.errorMessage}</small> : null}
-                  </div>
-                  <div className="media-job-actions">
-                    {job.status === "running" ? <button type="button" className="text-action" onClick={() => void media.cancel(job.id)}>取消</button> : null}
-                    {job.status === "failed" || job.status === "cancelled" || job.status === "interrupted" ? (
-                      <button type="button" className="text-action accent" onClick={() => void media.retry(job.id)}>重试</button>
-                    ) : null}
-                    {job.status === "completed" && job.outputPath ? (
-                      <button type="button" className="text-action" onClick={() => onRevealPath(job.outputPath!)}>定位</button>
-                    ) : null}
-                  </div>
-                </article>
-              ))}
-            </div>
-          )}
-        </section>
+        <MediaJobsPanel media={media} batches={manager.state.batches} onRevealPath={onRevealPath} onShowDownloads={() => setSection("downloads")} focusId={focusTarget?.kind === "mediaJob" ? focusTarget.id : undefined} />
       ) : null}
 
       {section === "youtube" ? (
         <section className="media-job-panel" aria-label="YouTube 上传">
-          {youtube ? <YouTubeUploadJobs model={youtube} onRevealPath={onRevealPath} /> : <div className="download-empty"><h3>尚无上传任务</h3></div>}
+          {youtube ? <YouTubeUploadJobs model={youtube} onRevealPath={onRevealPath} focusJobId={focusTarget?.kind === "youtubeJob" ? focusTarget.id : undefined} /> : <div className="download-empty"><h3>尚无上传任务</h3></div>}
         </section>
       ) : null}
 
@@ -373,6 +369,9 @@ export function DownloadManagerPage({
         <MediaScopeDialog
           kind={mediaDialogKind}
           hasMergedVideo={Boolean(mergedPath)}
+          title={selectedBatch.title}
+          episodeCount={selectedBatch.items.length}
+          modelName={mediaDialogKind === "audioSeparation" ? demucsModel : `Whisper ${whisperModel}`}
           onSubmit={(scope) => { void submitAI(mediaDialogKind, scope); }}
           onClose={() => setMediaDialogKind(null)}
         />

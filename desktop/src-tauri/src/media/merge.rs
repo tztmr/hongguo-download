@@ -1,5 +1,6 @@
 use super::{
     model::{MergeConflictPolicy, MergeInput, MergeRequest},
+    process_control::CancellationToken,
     tools::MediaTools,
 };
 use crate::AppError;
@@ -17,12 +18,15 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[path = "smart_merge.rs"]
+mod smart;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -794,25 +798,6 @@ impl ProgressTracker {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl CancellationToken {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeResult {
     pub output_path: PathBuf,
@@ -904,6 +889,9 @@ fn run_merge_inner(
 ) -> Result<MergeResult, AppError> {
     if request.inputs.is_empty() {
         return Err(AppError::new("MERGE_INPUT_INVALID", "合并输入不得为空"));
+    }
+    if let Some(mode) = request.mode {
+        return smart::run(tools, &request, mode, cancellation, progress);
     }
     let destination = ValidatedDestination::open(&request.series_root, &request.output_file_name)?;
     let validated_inputs = prepare_input_identities(&request.inputs)?;
@@ -1100,7 +1088,7 @@ fn validate_merged_output(
     expected_audio: bool,
     expected_duration: f64,
 ) -> Result<(), AppError> {
-    let duration_tolerance = (expected_duration * 0.01).max(1.0);
+    let duration_tolerance = 0.25;
     if output.audio.is_some() != expected_audio
         || (output.duration_seconds - expected_duration).abs() > duration_tolerance
     {
@@ -1110,6 +1098,7 @@ fn validate_merged_output(
 }
 
 struct TempDirectory {
+    extra_files: Vec<String>,
     parent: OwnedFd,
     directory: OwnedFd,
     entry: CString,
@@ -1166,6 +1155,7 @@ impl TempDirectory {
                 return Err(temp_create_error("temporary directory device mismatch"));
             }
             let temp = Self {
+                extra_files: Vec::new(),
                 parent,
                 directory,
                 entry,
@@ -1280,7 +1270,10 @@ impl TempDirectory {
 impl Drop for TempDirectory {
     fn drop(&mut self) {
         let entry_is_current = self.verify_identity().is_ok();
-        for name in ["concat.txt", "merged.mp4"] {
+        for name in ["concat.txt", "merged.mp4"]
+            .into_iter()
+            .chain(self.extra_files.iter().map(String::as_str))
+        {
             let entry = CString::new(name).expect("fixed temp filename has no NUL");
             // SAFETY: directory and entry are valid; failures are best-effort cleanup only.
             let _ = unsafe { libc::unlinkat(self.directory.as_raw_fd(), entry.as_ptr(), 0) };
@@ -1416,6 +1409,7 @@ fn run_ffmpeg(
     temp_directory.directory_path()?;
     let mut command = tools.ffmpeg_command();
     set_child_working_directory(&mut command, temp_directory.directory.as_raw_fd());
+    cancellation.prepare_command(&mut command);
     let mut child = command
         .args(args)
         .stdin(Stdio::null())
@@ -1425,6 +1419,8 @@ fn run_ffmpeg(
         .map_err(|error| {
             AppError::with_cause("FFMPEG_FAILED", "无法运行打包的合并工具", error.to_string())
         })?;
+    cancellation.register_child(&mut child)?;
+    let child_id = child.id();
     let stdout = child
         .stdout
         .take()
@@ -1453,6 +1449,7 @@ fn run_ffmpeg(
         drain_progress(&line_receiver, tracker, start.elapsed(), progress);
         if cancellation.is_cancelled() {
             terminate_and_wait(&mut child);
+            cancellation.clear_child(child_id);
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
             return Err(cancelled_error());
@@ -1462,6 +1459,7 @@ fn run_ffmpeg(
             Ok(None) => thread::sleep(Duration::from_millis(10)),
             Err(error) => {
                 terminate_and_wait(&mut child);
+                cancellation.clear_child(child_id);
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
                 return Err(AppError::with_cause(
@@ -1473,6 +1471,7 @@ fn run_ffmpeg(
         }
     };
     let _ = stdout_thread.join();
+    cancellation.clear_child(child_id);
     drain_progress(&line_receiver, tracker, start.elapsed(), progress);
     let stderr = stderr_thread.join().unwrap_or_default();
     Ok(ProcessOutcome {
@@ -1629,6 +1628,8 @@ mod tests {
             output_file_name: "全集.mp4".into(),
             inputs,
             transcode_h264: false,
+            mode: None,
+            quality: super::super::model::MergeQuality::High,
             conflict_policy: MergeConflictPolicy::FailIfExists,
         }
     }
@@ -1658,6 +1659,13 @@ for arg in "$@"; do last="$arg"; done
 printf 'fixture-output' > "$last"
 printf 'out_time_us=1000000\nprogress=end\n'
 "#
+    }
+
+    #[test]
+    fn long_output_with_two_seconds_error_is_rejected() {
+        let mut output = probe("h264", 1080, "aac", 48000);
+        output.duration_seconds = 3602.0;
+        assert!(validate_merged_output(&output, true, 3600.0).is_err());
     }
 
     #[test]

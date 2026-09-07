@@ -1,6 +1,6 @@
 [package]
 name = "hongguo-desktop"
-version = "0.1.0"
+version = "0.1.10"
 description = "Desktop downloader for Hongguo / Fanqie short dramas"
 authors = ["edking"]
 edition = "2021"
@@ -16,7 +16,7 @@ tauri-build = { version = "=2.4.1", features = [] }
 tauri = { version = "=2.8.5", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "stream", "rustls-tls", "system-proxy", "socks"] }
 tauri-plugin-dialog = "=2.4.2"
 tauri-plugin-notification = "2"
 urlencoding = "2"
@@ -31,5 +31,5 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 getrandom = "0.3"
 keyring = { version = "3.6.3", features = ["apple-native"] }
 subtle = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time", "sync"] }
 tauri-plugin-opener = "2"

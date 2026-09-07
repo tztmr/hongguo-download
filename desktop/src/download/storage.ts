@@ -63,6 +63,11 @@ function readSeriesSnapshot(value: unknown): DownloadSeriesSnapshot {
     abstract: value.abstract,
     category: value.category,
     contentTypeCode: value.contentTypeCode,
+    episodeCount: typeof value.episodeCount === "number" ? value.episodeCount : 0,
+    durationSeconds: typeof value.durationSeconds === "number" ? value.durationSeconds : undefined,
+    author: typeof value.author === "string" ? value.author : "",
+    onlineTime: typeof value.onlineTime === "number" ? value.onlineTime : undefined,
+    releaseType: typeof value.releaseType === "string" ? value.releaseType as DownloadSeriesSnapshot["releaseType"] : undefined,
   };
 }
 
@@ -93,6 +98,8 @@ function readBatch(value: unknown, version: 1 | 2): DownloadBatch {
           abstract: "",
           category: "",
           contentTypeCode: 1,
+          episodeCount: items.length,
+          author: "",
         }
       : readSeriesSnapshot(value.series),
     paused: Boolean(value.paused),

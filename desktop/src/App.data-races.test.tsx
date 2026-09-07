@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   fetchHealth: vi.fn(),
   fetchRank: vi.fn(),
   fetchSearch: vi.fn(),
+  fetchSearchAll: vi.fn(),
   fetchSeriesMetrics: vi.fn(),
   fetchNewReleases: vi.fn(),
   getAiComponents: vi.fn(),
@@ -94,6 +95,7 @@ const rankPage: RankPage = {
   hasMore: false,
   board: "ranklist_hot_sc",
   boardName: "推荐榜",
+  releaseType: "all",
   boards: [{ id: "ranklist_hot_sc", name: "推荐榜" }],
 };
 
@@ -120,6 +122,7 @@ describe("App request ordering", () => {
     apiMocks.getSaveDir.mockResolvedValue("/tmp/downloads");
     apiMocks.fetchRank.mockResolvedValue(rankPage);
     apiMocks.fetchSearch.mockResolvedValue(searchPage);
+    apiMocks.fetchSearchAll.mockResolvedValue(searchPage);
     apiMocks.fetchSeriesMetrics.mockResolvedValue({
       seriesId: "default",
       contentTypeCode: 1,
@@ -131,7 +134,7 @@ describe("App request ordering", () => {
     apiMocks.fetchDiscovery.mockReturnValue(discovery.promise);
     const view = render(<App />);
 
-    await waitFor(() => expect(apiMocks.fetchDiscovery).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.fetchDiscovery).toHaveBeenCalledTimes(2));
     fireEvent.click(view.getByRole("button", { name: "榜单" }));
     await waitFor(() => expect(view.getAllByText("榜单结果短剧").length).toBeGreaterThan(0));
 
@@ -141,12 +144,21 @@ describe("App request ordering", () => {
     expect(view.queryByText("过期发现结果")).toBeNull();
   });
 
+  it("allows episode selection while metrics are still pending", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(series("fast-catalog", "快速目录")));
+    apiMocks.fetchCatalog.mockResolvedValue([{ itemId: "episode-fast", index: 1, title: "第1集" }]);
+    apiMocks.fetchSeriesMetrics.mockReturnValue(new Promise(() => {}));
+    const view = render(<App />);
+    await waitFor(() => expect(view.getByRole("button", { name: "加入下载队列（已选 1 集）" })).toHaveProperty("disabled", false));
+    expect(view.getByText("正在加载剧集数据…")).toBeTruthy();
+  });
+
   it("does not let a slower discovery request overwrite submitted search results", async () => {
     const discovery = deferred<DiscoveryPage>();
     apiMocks.fetchDiscovery.mockReturnValue(discovery.promise);
     const view = render(<App />);
 
-    await waitFor(() => expect(apiMocks.fetchDiscovery).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.fetchDiscovery).toHaveBeenCalledTimes(2));
     const input = view.getByRole("textbox", { name: "搜索短剧或漫剧" });
     fireEvent.change(input, { target: { value: "搜索词" } });
     fireEvent.submit(input.closest("form")!);

@@ -112,6 +112,8 @@ pub struct AccountSummary {
 #[serde(rename_all = "camelCase")]
 pub enum YouTubeJobStatus {
     Queued,
+    Pausing,
+    Paused,
     PreparingAuthorization,
     CreatingSession,
     Uploading,

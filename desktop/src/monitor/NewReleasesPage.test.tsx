@@ -37,6 +37,7 @@ describe("NewReleasesPage", () => {
     const view = render(<NewReleasesPage model={state} onSelect={vi.fn()} />);
 
     expect(view.getByText(/上线 \d{2}:\d{2}/)).toBeTruthy();
+    expect(view.getByText("真人剧 · 20 集 · 校园")).toBeTruthy();
     expect(view.getByText("播放 0")).toBeTruthy();
     expect(view.getByText("热度 2.5万")).toBeTruthy();
     expect(view.getByText("收藏 —")).toBeTruthy();
@@ -51,5 +52,12 @@ describe("NewReleasesPage", () => {
     view.rerender(<NewReleasesPage model={model({ items: [], filteredItems: [], categories: [], loading: true })} onSelect={vi.fn()} />);
     expect(view.queryByText("今天还没有新上线剧目")).toBeNull();
     expect(view.getByText("正在扫描全部今日新剧…")).toBeTruthy();
+  });
+
+  it("explains that comic and AI feeds use the latest new-release rank", () => {
+    const view = render(<NewReleasesPage model={model({ type: "ai_playlet", items: [], filteredItems: [], categories: [] })} onSelect={vi.fn()} />);
+
+    expect(view.getByText(/按新剧榜最新收录展示/)).toBeTruthy();
+    expect(view.getByText("当前暂无可用新剧")).toBeTruthy();
   });
 });

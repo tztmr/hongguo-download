@@ -31,6 +31,13 @@ const completedJob: MediaJob = {
   outputPath: "/Downloads/合并视频/output.mp4",
 };
 
+const pausedJob: MediaJob = {
+  ...runningJob,
+  status: "paused",
+  pauseOrigin: "running",
+  stage: "paused",
+};
+
 function createCommands() {
   const unlisten = vi.fn();
   let listener: ((job: MediaJob) => void) | undefined;
@@ -40,6 +47,10 @@ function createCommands() {
     startAudioSeparation: vi.fn().mockResolvedValue({ ...queuedJob, kind: "separateBackgroundMusic" }),
     startSubtitleExtraction: vi.fn().mockResolvedValue({ ...queuedJob, kind: "extractSubtitles" }),
     cancel: vi.fn().mockResolvedValue(undefined),
+    pause: vi.fn().mockResolvedValue(pausedJob),
+    resume: vi.fn().mockResolvedValue(runningJob),
+    deleteJob: vi.fn().mockResolvedValue(undefined),
+    hasMergedVideo: vi.fn().mockResolvedValue(true),
     retry: vi.fn().mockResolvedValue(queuedJob),
     subscribeProgress: vi.fn(async (next: (job: MediaJob) => void) => {
       listener = next;
@@ -107,7 +118,8 @@ describe("useMediaJobs", () => {
       await expect(
         result.current.startMerge(batch, {
           outputName: "天下第一纨绔.mp4",
-          transcodeH264: true,
+          mode: "auto",
+          quality: "balanced",
           conflictPolicy: "failIfExists",
         }),
       ).rejects.toMatchObject({ code: "MEDIA_JOB_ALREADY_ACTIVE" });
@@ -118,7 +130,8 @@ describe("useMediaJobs", () => {
       bookId: "book-a",
       title: "天下第一纨绔",
       outputFileName: "天下第一纨绔.mp4",
-      transcodeH264: true,
+      mode: "auto",
+      quality: "balanced",
       conflictPolicy: "failIfExists",
       inputs: [
         { episodeIndex: 1, path: "/Downloads/e1.mp4" },
@@ -195,6 +208,38 @@ describe("useMediaJobs", () => {
 
     expect(commands.cancel).toHaveBeenCalledWith("job-1");
     expect(commands.retry).toHaveBeenCalledWith("job-1");
+  });
+
+  it("updates pause and resume results, deletes the returned job, and queries merged files", async () => {
+    const commands = createCommands();
+    const { result } = renderHook(() => useMediaJobs({ commands }));
+    await waitFor(() => expect(result.current.jobs).toEqual([queuedJob]));
+
+    await act(async () => {
+      await result.current.pause("job-1");
+    });
+    expect(result.current.jobs[0]).toEqual(pausedJob);
+    await act(async () => {
+      await result.current.resume("job-1");
+    });
+    expect(result.current.jobs[0]).toEqual(runningJob);
+    await act(async () => {
+      await result.current.deleteJob("job-1");
+    });
+    expect(result.current.jobs).toEqual([]);
+    await expect(result.current.hasMergedVideo("/Downloads/series")).resolves.toBe(true);
+  });
+
+  it("restores a deleted job when the native delete command fails", async () => {
+    const commands = createCommands();
+    commands.deleteJob.mockRejectedValue({ code: "MEDIA_JOB_SIGNAL_FAILED", message: "无法停止进程" });
+    const { result } = renderHook(() => useMediaJobs({ commands }));
+    await waitFor(() => expect(result.current.jobs).toEqual([queuedJob]));
+
+    await act(async () => {
+      await expect(result.current.deleteJob("job-1")).rejects.toMatchObject({ code: "MEDIA_JOB_SIGNAL_FAILED" });
+    });
+    expect(result.current.jobs).toEqual([queuedJob]);
   });
 
   it("routes separation and subtitle actions to distinct native commands", async () => {

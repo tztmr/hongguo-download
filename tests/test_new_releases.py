@@ -276,6 +276,37 @@ class CursorAndCollectorTests(unittest.IsolatedAsyncioTestCase):
                 cursor_store=CursorStore(),
             )
 
+    async def test_can_collect_latest_rank_rows_without_a_same_day_filter(self):
+        yesterday = int(datetime(2026, 9, 1, 12, tzinfo=SHANGHAI).timestamp())
+
+        async def fetch_page(_state):
+            return {
+                "items": [
+                    {"series_id": "comic-latest"},
+                    {"series_id": "ai-latest"},
+                ],
+                "next": 2,
+                "has_more": False,
+            }
+
+        async def fetch_metrics(item):
+            return {"online_time": yesterday, "play_count": 1}
+
+        result = await collect_today_releases(
+            fetch_page=fetch_page,
+            fetch_metrics=fetch_metrics,
+            release_type="comic_series_rank",
+            limit=20,
+            now=datetime(2026, 9, 2, 12, tzinfo=SHANGHAI),
+            cursor_store=CursorStore(),
+            only_today=False,
+        )
+
+        self.assertEqual(
+            [item["series_id"] for item in result["items"]],
+            ["comic-latest", "ai-latest"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

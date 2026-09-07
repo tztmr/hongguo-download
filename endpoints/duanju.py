@@ -54,7 +54,19 @@ RANK_GROUPS = {
     'all': '总榜',
     'playlet': '短剧',
     'comic_series_rank': '漫剧',
-    'ai_playlet': 'AI漫剧',
+    'ai_playlet': 'AI剧',
+}
+RANK_CONTENT_TYPE_CODES = {
+    'playlet': 1,
+    'comic_series_rank': 1004,
+}
+AI_VIDEO_CATEGORY_TYPE = 'ai_video'
+# 榜单 cell 的真人剧筛选项不是业务接口里的 playlet，而是上游 selector 的 human。
+RANK_SELECTOR_TYPES = {
+    'all': 'all',
+    'playlet': 'human',
+    'comic_series_rank': 'comic_series_rank',
+    'ai_playlet': 'ai_playlet',
 }
 RANK_BOARDS = dict(CAPTURED_RANK_BOARDS)
 DOWNLOAD_TIMEOUT = 120.0
@@ -281,17 +293,20 @@ async def _fetch_new_release_page(
             seen_ids = [value for value in stored_filter_ids.split(',') if value]
         else:
             seen_ids = [str(value) for value in stored_filter_ids if value]
+        selector_type = str(state.get('selector_type') or release_type)
     else:
         current_offset = int(state or 0)
         session_id = ''
         rank_version = ''
         preferred_device_id = ''
         seen_ids = []
+        selector_type = release_type
     current_date = target_date or datetime.now(SHANGHAI).strftime('%Y%m%d')
     cache_key = make_cache_key(
         'duanju_new_releases', release_type=release_type, offset=current_offset,
         session_id=session_id, rank_version=rank_version,
         filter_ids=','.join(seen_ids[-200:]), target_date=current_date,
+        selector_type=selector_type,
     )
     cached = _duanju_new_release_cache.get(cache_key)
     if cached is not None:
@@ -311,7 +326,7 @@ async def _fetch_new_release_page(
                 'filter_ids': seen_ids[-200:],
             }
         return build_rank_url(
-            device_id, release_type, 'ranklist_new_rank_sc', state=upstream_state,
+            device_id, selector_type, 'ranklist_new_rank_sc', state=upstream_state,
         )
 
     result = await client.call_with_device(
@@ -327,6 +342,25 @@ async def _fetch_new_release_page(
         parsed = parse_captured_rank_page(
             result['upstream'], release_type=release_type,
         )
+        raw_items = parsed['items']
+        parsed['items'] = _filter_release_items(raw_items, release_type)
+        if (
+            selector_type != 'all'
+            and (not parsed['items'] or len(parsed['items']) != len(raw_items))
+        ):
+            # 新剧榜的类型 selector 也可能失效，改用混合榜后再按类型隔离。
+            selector_type = 'all'
+            result = await client.call_with_device(
+                build_url, aid=8662, max_device_retries=3,
+                preferred_device_id=preferred_device_id or None,
+                return_device_id=True,
+            )
+            if not result['ok']:
+                raise RuntimeError(result['msg'])
+            parsed = parse_captured_rank_page(
+                result['upstream'], release_type=release_type,
+            )
+            parsed['items'] = _filter_release_items(parsed['items'], release_type)
         metrics = await _fetch_series_metrics_batch(
             client,
             [item['series_id'] for item in parsed['items']],
@@ -354,15 +388,18 @@ async def _fetch_new_release_page(
         if series_id and series_id not in known:
             known.add(series_id)
             next_filter_ids.append(series_id)
+    next_state = {
+        'offset': int(parsed.get('next_offset') or 0),
+        'session_id': str(parsed.get('session_id') or session_id),
+        'rank_version': str(parsed.get('rank_version') or rank_version),
+        'filter_ids': next_filter_ids[-200:],
+        'device_id': str(result.get('device_id') or preferred_device_id),
+    }
+    if release_type != 'playlet':
+        next_state['selector_type'] = selector_type
     page = {
         'items': items,
-        'next': {
-            'offset': int(parsed.get('next_offset') or 0),
-            'session_id': str(parsed.get('session_id') or session_id),
-            'rank_version': str(parsed.get('rank_version') or rank_version),
-            'filter_ids': next_filter_ids[-200:],
-            'device_id': str(result.get('device_id') or preferred_device_id),
-        },
+        'next': next_state,
         'has_more': bool(parsed.get('has_more')),
     }
     _duanju_new_release_cache.set(cache_key, page)
@@ -482,6 +519,20 @@ def _category_groups(selector: dict) -> list[dict]:
         if items:
             groups.append({'id': name, 'name': name, 'items': items})
     return groups
+
+
+def _filter_release_items(items: list[dict], release_type: str) -> list[dict]:
+    """用上游类型字段二次隔离真人剧、漫剧和 AI 剧，修正混榜响应。"""
+    is_ai = lambda item: str(item.get('video_category_type') or '').lower() == AI_VIDEO_CATEGORY_TYPE
+    if release_type == 'ai_playlet':
+        return [item for item in items if is_ai(item)]
+    expected = RANK_CONTENT_TYPE_CODES.get(release_type)
+    if expected is None:
+        return items
+    return [
+        item for item in items
+        if int(item.get('content_type') or 0) == expected and not is_ai(item)
+    ]
 
 
 def _bookmall_selector(upstream: dict, tab_type: str) -> dict:
@@ -814,6 +865,7 @@ async def duanju_new_releases(
             limit=limit,
             now=current,
             cursor_store=_duanju_new_release_cursors,
+            only_today=release_type == 'playlet',
         )
     except ValueError as exc:
         return error(str(exc), code=-2, status_code=400)
@@ -1176,14 +1228,20 @@ async def duanju_discovery_categories(request: Request):
 async def duanju_rank(
     request: Request,
     board: str = Query('ranklist_hot_sc', description='抓包验证的 8 个榜单之一'),
+    release_type: str = Query(
+        'all', alias='type', pattern='^(all|playlet|comic_series_rank|ai_playlet)$',
+        description='榜单类型: all=全部, playlet=真人剧, comic_series_rank=漫剧, ai_playlet=AI剧',
+    ),
     cursor: str = Query('', description='后端生成的短游标'),
     limit: int = Query(20, ge=1, le=20),
 ):
-    """抓包验证的 8 榜，前端只持有不透明短游标。"""
+    """抓包验证的 8 榜，支持按真人剧/漫剧/AI剧隔离分页。"""
+    # 兼容直接调用路由函数的测试/内部调用：FastAPI 注入前默认值仍是 Query 对象。
+    release_type = getattr(release_type, 'default', release_type)
     if board not in RANK_BOARDS:
         return error(f'不支持的榜单: {board}', code=-1, status_code=400)
     date = datetime.now(SHANGHAI).date().isoformat()
-    cursor_type = f'rank:{board}'
+    cursor_type = f'rank:{release_type}:{board}'
     try:
         state = (
             _duanju_rank_cursors.get(cursor, cursor_type, date)
@@ -1199,11 +1257,15 @@ async def duanju_rank(
         while len(available) < limit and upstream_has_more:
             current_offset = int((upstream_state or {}).get('offset') or 0)
             preferred_device_id = str((upstream_state or {}).get('device_id') or '')
+            selector_type = str(
+                (upstream_state or {}).get('selector_type')
+                or RANK_SELECTOR_TYPES[release_type]
+            )
 
             def build_url(device_id: str) -> str:
                 return build_rank_url(
                     device_id,
-                    'all',
+                    selector_type,
                     board,
                     state=upstream_state if upstream_state is not None else None,
                 )
@@ -1217,7 +1279,33 @@ async def duanju_rank(
             )
             if not result['ok']:
                 raise RuntimeError(result['msg'])
-            parsed = parse_captured_rank_page(result['upstream'])
+            parsed = parse_captured_rank_page(
+                result['upstream'],
+                release_type=None if release_type == 'all' else release_type,
+            )
+            raw_items = parsed['items']
+            parsed['items'] = _filter_release_items(raw_items, release_type)
+            if (
+                release_type != 'all'
+                and selector_type != 'all'
+                and (not parsed['items'] or len(parsed['items']) != len(raw_items))
+            ):
+                # 部分榜单不响应类型筛选（例如热搜榜+漫剧），回退到混合榜后本地隔离。
+                selector_type = 'all'
+                result = await request.app.state.client.call_with_device(
+                    build_url,
+                    aid=8662,
+                    max_device_retries=3,
+                    preferred_device_id=preferred_device_id or None,
+                    return_device_id=True,
+                )
+                if not result['ok']:
+                    raise RuntimeError(result['msg'])
+                parsed = parse_captured_rank_page(
+                    result['upstream'],
+                    release_type=None if release_type == 'all' else release_type,
+                )
+                parsed['items'] = _filter_release_items(parsed['items'], release_type)
             next_offset = int(parsed.get('next_offset') or 0)
             upstream_has_more = bool(parsed.get('has_more'))
             if upstream_has_more and next_offset <= current_offset:
@@ -1235,6 +1323,7 @@ async def duanju_rank(
                 'rank_version': str(parsed.get('rank_version') or ''),
                 'filter_ids': seen_ids[-200:],
                 'device_id': str(result.get('device_id') or preferred_device_id),
+                'selector_type': selector_type,
             }
 
         items = available[:limit]
@@ -1264,6 +1353,7 @@ async def duanju_rank(
         'has_more': has_more,
         'board': board,
         'board_name': RANK_BOARDS[board],
+        'release_type': release_type,
         'boards': [
             {'id': board_id, 'name': name}
             for board_id, name in RANK_BOARDS.items()

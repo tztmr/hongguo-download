@@ -72,7 +72,7 @@ def build_rank_url(
     *,
     state: dict[str, Any] | None = None,
 ) -> str:
-    if selected_items not in {"all", "comic_series_rank", "ai_playlet", "playlet"}:
+    if selected_items not in {"all", "human", "comic_series_rank", "ai_playlet", "playlet"}:
         raise ValueError(f"不支持的榜单类型: {selected_items}")
     if board not in RANK_BOARDS:
         raise ValueError(f"不支持的榜单: {board}")
@@ -169,6 +169,7 @@ def _normalize_video(
             video.get("content_type") or detail.get("content_type")
         )
         or 1,
+        "video_category_type": str(video.get("video_category_type") or ""),
         "duration": _optional_int(video.get("duration")) or 0,
         "abstract": video.get("video_desc") or detail.get("series_intro") or "",
         "score": video.get("score") or "",

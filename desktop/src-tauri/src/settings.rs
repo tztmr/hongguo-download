@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 pub const SETTINGS_VERSION: u8 = 3;
 
@@ -103,6 +104,12 @@ pub struct AppSettings {
     pub demucs_model: DemucsModel,
     #[serde(default = "default_whisper_model")]
     pub whisper_model: WhisperModel,
+    /// Optional proxy for upstream API and component downloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_proxy: Option<String>,
+    /// Optional HTTPS mirror containing the component archives by filename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_mirror: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
 }
@@ -119,6 +126,8 @@ impl AppSettings {
             notify_youtube_result: true,
             demucs_model: DemucsModel::HtDemucs,
             whisper_model: WhisperModel::Small,
+            download_proxy: None,
+            download_mirror: None,
             warning: None,
         }
     }
@@ -152,6 +161,12 @@ impl AppSettings {
         if let Some(value) = patch.whisper_model {
             next.whisper_model = WhisperModel::parse(&value)?;
         }
+        if let Some(value) = patch.download_proxy {
+            next.download_proxy = normalize_proxy(&value)?;
+        }
+        if let Some(value) = patch.download_mirror {
+            next.download_mirror = normalize_mirror(&value)?;
+        }
         next.version = SETTINGS_VERSION;
         next.warning = None;
         *self = next;
@@ -170,6 +185,45 @@ pub struct UpdateSettings {
     pub notify_youtube_result: Option<bool>,
     pub demucs_model: Option<String>,
     pub whisper_model: Option<String>,
+    /// Empty string clears the proxy. Supported schemes: http, https, socks5, socks5h.
+    pub download_proxy: Option<String>,
+    /// Empty string clears the component mirror. Must be an HTTPS directory URL.
+    pub download_mirror: Option<String>,
+}
+
+fn normalize_proxy(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let parsed = Url::parse(value).map_err(|_| {
+        "代理地址无效，请填写 http://、https://、socks5:// 或 socks5h:// 地址".to_string()
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https" | "socks5" | "socks5h")
+        || parsed.host_str().is_none()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("代理地址无效，请填写 http://、https://、socks5:// 或 socks5h:// 地址".into());
+    }
+    Ok(Some(parsed.to_string()))
+}
+
+fn normalize_mirror(value: &str) -> Result<Option<String>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let parsed = Url::parse(value)
+        .map_err(|_| "国内镜像地址无效，请填写公开的 HTTPS 目录地址".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("国内镜像地址无效，请填写公开的 HTTPS 目录地址".into());
+    }
+    Ok(Some(parsed.to_string()))
 }
 
 pub fn default_demucs_model() -> DemucsModel {
@@ -183,11 +237,30 @@ fn default_true() -> bool {
 }
 
 fn migrate_settings(mut settings: AppSettings, default_save_dir: PathBuf) -> AppSettings {
+    let mut invalid_network = false;
     if settings.save_dir.as_os_str().is_empty() {
         settings.save_dir = default_save_dir;
     }
+    if let Some(value) = settings.download_proxy.clone() {
+        match normalize_proxy(&value) {
+            Ok(normalized) => settings.download_proxy = normalized,
+            Err(_) => {
+                settings.download_proxy = None;
+                invalid_network = true;
+            }
+        }
+    }
+    if let Some(value) = settings.download_mirror.clone() {
+        match normalize_mirror(&value) {
+            Ok(normalized) => settings.download_mirror = normalized,
+            Err(_) => {
+                settings.download_mirror = None;
+                invalid_network = true;
+            }
+        }
+    }
     settings.version = SETTINGS_VERSION;
-    settings.warning = None;
+    settings.warning = invalid_network.then(|| "下载网络设置无效，已恢复直连".into());
     settings
 }
 
@@ -242,7 +315,10 @@ pub fn load_settings(path: &Path, default_save_dir: PathBuf) -> AppSettings {
         Ok(settings) if matches!(settings.version, 1 | 2 | SETTINGS_VERSION) => {
             let mut settings = migrate_settings(settings, default_save_dir);
             if invalid_ai_model {
-                settings.warning = Some("AI 模型设置无效，已恢复默认模型".into());
+                settings.warning = Some(match settings.warning.take() {
+                    Some(existing) => format!("{existing}；AI 模型设置无效，已恢复默认模型"),
+                    None => "AI 模型设置无效，已恢复默认模型".into(),
+                });
             }
             settings
         }
@@ -413,6 +489,73 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(settings.definition, DefinitionPreference::P720);
         assert_eq!(settings.demucs_model, DemucsModel::HtDemucs);
+    }
+
+    #[test]
+    fn network_settings_accept_supported_proxy_and_https_mirror_and_can_clear_them() {
+        let mut settings = AppSettings::default_for(std::path::PathBuf::from("/tmp/default"));
+        settings
+            .apply(UpdateSettings {
+                download_proxy: Some("socks5://127.0.0.1:7890".into()),
+                download_mirror: Some("https://mirror.example/ai".into()),
+                ..Default::default()
+            })
+            .expect("valid network update");
+        assert_eq!(
+            settings.download_proxy.as_deref(),
+            Some("socks5://127.0.0.1:7890")
+        );
+        assert_eq!(
+            settings.download_mirror.as_deref(),
+            Some("https://mirror.example/ai")
+        );
+        settings
+            .apply(UpdateSettings {
+                download_proxy: Some(String::new()),
+                download_mirror: Some(String::new()),
+                ..Default::default()
+            })
+            .expect("clearing network update");
+        assert!(settings.download_proxy.is_none());
+        assert!(settings.download_mirror.is_none());
+    }
+
+    #[test]
+    fn network_settings_reject_unsafe_proxy_and_mirror() {
+        let mut settings = AppSettings::default_for(std::path::PathBuf::from("/tmp/default"));
+        assert!(settings
+            .apply(UpdateSettings {
+                download_proxy: Some("file:///tmp/proxy".into()),
+                ..Default::default()
+            })
+            .is_err());
+        assert!(settings
+            .apply(UpdateSettings {
+                download_mirror: Some("http://mirror.example/ai".into()),
+                ..Default::default()
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn invalid_stored_network_settings_fall_back_to_direct_without_blocking_startup() {
+        let root = test_dir("invalid-network");
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).expect("fixture");
+        fs::write(
+            &path,
+            br#"{"version":3,"saveDir":"/tmp/keep","definition":"auto","notifyDownloadComplete":true,"notifyNewReleases":true,"downloadProxy":"file:///tmp/proxy","downloadMirror":"http://mirror.example/ai"}"#,
+        )
+        .expect("write settings");
+        let restored = load_settings(&path, std::path::PathBuf::from("/tmp/default"));
+        assert!(restored.download_proxy.is_none());
+        assert!(restored.download_mirror.is_none());
+        assert!(restored
+            .warning
+            .as_deref()
+            .unwrap_or("")
+            .contains("下载网络"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

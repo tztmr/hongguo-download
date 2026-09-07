@@ -1,8 +1,12 @@
+import { useEffect, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { YouTubeJob, YouTubeModel } from "./types";
 
 function statusCopy(job: YouTubeJob) {
   return {
     queued: "排队中",
+    pausing: "正在暂停",
+    paused: "已暂停",
     preparingAuthorization: "准备授权",
     creatingSession: "创建上传会话",
     uploading: "上传中",
@@ -16,27 +20,103 @@ function statusCopy(job: YouTubeJob) {
   }[job.status];
 }
 
-export function YouTubeUploadJobs({ model, onRevealPath }: { model: YouTubeModel; onRevealPath: (path: string) => void }) {
-  if (!model.jobs.length) return <div className="download-empty"><h3>尚无上传任务</h3><p>完成合并后，可从任务详情上传到 YouTube</p></div>;
+function YouTubeVideoLink({ url }: { url: string }) {
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState("");
+  return <>
+    <a href={url} target="_blank" rel="noreferrer" aria-disabled={opening} onClick={async (event) => {
+      if (!isTauri()) return;
+      // Handle the desktop launch explicitly, including errors. Prevent the
+      // WebView/plugin's delegated link handler from opening it a second time.
+      event.preventDefault();
+      if (opening) return;
+      setOpening(true);
+      setError("");
+      try {
+        await invoke("plugin:opener|open_url", { url });
+      } catch (reason) {
+        const detail = reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "请检查默认浏览器设置";
+        setError(`无法打开 YouTube 视频：${detail}`);
+      } finally {
+        setOpening(false);
+      }
+    }}>{opening ? "正在打开…" : "打开 YouTube 视频"}</a>
+    {error ? <small className="error-copy" role="alert">{error}</small> : null}
+  </>;
+}
+
+const activeStatuses = ["pausing", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing", "settingThumbnail"];
+const attentionStatuses = ["failed", "videoUploadedThumbnailFailed"];
+function fileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(2)} GB` : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+}
+
+export function YouTubeUploadJobs({ model, onRevealPath, focusJobId }: { model: YouTubeModel; onRevealPath: (path: string) => void; focusJobId?: string }) {
+  const [filter, setFilter] = useState("all");
+  const [query, setQuery] = useState("");
+  const [pending, setPending] = useState<Set<string>>(new Set());
+  const [actionError, setActionError] = useState("");
+  useEffect(() => { if (focusJobId) { setFilter("all"); setQuery(""); } }, [focusJobId]);
+  const queued = model.jobs.filter((job) => job.status === "queued").length;
+  const active = model.jobs.filter((job) => activeStatuses.includes(job.status)).length;
+  const paused = model.jobs.filter((job) => job.status === "paused").length;
+  const attention = model.jobs.filter((job) => attentionStatuses.includes(job.status)).length;
+  const filters = [
+    { id: "all", label: "全部", match: (_job: YouTubeJob) => true },
+    { id: "active", label: "进行中", match: (job: YouTubeJob) => activeStatuses.includes(job.status) || job.status === "queued" },
+    { id: "paused", label: "已暂停", match: (job: YouTubeJob) => job.status === "paused" },
+    { id: "attention", label: "待处理", match: (job: YouTubeJob) => attentionStatuses.includes(job.status) },
+    { id: "completed", label: "已完成", match: (job: YouTubeJob) => job.status === "completed" },
+    { id: "cancelled", label: "已取消", match: (job: YouTubeJob) => job.status === "cancelled" },
+  ];
+  const visible = model.jobs.filter((job) => filters.find((item) => item.id === filter)!.match(job)
+    && job.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  async function runAction(jobId: string, action: () => Promise<unknown>) {
+    setPending((current) => new Set(current).add(jobId));
+    setActionError("");
+    try { await action(); }
+    catch (error) { setActionError(error && typeof error === "object" && "message" in error ? String(error.message) : "操作失败，请重试"); }
+    finally { setPending((current) => { const next = new Set(current); next.delete(jobId); return next; }); }
+  }
   return (
-    <div className="media-job-list">
-      {model.jobs.map((job) => (
-        <article className={`media-job-row status-${job.status}`} data-testid="youtube-job-row" data-focus-id={job.id} key={job.id}>
+    <div className="youtube-workspace">
+      <div className="youtube-overview" aria-label="上传统计">
+        <article><span>正在上传 / 处理</span><strong>{active}<small> / 5</small></strong></article>
+        <article><span>等待上传</span><strong>{queued}</strong></article>
+        <article><span>已暂停</span><strong>{paused}</strong></article>
+        <article className={attention ? "needs-attention" : ""}><span>需要处理</span><strong>{attention}</strong></article>
+      </div>
+      <div className="youtube-queue-toolbar">
+        <div className="upload-filters" role="group" aria-label="上传状态筛选">{filters.map((item) => <button type="button" key={item.id} aria-pressed={filter === item.id} className={filter === item.id ? "active" : ""} onClick={() => setFilter(item.id)}>{item.label}<span>{model.jobs.filter(item.match).length}</span></button>)}</div>
+        <input type="search" aria-label="搜索上传任务" placeholder="搜索剧名" value={query} onChange={(event) => setQuery(event.target.value)} />
+      </div>
+      <p className="queue-summary" role="status">最多同时上传 5 个 · 正在处理 {active} 个 · 排队 {queued} 个</p>
+      {actionError ? <p className="warning-banner" role="alert">{actionError}</p> : null}
+      <div className="media-job-list youtube-job-list">
+      {!visible.length ? <div className="download-empty"><h3>{model.jobs.length ? "没有匹配的上传任务" : "尚无上传任务"}</h3><p>{model.jobs.length ? "试试其他状态或剧名" : "在下载任务详情中选择合并视频或整季去背景音乐视频，再上传到 YouTube"}</p>{model.jobs.length ? <button type="button" className="secondary-button" onClick={() => { setFilter("all"); setQuery(""); }}>显示全部任务</button> : null}</div> : null}
+      {visible.map((job) => (
+        <article className={`media-job-row youtube-job-card status-${job.status}`} data-testid="youtube-job-row" data-focus-id={job.id} key={job.id}>
           <div className="media-job-copy">
-            <div className="media-job-title"><strong>{job.title}</strong><span>{statusCopy(job)}</span></div>
+            <div className="media-job-title"><strong>{job.title}</strong><span className="upload-status">{statusCopy(job)}</span></div>
+            <p className="upload-file-meta"><span>{model.channels.find((channel) => channel.channelId === job.channelId)?.title || "YouTube 频道"}</span><span title={job.sourcePath}>{job.sourcePath.split(/[\\/]/).pop()}</span></p>
+            <div className="upload-progress-label"><strong>{Math.round(job.percent)}<small>%</small></strong><span>{fileSize(job.uploadedBytes)} / {fileSize(job.totalBytes)}</span></div>
             <div className="progress-track" role="progressbar" aria-label={`${job.title}上传进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.percent)}><span style={{ width: `${job.percent}%` }} /></div>
-            <small>{Math.round(job.percent)}% · {(job.uploadedBytes / 1024 / 1024).toFixed(1)} / {(job.totalBytes / 1024 / 1024).toFixed(1)} MB</small>
-            {job.youtubeUrl ? <a href={job.youtubeUrl} target="_blank" rel="noreferrer">打开 YouTube 视频</a> : null}
-            {job.errorMessage ? <small className="error-copy">{job.errorMessage}</small> : null}
+            {job.errorMessage ? <small className="error-copy upload-error">{job.errorMessage}</small> : null}
+            {job.youtubeUrl ? <YouTubeVideoLink key={job.youtubeUrl} url={job.youtubeUrl} /> : null}
           </div>
-          <div className="media-job-actions">
+          <div className="media-job-actions upload-job-actions">
+            {["queued", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry"].includes(job.status) ? <button type="button" className="secondary-button" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.pause(job.id))}>暂停</button> : null}
+            {job.status === "paused" ? <button type="button" className="primary-button compact" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.resume(job.id))}>继续</button> : null}
+            {job.status === "failed" || job.status === "cancelled" ? <button type="button" className="primary-button compact" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.retry(job.id))}>重试</button> : null}
+            {job.status === "videoUploadedThumbnailFailed" ? <button type="button" className="primary-button compact" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.retryThumbnail(job.id))}>仅重试封面</button> : null}
             <button type="button" className="text-action" onClick={() => onRevealPath(job.sourcePath)}>源文件</button>
-            {["queued", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing"].includes(job.status) ? <button type="button" className="text-action" onClick={() => void model.cancel(job.id)}>取消</button> : null}
-            {job.status === "failed" || job.status === "cancelled" ? <button type="button" className="text-action accent" onClick={() => void model.retry(job.id)}>重试</button> : null}
-            {job.status === "videoUploadedThumbnailFailed" ? <button type="button" className="text-action accent" onClick={() => void model.retryThumbnail(job.id)}>仅重试封面</button> : null}
+            {["queued", "pausing", "paused", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing"].includes(job.status) ? <button type="button" className="text-action upload-cancel" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.cancel(job.id))}>取消</button> : null}
           </div>
         </article>
       ))}
+      </div>
     </div>
   );
 }

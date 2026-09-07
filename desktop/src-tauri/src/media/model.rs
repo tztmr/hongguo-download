@@ -9,10 +9,18 @@ pub const MEDIA_JOBS_VERSION: u32 = 1;
 pub enum MediaJobStatus {
     Queued,
     Running,
+    Paused,
     Completed,
     Failed,
     Cancelled,
     Interrupted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MediaJobPauseOrigin {
+    Queued,
+    Running,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,13 +69,35 @@ pub enum MergeConflictPolicy {
     Overwrite,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MergeMode {
+    Auto,
+    Copy,
+    Transcode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum MergeQuality {
+    #[default]
+    High,
+    Balanced,
+    Compact,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeRequest {
     pub series_root: PathBuf,
     pub output_file_name: String,
     pub inputs: Vec<MergeInput>,
+    #[serde(default)]
     pub transcode_h264: bool,
+    #[serde(default)]
+    pub mode: Option<MergeMode>,
+    #[serde(default)]
+    pub quality: MergeQuality,
     #[serde(default)]
     pub conflict_policy: MergeConflictPolicy,
 }
@@ -80,7 +110,12 @@ pub struct StartMergeRequest {
     pub series_root: PathBuf,
     pub output_file_name: String,
     pub inputs: Vec<StartMergeInput>,
+    #[serde(default)]
     pub transcode_h264: bool,
+    #[serde(default)]
+    pub mode: Option<MergeMode>,
+    #[serde(default)]
+    pub quality: MergeQuality,
     #[serde(default)]
     pub conflict_policy: MergeConflictPolicy,
 }
@@ -137,7 +172,12 @@ pub struct ValidatedMergeRequest {
     pub series_root: PathBuf,
     pub output_file_name: String,
     pub inputs: Vec<MergeInput>,
+    #[serde(default)]
     pub transcode_h264: bool,
+    #[serde(default)]
+    pub mode: Option<MergeMode>,
+    #[serde(default)]
+    pub quality: MergeQuality,
     pub conflict_policy: MergeConflictPolicy,
     pub dedupe_key: String,
 }
@@ -149,6 +189,8 @@ impl ValidatedMergeRequest {
             output_file_name: self.output_file_name.clone(),
             inputs: self.inputs.clone(),
             transcode_h264: self.transcode_h264,
+            mode: self.mode,
+            quality: self.quality,
             conflict_policy: self.conflict_policy,
         }
     }
@@ -161,6 +203,8 @@ pub struct MediaJob {
     pub dedupe_key: String,
     pub kind: MediaJobKind,
     pub status: MediaJobStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_origin: Option<MediaJobPauseOrigin>,
     pub stage: String,
     pub percent: f64,
     pub inputs: Vec<InputSnapshot>,
@@ -190,6 +234,10 @@ pub struct MediaJobRequest {
 #[derive(Debug, Clone)]
 pub enum MediaJobTransition {
     Start,
+    PauseQueued,
+    PauseRunning,
+    ResumeQueued,
+    ResumeRunning,
     Complete {
         output_path: PathBuf,
         outputs: Vec<MediaJobOutput>,

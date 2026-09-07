@@ -34,6 +34,7 @@ export function useYouTube(commands: YouTubeCommands = youtubeCommands, enabled 
   const [loading, setLoading] = useState(enabled);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<YouTubeError>();
+  const jobEvents = useRef(new Map<string, number>());
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
 
@@ -49,7 +50,10 @@ export function useYouTube(commands: YouTubeCommands = youtubeCommands, enabled 
       if (active) setLoading(false);
     });
     void commandsRef.current.subscribeProgress((job) => {
-      if (active) setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, job) }));
+      if (active) {
+        jobEvents.current.set(job.id, (jobEvents.current.get(job.id) || 0) + 1);
+        setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, job) }));
+      }
     }).then((value) => {
       if (active) unlisten = value;
       else value();
@@ -61,6 +65,7 @@ export function useYouTube(commands: YouTubeCommands = youtubeCommands, enabled 
 
   const action = useCallback(async <T,>(operation: () => Promise<T>, apply?: (value: T) => void) => {
     setBusy(true);
+    setError(undefined);
     try {
       const value = await operation();
       apply?.(value);
@@ -89,17 +94,25 @@ export function useYouTube(commands: YouTubeCommands = youtubeCommands, enabled 
   const setChannel = useCallback(async (channelId: string) => { await action(() => commandsRef.current.setChannel(channelId), refresh); }, [action, refresh]);
   const revoke = useCallback(async (channelId: string) => { await action(() => commandsRef.current.revoke(channelId), refresh); }, [action, refresh]);
   const removeCredential = useCallback(async () => { await action(() => commandsRef.current.removeCredential(), refresh); }, [action, refresh]);
-  const startUpload = useCallback((request: YouTubeUploadIntent) => action(
-    () => commandsRef.current.startUpload(request),
-    (job) => setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, job) })),
-  ), [action]);
+  const jobAction = useCallback((jobId: string, operation: () => Promise<YouTubeJob>) => {
+    const before = jobEvents.current.get(jobId) || 0;
+    return action(operation, (job) => {
+      // Progress can arrive before an IPC reply (e.g. Paused before Pausing).
+      if ((jobEvents.current.get(jobId) || 0) === before) {
+        setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, job) }));
+      }
+    });
+  }, [action]);
+  const startUpload = useCallback((request: YouTubeUploadIntent) => jobAction(request.jobId, () => commandsRef.current.startUpload(request)), [jobAction]);
   const cancel = useCallback(async (jobId: string) => { await action(() => commandsRef.current.cancel(jobId)); }, [action]);
-  const retry = useCallback(async (jobId: string) => { await action(() => commandsRef.current.retry(jobId), (job) => setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, job) }))); }, [action]);
+  const pause = useCallback(async (jobId: string) => { await jobAction(jobId, () => commandsRef.current.pause(jobId)); }, [jobAction]);
+  const resume = useCallback(async (jobId: string) => { await jobAction(jobId, () => commandsRef.current.resume(jobId)); }, [jobAction]);
+  const retry = useCallback(async (jobId: string) => { await jobAction(jobId, () => commandsRef.current.retry(jobId)); }, [jobAction]);
   const retryThumbnail = useCallback(async (jobId: string) => { await action(() => commandsRef.current.retryThumbnail(jobId), (job) => setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, job) }))); }, [action]);
   const markNotified = useCallback(async (jobId: string, outcome: "success" | "failure") => {
     if (!commandsRef.current.markNotified) return;
     await action(() => commandsRef.current.markNotified!(jobId, outcome), (next) => setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, next) })));
   }, [action]);
 
-  return useMemo(() => ({ ...snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, retry, retryThumbnail, markNotified }), [snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, retry, retryThumbnail, markNotified]);
+  return useMemo(() => ({ ...snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, pause, resume, retry, retryThumbnail, markNotified }), [snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, pause, resume, retry, retryThumbnail, markNotified]);
 }

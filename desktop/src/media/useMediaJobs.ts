@@ -91,6 +91,8 @@ export function useMediaJobs({
           outputFileName: options.outputName,
           inputs,
           transcodeH264: options.transcodeH264,
+          mode: options.mode,
+          quality: options.quality,
           conflictPolicy: options.conflictPolicy,
         });
         setJobs((current) => upsertJob(current, job));
@@ -109,6 +111,52 @@ export function useMediaJobs({
     try {
       await commandsRef.current.cancel(jobId);
       setError(undefined);
+    } catch (nextError) {
+      const normalized = asMediaError(nextError);
+      setError(normalized);
+      throw normalized;
+    }
+  }, []);
+
+  const pause = useCallback(async (jobId: string) => {
+    try {
+      const job = await commandsRef.current.pause(jobId);
+      setJobs((current) => upsertJob(current, job));
+      setError(undefined);
+    } catch (nextError) {
+      const normalized = asMediaError(nextError);
+      setError(normalized);
+      throw normalized;
+    }
+  }, []);
+
+  const resume = useCallback(async (jobId: string) => {
+    try {
+      const job = await commandsRef.current.resume(jobId);
+      setJobs((current) => upsertJob(current, job));
+      setError(undefined);
+    } catch (nextError) {
+      const normalized = asMediaError(nextError);
+      setError(normalized);
+      throw normalized;
+    }
+  }, []);
+
+  const deleteJob = useCallback(async (jobId: string) => {
+    try {
+      await commandsRef.current.deleteJob(jobId);
+      setJobs((current) => current.filter((job) => job.id !== jobId));
+      setError(undefined);
+    } catch (nextError) {
+      const normalized = asMediaError(nextError);
+      setError(normalized);
+      throw normalized;
+    }
+  }, []);
+
+  const hasMergedVideo = useCallback(async (seriesRoot: string) => {
+    try {
+      return await commandsRef.current.hasMergedVideo(seriesRoot);
     } catch (nextError) {
       const normalized = asMediaError(nextError);
       setError(normalized);
@@ -187,7 +235,7 @@ export function useMediaJobs({
   }, []);
 
   return useMemo(
-    () => ({ jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, retry, markNotified }),
-    [jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, retry, markNotified],
+    () => ({ jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, retry, markNotified }),
+    [jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, retry, markNotified],
   );
 }

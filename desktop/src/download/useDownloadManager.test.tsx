@@ -82,18 +82,26 @@ const episodes: EpisodeItem[] = Array.from({ length: 6 }, (_, offset) => ({
   title: `第 ${offset + 1} 集`,
 }));
 
+const manyEpisodes: EpisodeItem[] = Array.from({ length: 10 }, (_, offset) => ({
+  index: offset + 1,
+  itemId: `many-episode-${offset + 1}`,
+  title: `第 ${offset + 1} 集`,
+}));
+
 describe("useDownloadManager", () => {
-  it("starts five downloads by default and fills a freed slot", async () => {
+  it("starts eight downloads by default and fills a freed slot", async () => {
     const fake = deferredAdapter();
     const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage: memoryStorage() }));
 
-    act(() => result.current.enqueue(series, episodes));
-    await waitFor(() => expect(fake.started).toHaveLength(5));
+    act(() => result.current.enqueue(series, manyEpisodes));
+    await waitFor(() => expect(fake.started).toHaveLength(8));
     act(() => fake.resolve(fake.started[0]));
-    await waitFor(() => expect(fake.started).toHaveLength(6));
+    await waitFor(() => expect(fake.started).toHaveLength(9));
 
     act(() => fake.resolveAll());
-    await waitFor(() => expect(result.current.stats.done).toBe(6));
+    await waitFor(() => expect(fake.started).toHaveLength(10));
+    act(() => fake.resolveAll());
+    await waitFor(() => expect(result.current.stats.done).toBe(10));
     unmount();
   });
 
@@ -101,13 +109,13 @@ describe("useDownloadManager", () => {
     const fake = deferredAdapter();
     const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage: memoryStorage() }));
 
-    act(() => result.current.enqueue(series, episodes));
-    await waitFor(() => expect(fake.started).toHaveLength(5));
+    act(() => result.current.enqueue(series, manyEpisodes));
+    await waitFor(() => expect(fake.started).toHaveLength(8));
     act(() => result.current.pauseAll());
     act(() => fake.resolve(fake.started[0]));
 
     await waitFor(() => expect(result.current.stats.done).toBe(1));
-    expect(fake.started).toHaveLength(5);
+    expect(fake.started).toHaveLength(8);
     act(() => fake.resolveAll());
     unmount();
   });
@@ -116,12 +124,12 @@ describe("useDownloadManager", () => {
     const fake = deferredAdapter();
     const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage: memoryStorage() }));
 
-    act(() => result.current.enqueue(series, episodes));
-    await waitFor(() => expect(fake.started).toHaveLength(5));
+    act(() => result.current.enqueue(series, manyEpisodes));
+    await waitFor(() => expect(fake.started).toHaveLength(8));
     act(() => result.current.setConcurrency(1));
     act(() => fake.resolve(fake.started[0]));
     await waitFor(() => expect(result.current.stats.done).toBe(1));
-    expect(fake.started).toHaveLength(5);
+    expect(fake.started).toHaveLength(8);
 
     act(() => fake.resolveAll());
     unmount();
@@ -137,10 +145,53 @@ describe("useDownloadManager", () => {
 
     await waitFor(() => expect(result.current.stats.error).toBe(1));
     expect(result.current.stats.running).toBe(1);
-    expect(result.current.state.batches[0].items[0].error).toBe("network down");
+    expect(result.current.state.batches[0].items[0].error).toContain("network down");
 
     act(() => fake.resolveAll());
     unmount();
+  });
+
+  it("automatically retries a failed episode three times before keeping it failed", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = deferredAdapter();
+      const storage = memoryStorage();
+      const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage }));
+
+      act(() => result.current.enqueue(series, episodes.slice(0, 1)));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(fake.started).toHaveLength(1);
+
+      for (const expectedAttempts of [2, 3, 4]) {
+        act(() => fake.reject(fake.started[fake.started.length - 1]!));
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(result.current.stats.error).toBe(1);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(10_000);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        if (expectedAttempts < 4) {
+          expect(fake.started).toHaveLength(expectedAttempts);
+        }
+      }
+
+      act(() => fake.reject(fake.started[fake.started.length - 1]!));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(fake.started).toHaveLength(4);
+      expect(result.current.state.batches[0].items[0]).toMatchObject({ status: "error", error: "network down" });
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("maps progress events to the matching running episode", async () => {

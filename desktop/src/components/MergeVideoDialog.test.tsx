@@ -35,18 +35,19 @@ const incompleteBatch: DownloadBatch = {
 };
 
 describe("MergeVideoDialog", () => {
-  it("defaults H.264 on and submits episode-sorted completed paths", async () => {
+  it("defaults to automatic lossless merge and submits episode-sorted completed paths", async () => {
     const submit = vi.fn();
     const view = render(
       <MergeVideoDialog batch={batchWithOutOfOrderItems} onSubmit={submit} onClose={vi.fn()} />,
     );
-    expect((view.getByRole("checkbox", { name: "转为 H.264" }) as HTMLInputElement).checked).toBe(true);
+    expect((view.getByRole("combobox", { name: "合并方式" }) as HTMLSelectElement).value).toBe("auto");
     expect(view.getByLabelText("合并剧集").textContent).toContain("第 1 集");
     expect(view.getByLabelText("合并剧集").textContent).toContain("第 2 集");
     fireEvent.click(view.getByRole("button", { name: "开始合并" }));
     expect(submit).toHaveBeenCalledWith(
       expect.objectContaining({
-        transcodeH264: true,
+        mode: "auto",
+        quality: "high",
         conflictPolicy: "failIfExists",
         outputName: "天下第一纨绔.mp4",
         inputs: [
@@ -57,11 +58,23 @@ describe("MergeVideoDialog", () => {
     );
   });
 
-  it("keeps incomplete batches from submitting and defaults conflict choice to no overwrite", () => {
+  it("submits selected transcode quality and disables quality for lossless mode", () => {
+    const submit = vi.fn();
+    const view = render(<MergeVideoDialog batch={batchWithOutOfOrderItems} onSubmit={submit} onClose={vi.fn()} />);
+    fireEvent.change(view.getByRole("combobox", { name: "合并方式" }), { target: { value: "copy" } });
+    expect((view.getByRole("combobox", { name: "转码画质" }) as HTMLSelectElement).disabled).toBe(true);
+    fireEvent.change(view.getByRole("combobox", { name: "合并方式" }), { target: { value: "transcode" } });
+    fireEvent.change(view.getByRole("combobox", { name: "转码画质" }), { target: { value: "compact" } });
+    fireEvent.click(view.getByRole("button", { name: "开始合并" }));
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ mode: "transcode", quality: "compact", conflictPolicy: "failIfExists" }));
+  });
+
+  it("keeps incomplete batches from submitting and never offers overwrite", () => {
     const submit = vi.fn();
     const view = render(<MergeVideoDialog batch={incompleteBatch} onSubmit={submit} onClose={vi.fn()} />);
     expect((view.getByRole("button", { name: "开始合并" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((view.getByRole("radio", { name: "不覆盖已有文件" }) as HTMLInputElement).checked).toBe(true);
+    expect(view.queryByRole("radio", { name: "覆盖已有文件" })).toBeNull();
+    expect(view.queryByRole("radio", { name: "不覆盖已有文件" })).toBeNull();
     fireEvent.click(view.getByRole("button", { name: "开始合并" }));
     expect(submit).not.toHaveBeenCalled();
   });

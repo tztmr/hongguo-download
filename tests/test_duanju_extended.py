@@ -437,8 +437,18 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
                         "cell_view": {
                             "cell_data": [{
                                 "video_data": [
-                                    {"series_id": "typed-1", "title": "AI一", "content_type": 1004},
-                                    {"series_id": "typed-2", "title": "AI二", "content_type": 1004},
+                                    {
+                                        "series_id": "typed-1",
+                                        "title": "AI一",
+                                        "content_type": 1004,
+                                        "video_category_type": "ai_video",
+                                    },
+                                    {
+                                        "series_id": "typed-2",
+                                        "title": "AI二",
+                                        "content_type": 1004,
+                                        "video_category_type": "ai_video",
+                                    },
                                 ]
                             }]
                         },
@@ -566,6 +576,171 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["data"]["board"], "ranklist_must_watch")
         self.assertTrue(payload["data"]["next_cursor"])
 
+    async def test_rank_endpoint_uses_requested_release_type(self):
+        async def handler(**call):
+            query = parse_qs(urlparse(call["url"]).query, keep_blank_values=True)
+            self.assertEqual(query["selected_items"], ["ai_playlet"])
+            return {
+                "ok": True,
+                "upstream": {
+                    "data": {
+                        "cell_view": {"cell_data": [{"video_data": [
+                            {
+                                "series_id": "ai-rank-1",
+                                "title": "AI榜单项",
+                                "content_type": 1004,
+                                "video_category_type": "ai_video",
+                            }
+                        ]}]},
+                        "next_offset": 1,
+                        "has_more": False,
+                    }
+                },
+            }
+
+        payload = response_json(await duanju_rank(
+            request_for(RecordingClient(handler), "/api/duanju/rank"),
+            board="ranklist_new_rank_sc",
+            release_type="ai_playlet",
+            cursor="",
+            limit=20,
+        ))
+
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(payload["data"]["release_type"], "ai_playlet")
+        self.assertEqual(payload["data"]["items"][0]["release_type"], "ai_playlet")
+
+    async def test_rank_endpoint_filters_ai_by_upstream_video_category_type(self):
+        async def handler(**_call):
+            return {
+                "ok": True,
+                "upstream": {
+                    "data": {
+                        "cell_view": {"cell_data": [{"video_data": [
+                            {
+                                "series_id": "ai-1",
+                                "title": "AI剧",
+                                "content_type": 1004,
+                                "video_category_type": "ai_video",
+                            },
+                            {
+                                "series_id": "ordinary-1",
+                                "title": "普通剧",
+                                "content_type": 1,
+                            },
+                        ]}]},
+                        "next_offset": 2,
+                        "has_more": False,
+                    }
+                },
+            }
+
+        payload = response_json(await duanju_rank(
+            request_for(RecordingClient(handler), "/api/duanju/rank"),
+            board="ranklist_hot_sc",
+            release_type="ai_playlet",
+            cursor="",
+            limit=20,
+        ))
+
+        self.assertEqual([item["series_id"] for item in payload["data"]["items"]], ["ai-1"])
+
+    async def test_rank_endpoint_maps_human_release_type_to_upstream_selector(self):
+        async def handler(**call):
+            query = parse_qs(urlparse(call["url"]).query, keep_blank_values=True)
+            self.assertEqual(query["selected_items"], ["human"])
+            return {
+                "ok": True,
+                "upstream": {
+                    "data": {
+                        "cell_view": {"cell_data": [{"video_data": [
+                            {"series_id": "human-rank-1", "title": "真人榜单项", "content_type": 1}
+                        ]}]},
+                        "next_offset": 1,
+                        "has_more": False,
+                    }
+                },
+            }
+
+        payload = response_json(await duanju_rank(
+            request_for(RecordingClient(handler), "/api/duanju/rank"),
+            board="ranklist_new_rank_sc",
+            release_type="playlet",
+            cursor="",
+            limit=20,
+        ))
+
+        self.assertEqual(payload["code"], 0)
+        self.assertEqual(payload["data"]["items"][0]["series_id"], "human-rank-1")
+
+    async def test_rank_endpoint_filters_mixed_upstream_rows_by_content_type(self):
+        async def handler(**_call):
+            return {
+                "ok": True,
+                "upstream": {
+                    "data": {
+                        "cell_view": {"cell_data": [{"video_data": [
+                            {"series_id": "drama-1", "title": "真人榜单项", "content_type": 1},
+                            {"series_id": "manju-1", "title": "漫剧榜单项", "content_type": 1004},
+                        ]}]},
+                        "next_offset": 2,
+                        "has_more": False,
+                    }
+                },
+            }
+
+        client = RecordingClient(handler)
+        drama = response_json(await duanju_rank(
+            request_for(client, "/api/duanju/rank"),
+            board="ranklist_hot_sc", release_type="playlet", cursor="", limit=20,
+        ))
+        manju = response_json(await duanju_rank(
+            request_for(client, "/api/duanju/rank"),
+            board="ranklist_hot_sc", release_type="comic_series_rank", cursor="", limit=20,
+        ))
+
+        self.assertEqual([item["series_id"] for item in drama["data"]["items"]], ["drama-1"])
+        self.assertEqual([item["series_id"] for item in manju["data"]["items"]], ["manju-1"])
+
+    async def test_rank_endpoint_falls_back_to_all_when_typed_selector_is_empty(self):
+        calls = 0
+
+        async def handler(**call):
+            nonlocal calls
+            calls += 1
+            query = parse_qs(urlparse(call["url"]).query, keep_blank_values=True)
+            selected = query["selected_items"][0]
+            if calls == 1:
+                self.assertEqual(selected, "comic_series_rank")
+                items = []
+            else:
+                self.assertEqual(selected, "all")
+                items = [
+                    {"series_id": "hot-search-manju", "title": "热搜漫剧", "content_type": 1004},
+                    {"series_id": "hot-search-drama", "title": "热搜真人剧", "content_type": 1},
+                ]
+            return {
+                "ok": True,
+                "upstream": {
+                    "data": {
+                        "cell_view": {"cell_data": [{"video_data": items}]},
+                        "next_offset": calls,
+                        "has_more": False,
+                    }
+                },
+            }
+
+        payload = response_json(await duanju_rank(
+            request_for(RecordingClient(handler), "/api/duanju/rank"),
+            board="ranklist_hot_search_sc",
+            release_type="comic_series_rank",
+            cursor="",
+            limit=20,
+        ))
+
+        self.assertEqual(calls, 2)
+        self.assertEqual([item["series_id"] for item in payload["data"]["items"]], ["hot-search-manju"])
+
     async def test_rank_cursor_carries_state_and_reuses_bound_device(self):
         calls = 0
 
@@ -662,6 +837,62 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
         query = parse_qs(urlparse(captured[0]).query)
         self.assertEqual(query["selected_items"], ["ai_playlet"])
         self.assertEqual(query["sub_selected_items"], ["ranklist_new_rank_sc"])
+
+    async def test_typed_new_release_falls_back_to_all_when_selector_is_empty(self):
+        calls = []
+        today_noon = int(
+            datetime.now(SHANGHAI).replace(hour=12, minute=0, second=0, microsecond=0).timestamp()
+        )
+
+        async def handler(**call):
+            calls.append(call)
+            if call["method"] == "POST":
+                return {
+                    "ok": True,
+                    "upstream": {
+                        "data": {
+                            "new-ai-1": {
+                                "video_data": {
+                                    "series_id": "new-ai-1",
+                                    "create_time": today_noon,
+                                }
+                            }
+                        }
+                    },
+                }
+            query = parse_qs(urlparse(call["url"]).query, keep_blank_values=True)
+            selected = query["selected_items"][0]
+            items = [] if selected == "ai_playlet" else [{
+                "series_id": "new-ai-1",
+                "title": "今日 AI 剧",
+                "content_type": 1004,
+                "video_category_type": "ai_video",
+            }]
+            return {
+                "ok": True,
+                "upstream": {
+                    "data": {
+                        "cell_view": {"cell_data": [{"video_data": items}]},
+                        "next_offset": 1,
+                        "has_more": False,
+                    }
+                },
+            }
+
+        page = await _fetch_new_release_page(
+            RecordingClient(handler),
+            "ai_playlet",
+            0,
+            target_date=datetime.now(SHANGHAI).strftime("%Y%m%d"),
+        )
+
+        selected_items = [
+            parse_qs(urlparse(call["url"]).query)["selected_items"][0]
+            for call in calls
+            if call["method"] == "GET"
+        ]
+        self.assertEqual(selected_items, ["ai_playlet", "all"])
+        self.assertEqual([item["series_id"] for item in page["items"]], ["new-ai-1"])
 
 
 if __name__ == "__main__":

@@ -1,8 +1,29 @@
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import App from "./App";
 
 describe("App preview workflow", () => {
+  it("opens monitor details in place and retains the list and scroll after closing", async () => {
+    window.history.replaceState({}, "", "/?preview=library");
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: /新剧监听/ }));
+    await waitFor(() => expect(view.container.querySelectorAll(".monitor-card")).toHaveLength(20));
+    fireEvent.click(view.getByRole("button", { name: "AI剧" }));
+    await waitFor(() => expect(view.container.querySelectorAll(".monitor-card")).toHaveLength(20));
+    const scroller = view.getByTestId("monitor-scroll");
+    scroller.scrollTop = 360;
+    fireEvent.click(view.container.querySelectorAll(".monitor-card")[1]);
+    const dialog = view.getByRole("dialog", { name: "新剧详情" });
+    expect(view.queryByRole("heading", { name: "首页推荐" })).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: /加入下载队列/ }));
+    expect(within(dialog).getByText(/已加入 1 集/)).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭详情" }));
+    expect(view.queryByRole("dialog")).toBeNull();
+    expect(view.getByTestId("monitor-scroll")).toBe(scroller);
+    expect(scroller.scrollTop).toBe(360);
+    expect(view.getByRole("button", { name: "AI剧" }).className).toContain("active");
+  });
+
   it("selects an episode range, enqueues it and opens grouped download management", async () => {
     window.history.replaceState({}, "", "/?preview=library");
     const view = render(<App />);

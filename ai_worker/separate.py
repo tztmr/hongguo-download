@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import os
-import shutil
 import stat
 import wave
 from pathlib import Path
@@ -13,6 +13,8 @@ from ai_worker.protocol import WorkerError, WorkerRequest, progress
 
 
 SUPPORTED_MODELS = {"htdemucs", "htdemucs_ft"}
+CHUNK_SECONDS = 120
+CONTEXT_SECONDS = 1
 
 
 def _wav_duration(path: Path) -> float:
@@ -48,49 +50,117 @@ def _select_device(requested: str) -> str:
 
 
 def _demucs_separator(
-    source: Path, output: Path, model: str, device: str, model_root: Path | None = None
+    source: Path, output: Path, model: str, device: str, model_root: Path | None = None,
+    *, emit: Callable[[dict], None] = lambda _event: None,
 ) -> tuple[Path, Path]:
-    from demucs.separate import main as demucs_main
+    import numpy as np
+    import soundfile as sf
+    import torch
+    from demucs.apply import apply_model
+    from demucs.audio import convert_audio
+    from demucs.pretrained import get_model
 
-    arguments = [
-        "--two-stems",
-        "vocals",
-        "-n",
-        model,
-        "-d",
-        device,
-        "-o",
-        str(output),
-        str(source),
-    ]
-    if model_root is not None:
-        arguments[arguments.index("-o"):arguments.index("-o")] = [
-            "--repo",
-            str(model_root),
-        ]
-    # A PyInstaller worker cannot invoke `sys.executable -m demucs.separate`:
-    # that would re-enter this worker's own CLI. Demucs is collected into the
-    # frozen runtime, so call its entrypoint in-process and isolate its prose and
-    # progress bars from the JSON-lines protocol on stdout.
+    # Load once in-process: re-executing a frozen worker would re-enter its CLI.
+    # Only library prose is redirected; our progress must reach the JSON pipe.
     with open(os.devnull, "w", encoding="utf-8") as sink:
         with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-            demucs_main(arguments)
-    track = source.stem
-    nested = output / model / track
-    vocals_source = nested / "vocals.wav"
-    background_source = nested / "no_vocals.wav"
+            network = get_model(model, repo=model_root)
+    network.cpu()
+    network.eval()
+    vocal_index = network.sources.index("vocals")
+    rate = network.samplerate
     vocals = output / "vocals.wav"
     background = output / "background_music.wav"
-    if vocals_source != vocals:
-        shutil.copy2(vocals_source, vocals)
-    if background_source != background:
-        shutil.copy2(background_source, background)
+    try:
+        with sf.SoundFile(source) as reader, contextlib.ExitStack() as stack:
+            total, input_rate = len(reader), reader.samplerate
+            step = CHUNK_SECONDS * input_rate
+            context = CONTEXT_SECONDS * input_rate
+            count = (total + step - 1) // step
+            # Standard PCM WAV remains compatible with wave.open validation.
+            writers = [stack.enter_context(sf.SoundFile(
+                path, "w", samplerate=rate, channels=network.audio_channels,
+                subtype="PCM_16", format="WAV",
+            )) for path in (vocals, background)]
+            pending = None
+            for index in range(count):
+                start = max(0, index * step - context)
+                end = min(total, (index + 1) * step + context)
+                reader.seek(start)
+                samples = reader.read(end - start, dtype="float32", always_2d=True)
+                emit(progress(f"分离第 {index + 1}/{count} 段", 10 + 65 * index / count))
+                with torch.inference_mode():
+                    wav = convert_audio(torch.from_numpy(samples.T.copy()), input_rate,
+                                        rate, network.audio_channels)
+                    length = round(end * rate / input_rate) - round(start * rate / input_rate)
+                    wav = wav[:, :length]
+                    ref = wav.mean(0)
+                    mean, std = ref.mean(), ref.std(unbiased=False)
+                    if std < 1e-8:
+                        stems = torch.stack((wav, torch.zeros_like(wav)))
+                    else:
+                        normalized = (wav - mean) / std
+
+                        def infer():
+                            return apply_model(
+                                network, normalized[None], device=device, shifts=1,
+                                split=True, overlap=0.25, progress=False, num_workers=0,
+                            )[0]
+
+                        retry_on_cpu = False
+                        try:
+                            sources = infer()
+                        except (RuntimeError, NotImplementedError) as error:
+                            message = str(error).lower()
+                            if device != "mps" or "mps" not in message or not any(
+                                token in message for token in (
+                                    "out of memory", "not supported", "not implemented",
+                                    "not currently implemented", "unsupported",
+                                )
+                            ):
+                                raise
+                            retry_on_cpu = True
+                        # Leave the exception handler first to release its traceback
+                        # and failed GPU tensors before allocating the CPU retry.
+                        if retry_on_cpu:
+                            device = "cpu"
+                            network.cpu()
+                            torch.mps.empty_cache()
+                            emit(progress("加速不可用，已切换 CPU 继续分离", 10 + 65 * index / count))
+                            sources = infer()
+                        sources = sources.cpu() * std + mean
+                        voice = sources[vocal_index]
+                        music = sources.sum(dim=0) - voice
+                        stems = torch.stack((voice, music))
+                        del sources, voice, music, normalized
+                    current = stems.permute(0, 2, 1).contiguous().numpy()
+                    if not np.isfinite(current).all():
+                        raise WorkerError("AI_SEPARATION_OUTPUT_INVALID", "音源分离输出无效")
+                    if pending is not None:
+                        overlap = pending.shape[1]
+                        fade = np.linspace(0, 1, overlap, dtype="float32")[None, :, None]
+                        current[:, :overlap] = pending * (1 - fade) + current[:, :overlap] * fade
+                    # Hold only the boundary shared with the next chunk. Copy it
+                    # so a tiny tail does not retain the entire tensor allocation.
+                    keep = length if index + 1 == count else (
+                        round(((index + 1) * step - context) * rate / input_rate)
+                        - round(start * rate / input_rate)
+                    )
+                    pending = current[:, keep:].copy() if index + 1 < count else None
+                    for writer, stem in zip(writers, current):
+                        writer.write(stem[:keep])
+                    del stem, stems, current, wav, ref, samples
+                emit(progress(f"已分离 {index + 1}/{count} 段", 10 + 65 * (index + 1) / count))
+    except BaseException:
+        for path in (vocals, background):
+            path.unlink(missing_ok=True)
+        raise
     return vocals, background
 
 
 def separate_audio(
     request: WorkerRequest,
-    separator: Callable[..., tuple[Path, Path]] = _demucs_separator,
+    separator: Callable[..., tuple[Path, Path]] | None = None,
     emit: Callable[[dict], None] = lambda _event: None,
 ) -> dict[str, str]:
     options = request.options
@@ -113,13 +183,17 @@ def separate_audio(
     source_duration = _wav_duration(request.input_path)
     emit(progress("preparing", 10))
     try:
-        try:
-            vocals, background = separator(
-                request.input_path, request.output_dir, model, device, model_root
+        if separator is None:
+            vocals, background = _demucs_separator(
+                request.input_path, request.output_dir, model, device, model_root, emit=emit,
             )
-        except TypeError:
-            # Backward-compatible injected fakes in focused unit tests take four arguments.
-            vocals, background = separator(request.input_path, request.output_dir, model, device)
+        else:
+            arguments = (request.input_path, request.output_dir, model, device, model_root)
+            try:
+                inspect.signature(separator).bind(*arguments)
+            except TypeError:
+                arguments = arguments[:4]
+            vocals, background = separator(*arguments)
     except WorkerError:
         raise
     except BaseException as error:

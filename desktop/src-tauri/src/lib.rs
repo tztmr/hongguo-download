@@ -1,15 +1,18 @@
+use atomicwrites::{AllowOverwrite, AtomicFile};
+use chrono::{FixedOffset, TimeZone};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(debug_assertions)]
 use std::process::{Child, Stdio};
 use std::{
+    collections::HashSet,
     fs,
-    io::Write,
+    io::{BufWriter, Read, Write},
     net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
-    sync::Mutex,
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
@@ -37,16 +40,22 @@ const API_CONTRACT: &str = "hongguo-desktop-v2";
 const MEDIA_JOB_PROGRESS_EVENT: &str = "media-job-progress";
 const AI_COMPONENT_PROGRESS_EVENT: &str = "ai-component-progress";
 const YOUTUBE_JOB_PROGRESS_EVENT: &str = "youtube-job-progress";
+const EMBEDDED_AI_COMPONENT_MANIFEST: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/ai-components.json"
+));
 
 struct AppState {
     client: Client,
     api_base: String,
+    api_ready: Arc<OnceLock<AppResult<()>>>,
     api_child: Mutex<Option<ApiChild>>,
     settings: Mutex<AppSettings>,
     settings_path: PathBuf,
     media_jobs: std::sync::Arc<MediaJobService>,
     ai_components: Option<std::sync::Arc<ComponentManager>>,
     youtube: std::sync::Arc<YouTubeService>,
+    prepared_series_assets: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 #[derive(Clone)]
@@ -179,7 +188,15 @@ fn get_json(client: &Client, api_base: &str, path: &str) -> AppResult<Value> {
 fn wait_for_health(client: &Client, api_base: &str, timeout: Duration) -> AppResult<()> {
     let start = Instant::now();
     loop {
-        if let Ok(response) = client.get(format!("{api_base}/health")).send() {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return Err(err("本地 API 启动超时，请重新打开应用"));
+        }
+        if let Ok(response) = client
+            .get(format!("{api_base}/health"))
+            .timeout(remaining.min(Duration::from_millis(500)))
+            .send()
+        {
             if response.status().is_success() {
                 if let Ok(value) = response.json::<Value>() {
                     if health_matches_contract(&value) {
@@ -188,11 +205,18 @@ fn wait_for_health(client: &Client, api_base: &str, timeout: Duration) -> AppRes
                 }
             }
         }
-        if start.elapsed() > timeout {
-            return Err(err("本地 API 启动超时"));
-        }
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_millis(100).min(timeout.saturating_sub(start.elapsed())));
     }
+}
+
+fn ensure_api_ready(
+    client: &Client,
+    api_base: &str,
+    ready: &OnceLock<AppResult<()>>,
+) -> AppResult<()> {
+    ready
+        .get_or_init(|| wait_for_health(client, api_base, Duration::from_secs(20)))
+        .clone()
 }
 
 enum ApiChild {
@@ -211,7 +235,7 @@ fn sidecar_spawn_error(error: impl std::fmt::Display) -> AppError {
     )
 }
 
-fn spawn_api(app: &AppHandle, port: u16) -> AppResult<ApiChild> {
+fn spawn_api(app: &AppHandle, port: u16, download_proxy: Option<&str>) -> AppResult<ApiChild> {
     let data_dir = app
         .path()
         .app_data_dir()
@@ -235,6 +259,13 @@ fn spawn_api(app: &AppHandle, port: u16) -> AppResult<ApiChild> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(proxy) = download_proxy.filter(|value| !value.trim().is_empty()) {
+            command
+                .env("HTTP_PROXY", proxy)
+                .env("HTTPS_PROXY", proxy)
+                .env("ALL_PROXY", proxy)
+                .env("NO_PROXY", "127.0.0.1,localhost,::1");
+        }
         command
             .spawn()
             .map(ApiChild::Development)
@@ -248,6 +279,14 @@ fn spawn_api(app: &AppHandle, port: u16) -> AppResult<ApiChild> {
             .sidecar("hongguo-api")
             .map_err(sidecar_spawn_error)?
             .args(release_api_args(port, &data_dir));
+        let mut command = command;
+        if let Some(proxy) = download_proxy.filter(|value| !value.trim().is_empty()) {
+            command = command
+                .env("HTTP_PROXY", proxy)
+                .env("HTTPS_PROXY", proxy)
+                .env("ALL_PROXY", proxy)
+                .env("NO_PROXY", "127.0.0.1,localhost,::1");
+        }
         let (mut events, child) = command.spawn().map_err(sidecar_spawn_error)?;
         tauri::async_runtime::spawn(async move { while events.recv().await.is_some() {} });
         Ok(ApiChild::Release(child))
@@ -257,6 +296,25 @@ fn spawn_api(app: &AppHandle, port: u16) -> AppResult<ApiChild> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_health_timeout_bounds_a_server_that_accepts_without_responding() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (_connection, _) = listener.accept().unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(2));
+        });
+        let client = Client::builder().no_proxy().build().unwrap();
+        let start = Instant::now();
+        let result = wait_for_health(&client, &base, Duration::from_millis(80));
+        let elapsed = start.elapsed();
+        release.send(()).unwrap();
+        server.join().unwrap();
+        assert!(result.is_err());
+        assert!(elapsed < Duration::from_secs(1));
+    }
 
     #[test]
     fn api_base_uses_the_reserved_port() {
@@ -297,6 +355,23 @@ mod tests {
                 "warning",
             ]
         );
+    }
+
+    #[test]
+    fn ai_manifest_uses_the_source_tree_when_dev_resources_are_missing() {
+        let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("ai-components.json");
+        let json = read_ai_manifest(Path::new("/path/that/does/not/exist"), Some(&fallback))
+            .expect("development fallback manifest should be readable");
+        assert!(json.contains("\"runtime\""));
+    }
+
+    #[test]
+    fn embedded_ai_manifest_is_a_valid_component_catalog() {
+        let manifest = media::components::parse_manifest(EMBEDDED_AI_COMPONENT_MANIFEST)
+            .expect("embedded AI component manifest should be valid");
+        assert_eq!(manifest.components.len(), 5);
     }
 
     #[test]
@@ -361,6 +436,96 @@ mod tests {
 
         assert!(path.ends_with("第 1 集_1080p.mp4"));
     }
+
+    #[test]
+    fn downloaded_series_text_matches_the_demo_layout() {
+        let metadata = DownloadSeriesMetadata {
+            cover_url: "https://example.invalid/cover".into(),
+            summary: "侯府千金沈明昭前世错信未婚夫。".into(),
+            author: "花花夜读".into(),
+            category: "恋爱 · 系统 · 古代".into(),
+            content_type_code: 1004,
+            release_type: Some("comic_series_rank".into()),
+            episode_count: 100,
+            duration_seconds: 8721,
+            online_time: Some(1_787_760_360),
+        };
+
+        assert_eq!(
+            series_intro_text(&metadata),
+            "侯府千金沈明昭前世错信未婚夫。"
+        );
+        assert_eq!(
+            detailed_intro_text("误许相思", &metadata),
+            concat!(
+                "剧名：误许相思\n\n",
+                "作者：花花夜读\n\n",
+                "类型：漫剧,恋爱,系统,古代\n\n",
+                "集数：100\n\n",
+                "时长：2小时25分钟21秒\n\n",
+                "简介：侯府千金沈明昭前世错信未婚夫。\n\n",
+                "发布时间：2026-08-27 00:06:00",
+            )
+        );
+    }
+
+    #[test]
+    fn downloaded_cover_uses_the_image_bytes_for_its_extension() {
+        assert_eq!(cover_extension(&[0xff, 0xd8, 0xff, 0xe0]), Some("jpg"));
+        assert_eq!(cover_extension(b"\x89PNG\r\n\x1a\n"), Some("png"));
+        assert_eq!(cover_extension(b"RIFF0000WEBP"), Some("webp"));
+        assert_eq!(cover_extension(b"not an image"), None);
+    }
+
+    #[test]
+    fn preparing_a_download_publishes_both_intros_and_the_named_cover_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cover_url = format!("http://{}/cover", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n\xff\xd8\xff\xe0")
+                .unwrap();
+        });
+        let root = std::env::temp_dir().join(format!(
+            "hongguo-series-assets-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let metadata = DownloadSeriesMetadata {
+            cover_url,
+            summary: "剧情简介".into(),
+            author: "作者".into(),
+            category: "古代".into(),
+            content_type_code: 1,
+            release_type: Some("playlet".into()),
+            episode_count: 2,
+            duration_seconds: 61,
+            online_time: None,
+        };
+        let prepared = Mutex::new(HashSet::new());
+        let client = Client::builder().no_proxy().build().unwrap();
+
+        prepare_series_assets(&client, &root, "测试/剧", &metadata, &prepared).unwrap();
+        prepare_series_assets(&client, &root, "测试/剧", &metadata, &prepared).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("简介.txt")).unwrap(),
+            "剧情简介"
+        );
+        assert!(fs::read_to_string(root.join("详细简介.txt"))
+            .unwrap()
+            .contains("时长：1分钟1秒"));
+        assert_eq!(
+            fs::read(root.join("测试 剧.jpg")).unwrap(),
+            [0xff, 0xd8, 0xff, 0xe0]
+        );
+        fs::remove_dir_all(&root).unwrap();
+        server.join().unwrap();
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -389,6 +554,172 @@ struct DownloadArgs {
     title: String,
     episode_title: String,
     definition: Option<String>,
+    series: DownloadSeriesMetadata,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadSeriesMetadata {
+    #[serde(default, rename = "cover")]
+    cover_url: String,
+    #[serde(default, rename = "abstract")]
+    summary: String,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    category: String,
+    #[serde(default)]
+    content_type_code: i64,
+    #[serde(default)]
+    release_type: Option<String>,
+    #[serde(default)]
+    episode_count: u64,
+    #[serde(default)]
+    duration_seconds: u64,
+    #[serde(default)]
+    online_time: Option<i64>,
+}
+
+fn series_intro_text(metadata: &DownloadSeriesMetadata) -> &str {
+    metadata.summary.trim()
+}
+
+fn series_type_text(metadata: &DownloadSeriesMetadata) -> String {
+    let primary = match metadata.release_type.as_deref() {
+        Some("comic_series_rank") => "漫剧",
+        Some("ai_playlet") => "AI剧",
+        Some("playlet") => "真人剧",
+        _ if metadata.content_type_code == 1004 => "漫剧",
+        _ => "真人剧",
+    };
+    let mut labels = vec![primary.to_string()];
+    for label in metadata
+        .category
+        .split(['·', ',', '，', '/', '、'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !labels.iter().any(|existing| existing == label) {
+            labels.push(label.to_string());
+        }
+    }
+    labels.join(",")
+}
+
+fn duration_text(seconds: u64) -> String {
+    if seconds == 0 {
+        return "未知".into();
+    }
+    let hours = seconds / 3600;
+    let minutes = seconds % 3600 / 60;
+    let seconds = seconds % 60;
+    if hours > 0 {
+        format!("{hours}小时{minutes}分钟{seconds}秒")
+    } else if minutes > 0 {
+        format!("{minutes}分钟{seconds}秒")
+    } else {
+        format!("{seconds}秒")
+    }
+}
+
+fn publish_time_text(timestamp: Option<i64>) -> String {
+    timestamp
+        .and_then(|value| {
+            FixedOffset::east_opt(8 * 3600)?
+                .timestamp_opt(value, 0)
+                .single()
+        })
+        .map(|value| value.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "未知".into())
+}
+
+fn detailed_intro_text(title: &str, metadata: &DownloadSeriesMetadata) -> String {
+    format!(
+        "剧名：{}\n\n作者：{}\n\n类型：{}\n\n集数：{}\n\n时长：{}\n\n简介：{}\n\n发布时间：{}",
+        title.trim(),
+        metadata.author.trim(),
+        series_type_text(metadata),
+        metadata.episode_count,
+        duration_text(metadata.duration_seconds),
+        series_intro_text(metadata),
+        publish_time_text(metadata.online_time),
+    )
+}
+
+fn cover_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> AppResult<()> {
+    AtomicFile::new(path, AllowOverwrite)
+        .write(|file| file.write_all(bytes))
+        .map_err(|error| err(format!("保存{label}失败: {error}")))
+}
+
+fn prepare_series_assets(
+    client: &Client,
+    series_dir: &Path,
+    title: &str,
+    metadata: &DownloadSeriesMetadata,
+    prepared: &Mutex<HashSet<PathBuf>>,
+) -> AppResult<()> {
+    let mut prepared = prepared.lock().unwrap();
+    if prepared.contains(series_dir) {
+        return Ok(());
+    }
+
+    atomic_write(
+        &series_dir.join("简介.txt"),
+        series_intro_text(metadata).as_bytes(),
+        "简介",
+    )?;
+    atomic_write(
+        &series_dir.join("详细简介.txt"),
+        detailed_intro_text(title, metadata).as_bytes(),
+        "详细简介",
+    )?;
+
+    if !metadata.cover_url.trim().is_empty() {
+        let safe_title = sanitize_name(title);
+        let existing_cover = ["jpg", "png", "webp"]
+            .iter()
+            .map(|extension| series_dir.join(format!("{safe_title}.{extension}")))
+            .any(|path| path.is_file());
+        if !existing_cover {
+            let response = client
+                .get(metadata.cover_url.trim())
+                .send()
+                .map_err(|error| err(format!("下载封面失败: {error}")))?;
+            if !response.status().is_success() {
+                return Err(err(format!("下载封面失败 HTTP {}", response.status())));
+            }
+            const MAX_COVER_BYTES: u64 = 20 * 1024 * 1024;
+            let mut bytes = Vec::new();
+            response
+                .take(MAX_COVER_BYTES + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|error| err(format!("读取封面失败: {error}")))?;
+            if bytes.len() as u64 > MAX_COVER_BYTES {
+                return Err(err("封面文件超过 20 MB"));
+            }
+            let extension = cover_extension(&bytes).ok_or_else(|| err("封面图片格式无效"))?;
+            atomic_write(
+                &series_dir.join(format!("{safe_title}.{extension}")),
+                &bytes,
+                "封面",
+            )?;
+        }
+    }
+    prepared.insert(series_dir.to_path_buf());
+    Ok(())
 }
 
 fn sanitize_name(input: &str) -> String {
@@ -434,7 +765,9 @@ where
 async fn api_get(state: State<'_, AppState>, path: String) -> AppResult<Value> {
     let client = state.client.clone();
     let api_base = state.api_base.clone();
+    let ready = state.api_ready.clone();
     run_blocking(move || {
+        ensure_api_ready(&client, &api_base, &ready)?;
         let value = get_json(&client, &api_base, &path)?;
         json_ok(&value).cloned()
     })
@@ -459,6 +792,13 @@ fn persist_settings_patch(state: &AppState, patch: UpdateSettings) -> AppResult<
     fs::create_dir_all(&next.save_dir).map_err(|e| err(format!("创建目录失败: {e}")))?;
     save_settings(&state.settings_path, &next).map_err(err)?;
     *guard = next.clone();
+    drop(guard);
+    if let Some(manager) = state.ai_components.as_ref() {
+        manager.configure_network(
+            next.download_proxy.as_deref(),
+            next.download_mirror.as_deref(),
+        )?;
+    }
     Ok(next)
 }
 
@@ -535,7 +875,9 @@ fn reveal_path(path: String) -> AppResult<()> {
 async fn health(state: State<'_, AppState>) -> AppResult<Value> {
     let client = state.client.clone();
     let api_base = state.api_base.clone();
+    let ready = state.api_ready.clone();
     run_blocking(move || {
+        ensure_api_ready(&client, &api_base, &ready)?;
         let response = client
             .get(format!("{api_base}/health"))
             .send()
@@ -555,12 +897,25 @@ async fn download_episode(
 ) -> AppResult<DownloadResult> {
     let client = state.client.clone();
     let api_base = state.api_base.clone();
+    let ready = state.api_ready.clone();
     let settings = state.settings.lock().unwrap().clone();
     let save_dir = settings.save_dir;
+    let prepared_series_assets = state.prepared_series_assets.clone();
     if args.definition.is_none() {
         args.definition = Some(settings.definition.as_str().to_string());
     }
-    run_blocking(move || perform_download_episode(app, client, api_base, save_dir, args)).await
+    run_blocking(move || {
+        ensure_api_ready(&client, &api_base, &ready)?;
+        perform_download_episode(
+            app,
+            client,
+            api_base,
+            save_dir,
+            args,
+            prepared_series_assets,
+        )
+    })
+    .await
 }
 
 #[tauri::command]
@@ -593,6 +948,26 @@ fn start_subtitle_job(state: State<AppState>, request: StartAIJobRequest) -> App
 #[tauri::command]
 fn cancel_media_job(state: State<AppState>, job_id: String) -> AppResult<MediaJob> {
     state.media_jobs.cancel(&job_id)
+}
+
+#[tauri::command]
+fn pause_media_job(state: State<AppState>, job_id: String) -> AppResult<MediaJob> {
+    state.media_jobs.pause(&job_id)
+}
+
+#[tauri::command]
+fn resume_media_job(state: State<AppState>, job_id: String) -> AppResult<MediaJob> {
+    state.media_jobs.resume(&job_id)
+}
+
+#[tauri::command]
+fn delete_media_job(state: State<AppState>, job_id: String) -> AppResult<()> {
+    state.media_jobs.delete(&job_id)
+}
+
+#[tauri::command]
+fn has_merged_video(state: State<AppState>, series_root: PathBuf) -> AppResult<bool> {
+    state.media_jobs.has_merged_video(&series_root)
 }
 
 #[tauri::command]
@@ -659,8 +1034,21 @@ fn import_youtube_oauth_config(
 }
 
 #[tauri::command]
-async fn authorize_youtube(state: State<'_, AppState>) -> AppResult<AccountSummary> {
-    state.youtube.authorize().await
+async fn authorize_youtube(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> AppResult<AccountSummary> {
+    let on_callback = std::sync::Arc::new(move || {
+        let foreground_app = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Some(window) = foreground_app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        });
+    });
+    state.youtube.authorize(on_callback).await
 }
 
 #[tauri::command]
@@ -692,6 +1080,16 @@ fn start_youtube_upload_job(
 #[tauri::command]
 fn cancel_youtube_upload_job(state: State<AppState>, job_id: String) -> AppResult<()> {
     state.youtube.cancel_upload(&job_id)
+}
+
+#[tauri::command]
+fn pause_youtube_upload_job(state: State<AppState>, job_id: String) -> AppResult<YouTubeJob> {
+    state.youtube.pause_upload(&job_id)
+}
+
+#[tauri::command]
+fn resume_youtube_upload_job(state: State<AppState>, job_id: String) -> AppResult<YouTubeJob> {
+    state.youtube.resume_upload(&job_id)
 }
 
 #[tauri::command]
@@ -729,10 +1127,18 @@ fn perform_download_episode(
     api_base: String,
     save_dir: PathBuf,
     args: DownloadArgs,
+    prepared_series_assets: Arc<Mutex<HashSet<PathBuf>>>,
 ) -> AppResult<DownloadResult> {
     let definition = args.definition.unwrap_or_else(|| "auto".into());
     let series_dir = save_dir.join(sanitize_name(&args.title));
     fs::create_dir_all(&series_dir).map_err(|e| err(format!("创建目录失败: {e}")))?;
+    prepare_series_assets(
+        &client,
+        &series_dir,
+        &args.title,
+        &args.series,
+        &prepared_series_assets,
+    )?;
     let url = format!(
         "{}/api/duanju/download?item_id={}&definition={}",
         api_base,
@@ -763,11 +1169,12 @@ fn perform_download_episode(
     let dest = download_destination(&series_dir, &args.episode_title, &actual_definition);
     let total = response.content_length();
     let tmp = dest.with_extension(format!("mp4.{}.part", sanitize_name(&args.task_id)));
-    let mut file = fs::File::create(&tmp).map_err(|e| err(format!("写文件失败: {e}")))?;
+    let file = fs::File::create(&tmp).map_err(|e| err(format!("写文件失败: {e}")))?;
+    let mut file = BufWriter::with_capacity(1024 * 1024, file);
     let mut received = 0u64;
     let mut last_emit = Instant::now();
+    let mut buffer = [0u8; 256 * 1024];
     loop {
-        let mut buffer = [0u8; 64 * 1024];
         let n = {
             use std::io::Read;
             response
@@ -797,7 +1204,7 @@ fn perform_download_episode(
             last_emit = Instant::now();
         }
     }
-    file.flush().ok();
+    file.flush().map_err(|e| err(format!("写文件失败: {e}")))?;
     drop(file);
     if dest.exists() {
         let _ = fs::remove_file(&dest);
@@ -836,13 +1243,25 @@ fn shutdown_child(child: &mut Option<ApiChild>) {
     }
 }
 
+fn read_ai_manifest(primary: &Path, fallback: Option<&Path>) -> Option<String> {
+    fs::read_to_string(primary)
+        .ok()
+        .or_else(|| fallback.and_then(|path| fs::read_to_string(path).ok()))
+}
+
 fn load_ai_component_manager(
     app: &AppHandle,
     data_dir: &Path,
 ) -> Option<std::sync::Arc<ComponentManager>> {
     let resource_dir = app.path().resource_dir().ok()?;
     let manifest_path = resource_dir.join("resources/ai-components.json");
-    let json = fs::read_to_string(manifest_path).ok()?;
+    #[cfg(debug_assertions)]
+    let fallback_path =
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/ai-components.json"));
+    #[cfg(not(debug_assertions))]
+    let fallback_path: Option<PathBuf> = None;
+    let json = read_ai_manifest(&manifest_path, fallback_path.as_deref())
+        .unwrap_or_else(|| EMBEDDED_AI_COMPONENT_MANIFEST.to_string());
     let root = data_dir.join("components");
     ComponentManager::from_manifest_json(root, &json)
         .ok()
@@ -871,17 +1290,28 @@ pub fn run() {
                 MediaJobManager::load(&media_jobs_path).map_err(|e| e.to_string())?,
             );
             let client = Client::builder()
+                // This client only talks to our loopback API sidecar.
+                .no_proxy()
                 .timeout(Duration::from_secs(180))
                 .build()
                 .map_err(|e| format!("http client: {e}"))?;
             let port = reserve_api_port().map_err(|e| e.to_string())?;
             let api_base = api_base_for_port(port);
-            let mut child = Some(spawn_api(app.handle(), port).map_err(|e| e.to_string())?);
-            if let Err(error) = wait_for_health(&client, &api_base, Duration::from_secs(20)) {
-                shutdown_child(&mut child);
-                return Err(error.to_string().into());
-            }
+            // The UI can render while the packaged Python service starts.
+            // API commands share a single readiness check on blocking workers.
             let ai_components = load_ai_component_manager(app.handle(), &media_jobs_path);
+            if let Some(components) = ai_components.as_ref() {
+                components
+                    .configure_network(
+                        settings.download_proxy.as_deref(),
+                        settings.download_mirror.as_deref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            let child = Some(
+                spawn_api(app.handle(), port, settings.download_proxy.as_deref())
+                    .map_err(|e| e.to_string())?,
+            );
             let event_sink = std::sync::Arc::new(TauriMediaJobEventSink {
                 app: app.handle().clone(),
             });
@@ -908,12 +1338,14 @@ pub fn run() {
             app.manage(AppState {
                 client,
                 api_base,
+                api_ready: Arc::new(OnceLock::new()),
                 api_child: Mutex::new(child),
                 settings: Mutex::new(settings),
                 settings_path,
                 media_jobs,
                 ai_components,
                 youtube,
+                prepared_series_assets: Arc::new(Mutex::new(HashSet::new())),
             });
             Ok(())
         })
@@ -942,6 +1374,10 @@ pub fn run() {
             start_audio_separation_job,
             start_subtitle_job,
             cancel_media_job,
+            pause_media_job,
+            resume_media_job,
+            delete_media_job,
+            has_merged_video,
             retry_media_job,
             mark_media_job_notified,
             get_ai_components,
@@ -955,6 +1391,8 @@ pub fn run() {
             remove_youtube_oauth_config,
             start_youtube_upload_job,
             cancel_youtube_upload_job,
+            pause_youtube_upload_job,
+            resume_youtube_upload_job,
             retry_youtube_upload_job,
             retry_youtube_thumbnail,
             mark_youtube_job_notified

@@ -36,7 +36,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 | 接口 | 功能 |
 |---|---|
-| `GET /api/duanju/search` | 搜索短剧,`content_type=drama` 或 `manju` |
+| `GET /api/duanju/search` | 搜索短剧,`content_type=drama`(真人剧) 或 `manju`(漫剧) |
 | `GET /api/duanju/detail` | 获取短剧原始详情 |
 | `GET /api/duanju/catalog` | 获取并标准化剧集目录 |
 | `GET /api/duanju/content` | 获取播放模型:多清晰度加密 CDN 地址和 `spade_a` |
@@ -76,7 +76,11 @@ curl "http://localhost:8000/api/duanju/discovery?category_id=262&offset=0&limit=
 
 `definition` 支持 `1080p`、`720p`、`540p`、`480p`、`360p`。目标档位不存在时先降档再升档,最终回落到任一可用源。
 
-上游画像差异(实测):短剧搜索、详情、目录走旧画像 `66.9`,只返回 `content_type=1`,不混入漫剧;漫剧搜索 `tab_type=19` 与发现页 `landing` 只在 `70132` 画像下可用,旧画像会返回 `SERVICE_ERROR`。这一切换已内置,调用方无需关心。
+关键词搜索当前上游只提供真人剧和漫剧两个 tab；AI剧可在榜单和新剧监听中按 `ai_playlet` 类型查看。
+
+榜单支持按类型请求：`/api/duanju/rank?board=ranklist_hot_sc&type=playlet`（真人剧）、`type=comic_series_rank`（漫剧）、`type=ai_playlet`（AI剧）或 `type=all`（全部）。服务端会根据返回的数字 `content_type`（真人剧 `1`、漫剧 `1004`）和 AI 标记 `video_category_type=ai_video` 做互斥二次隔离，避免上游混榜。
+
+上游画像差异(实测):短剧搜索、详情、目录走旧画像 `66.9`,只返回 `content_type=1`,不混入漫剧;漫剧搜索 `tab_type=19` 与发现页 `landing` 只在 `70132` 画像下可用,旧画像会返回 `SERVICE_ERROR`。榜单上游的真人剧筛选值实际是 `human`；AI剧实际通过 `video_category_type=ai_video` 标记，服务端会把真人剧、漫剧、AI剧做互斥二次过滤，避免上游混榜。这一切切换已内置,调用方无需关心。
 
 ### 解密流程
 

@@ -22,7 +22,10 @@ export type DownloadItem = {
 export type DownloadSeriesSnapshot = Pick<
   SeriesItem,
   "bookId" | "seriesId" | "title" | "cover" | "abstract" | "category" | "contentTypeCode"
->;
+> & Partial<Pick<
+  SeriesItem,
+  "episodeCount" | "durationSeconds" | "author" | "onlineTime" | "releaseType"
+>>;
 
 export type DownloadBatch = {
   id: string;
@@ -79,11 +82,11 @@ export type DownloadAction =
 const defaultIdFactory = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 export function clampConcurrency(value: number) {
-  return Math.min(10, Math.max(1, Math.round(Number.isFinite(value) ? value : 5)));
+  return Math.min(10, Math.max(1, Math.round(Number.isFinite(value) ? value : 8)));
 }
 
 export function createInitialState(): DownloadManagerState {
-  return { version: 2, concurrency: 5, globallyPaused: false, batches: [] };
+  return { version: 2, concurrency: 8, globallyPaused: false, batches: [] };
 }
 
 export function enqueueEpisodes(
@@ -143,6 +146,11 @@ export function enqueueEpisodes(
           abstract: series.abstract,
           category: series.category,
           contentTypeCode: series.contentTypeCode,
+          episodeCount: series.episodeCount,
+          durationSeconds: series.durationSeconds,
+          author: series.author,
+          onlineTime: series.onlineTime,
+          releaseType: series.releaseType,
         },
         paused: false,
         items: newItems,

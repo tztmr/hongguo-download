@@ -1,7 +1,7 @@
 import type { DownloadAdapter } from "./download/useDownloadManager";
 import type { DownloadBatch, DownloadItem, DownloadItemStatus, DownloadManagerState } from "./download/model";
 import type { MediaCommands, MediaJob } from "./media/types";
-import type { EpisodeItem, SeriesItem } from "./types";
+import type { AIComponentStatus, EpisodeItem, SeriesItem } from "./types";
 import type { YouTubeModel } from "./youtube/types";
 
 const names = [
@@ -134,6 +134,7 @@ export const previewMediaJobs: MediaJob[] = [
   {
     id: "preview-media-queued",
     dedupeKey: "preview-queued",
+    mergeRequest: { title: "系统逼我当暴君" },
     kind: "merge",
     status: "queued",
     stage: "queued",
@@ -146,6 +147,7 @@ export const previewMediaJobs: MediaJob[] = [
   {
     id: "preview-media-running",
     dedupeKey: "preview-running",
+    mergeRequest: { title: "系统逼我当暴君" },
     kind: "merge",
     status: "running",
     stage: "merging",
@@ -158,6 +160,7 @@ export const previewMediaJobs: MediaJob[] = [
   {
     id: "preview-media-completed",
     dedupeKey: "preview-completed",
+    mergeRequest: { title: "系统逼我当暴君" },
     kind: "merge",
     status: "completed",
     stage: "completed",
@@ -203,17 +206,17 @@ export const previewYouTubeModel: YouTubeModel = {
   jobs: [
     {
       id: "preview-upload-running", title: "系统逼我当暴君", channelId: "UC_PREVIEW", sourcePath: "/Preview/merged.mp4",
-      status: "uploading", uploadedBytes: 42, totalBytes: 100, percent: 42, errorCode: null, errorMessage: null,
+      status: "uploading", uploadedBytes: 4.2 * 1024 ** 3, totalBytes: 10 * 1024 ** 3, percent: 42, errorCode: null, errorMessage: null,
       videoId: null, youtubeUrl: null, actualPrivacyStatus: null, thumbnailState: "pending",
     },
     {
       id: "preview-upload-private", title: "闪婚后大佬每天都在追", channelId: "UC_PREVIEW", sourcePath: "/Preview/private.mp4",
-      status: "completed", uploadedBytes: 100, totalBytes: 100, percent: 100, errorCode: null, errorMessage: null,
+      status: "completed", uploadedBytes: 8 * 1024 ** 3, totalBytes: 8 * 1024 ** 3, percent: 100, errorCode: null, errorMessage: null,
       videoId: "preview-private", youtubeUrl: "https://www.youtube.com/watch?v=preview-private", actualPrivacyStatus: "private", thumbnailState: "succeeded", completionNotifiedAt: 1,
     },
     {
       id: "preview-thumbnail-failed", title: "今日宜偏爱", channelId: "UC_PREVIEW", sourcePath: "/Preview/partial.mp4",
-      status: "videoUploadedThumbnailFailed", uploadedBytes: 100, totalBytes: 100, percent: 100, errorCode: "THUMBNAIL_FORBIDDEN", errorMessage: "频道暂无自定义封面权限",
+      status: "videoUploadedThumbnailFailed", uploadedBytes: 8 * 1024 ** 3, totalBytes: 8 * 1024 ** 3, percent: 100, errorCode: "THUMBNAIL_FORBIDDEN", errorMessage: "频道暂无自定义封面权限",
       videoId: "preview-partial", youtubeUrl: "https://www.youtube.com/watch?v=preview-partial", actualPrivacyStatus: "private", thumbnailState: "failed", failureNotifiedAt: 1,
     },
   ],
@@ -224,6 +227,8 @@ export const previewYouTubeModel: YouTubeModel = {
   removeCredential: async () => undefined,
   startUpload: async () => previewYouTubeModel.jobs[0],
   cancel: async () => undefined,
+  pause: async () => undefined,
+  resume: async () => undefined,
   retry: async () => undefined,
   retryThumbnail: async () => undefined,
   markNotified: async () => undefined,
@@ -235,6 +240,64 @@ export const previewMediaCommands: MediaCommands = {
   startAudioSeparation: async () => previewMediaJobs[0],
   startSubtitleExtraction: async () => previewMediaJobs[0],
   cancel: async () => undefined,
+  pause: async () => previewMediaJobs[0],
+  resume: async () => previewMediaJobs[0],
+  deleteJob: async () => undefined,
+  hasMergedVideo: async () => previewMediaJobs.some((job) => job.kind === "merge" && job.status === "completed"),
   retry: async () => previewMediaJobs[3] ?? previewMediaJobs[0],
   subscribeProgress: async () => () => undefined,
 };
+
+// Local preview fixtures; these actions never download model files.
+export const previewAIComponents: AIComponentStatus[] = [
+  {
+    "id": "runtime",
+    "version": "2",
+    "downloadBytes": 156922102,
+    "installedBytes": 510405736,
+    "installed": true,
+    "installedVersion": "2",
+    "installedPath": "/Preview/components/runtime",
+    "inUse": false
+  },
+  {
+    "id": "demucs-htdemucs",
+    "version": "4.0.1",
+    "downloadBytes": 77960165,
+    "installedBytes": 84141932,
+    "installed": true,
+    "installedVersion": "4.0.1",
+    "installedPath": "/Preview/components/demucs-htdemucs",
+    "inUse": false
+  },
+  {
+    "id": "whisper-small",
+    "version": "20250625",
+    "downloadBytes": 445457618,
+    "installedBytes": 483617219,
+    "installed": false,
+    "installedVersion": null,
+    "installedPath": null,
+    "inUse": false
+  },
+  {
+    "id": "demucs-htdemucs_ft",
+    "version": "4.0.1",
+    "downloadBytes": 311824838,
+    "installedBytes": 336565233,
+    "installed": false,
+    "installedVersion": null,
+    "installedPath": null,
+    "inUse": false
+  },
+  {
+    "id": "whisper-medium",
+    "version": "20250625",
+    "downloadBytes": 1411865773,
+    "installedBytes": 1528008539,
+    "installed": false,
+    "installedVersion": null,
+    "installedPath": null,
+    "inUse": false
+  }
+];

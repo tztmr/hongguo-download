@@ -11,6 +11,7 @@ import type {
   NewReleasePage,
   NewReleaseType,
   RankPage,
+  RankReleaseType,
   SearchPage,
   SeriesItem,
   SeriesMetrics,
@@ -24,6 +25,7 @@ type RawSeries = {
   first_vid?: string;
   content_type?: number;
   episode_count?: number;
+  duration?: number;
   abstract?: string;
   score?: string;
   category?: string;
@@ -52,6 +54,7 @@ function asSeries(item: RawSeries): SeriesItem {
     firstVid: String(item.first_vid || ""),
     contentTypeCode: Number(item.content_type || 1),
     episodeCount: Number(item.episode_count || 0),
+    durationSeconds: Number(item.duration || 0),
     abstract: item.abstract || "",
     score: item.score || "",
     category: item.category || "",
@@ -243,6 +246,51 @@ export async function fetchSearch(
   };
 }
 
+type SearchAllCursor = {
+  drama: { offset: number; passback: string };
+  manju: { offset: number; passback: string };
+};
+
+function decodeSearchAllCursor(value: string): SearchAllCursor {
+  try {
+    const parsed = JSON.parse(value) as Partial<SearchAllCursor>;
+    if (
+      parsed.drama && parsed.manju
+      && typeof parsed.drama.offset === "number" && typeof parsed.drama.passback === "string"
+      && typeof parsed.manju.offset === "number" && typeof parsed.manju.passback === "string"
+    ) return parsed as SearchAllCursor;
+  } catch {
+    // Treat an absent or stale cursor as a fresh all-types search.
+  }
+  return {
+    drama: { offset: 0, passback: "" },
+    manju: { offset: 0, passback: "" },
+  };
+}
+
+export async function fetchSearchAll(key: string, cursor = ""): Promise<SearchPage> {
+  const state = decodeSearchAllCursor(cursor);
+  const [drama, manju] = await Promise.all([
+    fetchSearch(key, "drama", state.drama.offset, state.drama.passback),
+    fetchSearch(key, "manju", state.manju.offset, state.manju.passback),
+  ]);
+  const seen = new Set<string>();
+  const items = [...drama.items, ...manju.items].filter((item) => {
+    if (seen.has(item.seriesId)) return false;
+    seen.add(item.seriesId);
+    return true;
+  });
+  return {
+    items,
+    hasMore: drama.hasMore || manju.hasMore,
+    nextOffset: Math.max(drama.nextOffset, manju.nextOffset),
+    nextPassback: JSON.stringify({
+      drama: { offset: drama.nextOffset, passback: drama.nextPassback },
+      manju: { offset: manju.nextOffset, passback: manju.nextPassback },
+    } satisfies SearchAllCursor),
+  };
+}
+
 export async function fetchCatalog(bookId: string): Promise<EpisodeItem[]> {
   const data = await apiGet<{ items: Array<{ index: number; item_id: string; title: string }> }>(
     `/api/duanju/catalog?book_id=${encodeURIComponent(bookId)}`,
@@ -254,9 +302,10 @@ export async function fetchCatalog(bookId: string): Promise<EpisodeItem[]> {
   }));
 }
 
-export async function fetchRank(args: { board?: string; cursor?: string; limit?: number }): Promise<RankPage> {
+export async function fetchRank(args: { board?: string; type?: RankReleaseType; cursor?: string; limit?: number }): Promise<RankPage> {
   const query = new URLSearchParams({
     board: args.board || "ranklist_hot_sc",
+    type: args.type || "all",
     limit: String(args.limit || 20),
   });
   if (args.cursor) query.set("cursor", args.cursor);
@@ -266,6 +315,7 @@ export async function fetchRank(args: { board?: string; cursor?: string; limit?:
     has_more: boolean;
     board: string;
     board_name: string;
+    release_type?: RankReleaseType;
     boards?: Array<{ id: string; name: string }>;
   }>(`/api/duanju/rank?${query.toString()}`);
   return {
@@ -274,6 +324,7 @@ export async function fetchRank(args: { board?: string; cursor?: string; limit?:
     hasMore: Boolean(data.has_more),
     board: data.board || "ranklist_hot_sc",
     boardName: data.board_name || "",
+    releaseType: data.release_type || args.type || "all",
     boards: data.boards || [],
   };
 }
@@ -308,6 +359,7 @@ export async function downloadEpisode(args: {
   title: string;
   episodeTitle: string;
   definition: string;
+  series: import("./download/model").DownloadSeriesSnapshot;
 }) {
   return invoke<{ taskId: string; path: string; definition: string; bytes: number }>(
     "download_episode",

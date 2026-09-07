@@ -18,27 +18,63 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU8, Ordering},
         Arc,
     },
     time::{Duration, UNIX_EPOCH},
 };
-use tokio::time::sleep;
+use tokio::{sync::Notify, time::sleep};
 use url::Url;
 
 const UPLOAD_ENDPOINT: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
 pub const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 
+#[derive(Default)]
+struct UploadStopState {
+    // 0 = running, 1 = pause requested, 2 = cancel requested.
+    mode: AtomicU8,
+    wake: Notify,
+}
+
 #[derive(Clone, Default)]
-pub struct UploadCancellationToken(Arc<AtomicBool>);
+pub struct UploadCancellationToken(Arc<UploadStopState>);
 
 impl UploadCancellationToken {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
+        self.0.mode.store(2, Ordering::Release);
+        self.0.wake.notify_one();
+    }
+
+    pub fn pause(&self) {
+        let _ = self
+            .0
+            .mode
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+        self.0.wake.notify_one();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.mode.load(Ordering::Acquire) == 2
+    }
+    pub fn is_paused(&self) -> bool {
+        self.0.mode.load(Ordering::Acquire) == 1
+    }
+
+    async fn stopped(&self) {
+        while self.0.mode.load(Ordering::Acquire) == 0 {
+            self.0.wake.notified().await;
+        }
+    }
+
+    pub async fn interruptible<T>(&self, work: impl Future<Output = T>) -> Result<T, AppError> {
+        tokio::select! {
+            biased;
+            _ = self.stopped() => {
+                ensure_not_cancelled(self)?;
+                unreachable!("stop signal always has a reason")
+            }
+            result = work => Ok(result),
+        }
     }
 }
 
@@ -80,6 +116,46 @@ impl std::fmt::Debug for UploadCheckpoint {
     }
 }
 
+enum SessionStatus {
+    Incomplete(u64),
+    Complete(UploadResult),
+}
+
+fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_secs(1 << (attempt - 1).min(4))
+}
+fn network_failed() -> AppError {
+    AppError::new(
+        "UPLOAD_NETWORK_FAILED",
+        "上传连接失败，请检查网络或代理后重试，已上传进度会保留",
+    )
+}
+fn session_expired() -> AppError {
+    AppError::new(
+        "UPLOAD_SESSION_EXPIRED",
+        "YouTube 上传会话已过期，需要重新创建上传任务",
+    )
+}
+async fn response_result(response: Response) -> Result<UploadResult, AppError> {
+    let bytes = response.bytes().await.map_err(|_| {
+        AppError::new(
+            "UPLOAD_RESPONSE_INVALID",
+            "YouTube 上传响应无效，可重试查询结果",
+        )
+    })?;
+    parse_upload_result(&bytes)
+}
+fn finish_upload(
+    result: UploadResult,
+    checkpoint: &Path,
+    progress: &Arc<dyn Fn(UploadProgressEvent) + Send + Sync>,
+    total: u64,
+) -> Result<UploadResult, AppError> {
+    emit(progress, YouTubeJobStatus::Processing, total, total);
+    let _ = fs::remove_file(checkpoint);
+    Ok(result)
+}
+
 struct SourceSnapshot {
     path: PathBuf,
     size: u64,
@@ -95,7 +171,11 @@ pub struct ResumableUploader {
 impl ResumableUploader {
     pub fn new(checkpoint_dir: PathBuf) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(15))
+                .timeout(Duration::from_secs(180))
+                .build()
+                .expect("fixed upload client configuration is valid"),
             endpoint: Url::parse(UPLOAD_ENDPOINT).expect("fixed upload endpoint is valid"),
             checkpoint_dir,
         }
@@ -110,27 +190,32 @@ impl ResumableUploader {
         cancellation: UploadCancellationToken,
         progress: Arc<dyn Fn(UploadProgressEvent) + Send + Sync>,
     ) -> Result<UploadResult, AppError> {
+        ensure_not_cancelled(&cancellation)?;
         intent.validate()?;
         let source = snapshot_source(&intent.file_path)?;
         fs::create_dir_all(&self.checkpoint_dir).map_err(upload_io)?;
         let checkpoint_path = self.checkpoint_dir.join(format!("{}.json", intent.job_id));
-        emit(
-            &progress,
-            YouTubeJobStatus::PreparingAuthorization,
-            0,
-            source.size,
-        );
         let metadata_hash = intent_hash(intent);
         let channel_hash = hash_text(channel_id);
         let mut token = initial_token;
         let mut refreshed = false;
-        let mut checkpoint = match load_checkpoint(&checkpoint_path)? {
-            Some(value) => {
-                validate_checkpoint(&value, &source, &metadata_hash, &channel_hash)?;
-                value
-            }
+        let saved = load_checkpoint(&checkpoint_path)?;
+        if let Some(value) = &saved {
+            validate_checkpoint(value, &source, &metadata_hash, &channel_hash)?;
+        }
+        emit(
+            &progress,
+            YouTubeJobStatus::PreparingAuthorization,
+            saved.as_ref().map_or(0, |value| value.uploaded_offset),
+            source.size,
+        );
+        let mut needs_query = saved.is_some();
+        let mut checkpoint = match saved {
+            Some(value) => value,
             None => {
                 emit(&progress, YouTubeJobStatus::CreatingSession, 0, source.size);
+                // Finish saving a newly created session before honouring pause;
+                // dropping this POST can lose the session URL.
                 let session = self
                     .create_session(intent, &source, &mut token, &refresh, &mut refreshed)
                     .await?;
@@ -149,7 +234,34 @@ impl ResumableUploader {
         };
         let session = validate_session_url(&checkpoint.session_url)?;
         let mut file = File::open(&source.path).map_err(upload_io)?;
+        let mut failures = 0;
         loop {
+            ensure_not_cancelled(&cancellation)?;
+            if needs_query {
+                match self
+                    .recover_session(
+                        &session,
+                        source.size,
+                        &mut token,
+                        &refresh,
+                        &mut refreshed,
+                        &cancellation,
+                        &progress,
+                        checkpoint.uploaded_offset,
+                    )
+                    .await?
+                {
+                    SessionStatus::Complete(result) => {
+                        return finish_upload(result, &checkpoint_path, &progress, source.size)
+                    }
+                    SessionStatus::Incomplete(offset) => {
+                        checkpoint.uploaded_offset = offset;
+                        save_checkpoint(&checkpoint_path, &checkpoint)?;
+                        emit(&progress, YouTubeJobStatus::Uploading, offset, source.size);
+                    }
+                }
+                needs_query = false;
+            }
             ensure_not_cancelled(&cancellation)?;
             if checkpoint.uploaded_offset >= source.size {
                 return Err(AppError::new(
@@ -163,94 +275,84 @@ impl ResumableUploader {
             file.seek(SeekFrom::Start(start)).map_err(upload_io)?;
             let mut bytes = vec![0u8; length as usize];
             file.read_exact(&mut bytes).map_err(upload_io)?;
-            let mut response = self
-                .send_chunk(&session, start, end, source.size, bytes.clone(), &token)
-                .await;
+            let mut response = cancellation
+                .interruptible(self.send_chunk(
+                    &session,
+                    start,
+                    end,
+                    source.size,
+                    bytes.clone(),
+                    &token,
+                ))
+                .await?;
             if response
                 .as_ref()
                 .is_ok_and(|value| value.status() == StatusCode::UNAUTHORIZED)
                 && !refreshed
             {
-                token = refresh().await?;
+                token = cancellation.interruptible(refresh()).await??;
                 refreshed = true;
-                response = self
-                    .send_chunk(&session, start, end, source.size, bytes, &token)
-                    .await;
+                response = cancellation
+                    .interruptible(self.send_chunk(
+                        &session,
+                        start,
+                        end,
+                        source.size,
+                        bytes,
+                        &token,
+                    ))
+                    .await?;
             }
             match response {
                 Ok(value) if value.status().as_u16() == 308 => {
-                    checkpoint.uploaded_offset = next_offset(&value)?;
-                    if checkpoint.uploaded_offset > source.size
-                        || checkpoint.uploaded_offset <= start
-                    {
+                    let offset = next_offset(&value)?;
+                    if offset >= source.size || offset <= start || offset > end + 1 {
                         return Err(AppError::new(
                             "UPLOAD_SERVER_OFFSET_INVALID",
                             "YouTube 返回的上传位置无效",
                         ));
                     }
+                    checkpoint.uploaded_offset = offset;
                     save_checkpoint(&checkpoint_path, &checkpoint)?;
-                    emit(
-                        &progress,
-                        YouTubeJobStatus::Uploading,
-                        checkpoint.uploaded_offset,
-                        source.size,
-                    );
+                    emit(&progress, YouTubeJobStatus::Uploading, offset, source.size);
+                    failures = 0;
                 }
                 Ok(value) if value.status().is_success() => {
-                    emit(
-                        &progress,
-                        YouTubeJobStatus::Processing,
-                        source.size,
-                        source.size,
-                    );
-                    let bytes = value.bytes().await.map_err(|_| {
-                        AppError::new("UPLOAD_RESPONSE_INVALID", "YouTube 上传响应无效")
-                    })?;
-                    let result = parse_upload_result(&bytes)?;
-                    let _ = fs::remove_file(&checkpoint_path);
-                    return Ok(result);
+                    let result = cancellation.interruptible(response_result(value)).await??;
+                    return finish_upload(result, &checkpoint_path, &progress, source.size);
                 }
-                Ok(value) if value.status() == StatusCode::NOT_FOUND => {
-                    return Err(AppError::new(
-                        "UPLOAD_SESSION_EXPIRED",
-                        "YouTube 上传会话已过期，请明确从头开始",
-                    ));
-                }
-                Ok(value)
-                    if value.status().is_server_error()
-                        || value.status() == StatusCode::TOO_MANY_REQUESTS =>
-                {
-                    emit(
-                        &progress,
-                        YouTubeJobStatus::WaitingToRetry,
-                        checkpoint.uploaded_offset,
-                        source.size,
-                    );
-                    sleep(Duration::from_secs(1)).await;
-                    checkpoint.uploaded_offset =
-                        self.query_offset(&session, source.size, &token).await?;
-                    save_checkpoint(&checkpoint_path, &checkpoint)?;
-                }
-                Err(_) => {
-                    emit(
-                        &progress,
-                        YouTubeJobStatus::WaitingToRetry,
-                        checkpoint.uploaded_offset,
-                        source.size,
-                    );
-                    sleep(Duration::from_secs(1)).await;
-                    checkpoint.uploaded_offset =
-                        self.query_offset(&session, source.size, &token).await?;
-                    save_checkpoint(&checkpoint_path, &checkpoint)?;
+                Ok(value) if matches!(value.status(), StatusCode::NOT_FOUND | StatusCode::GONE) => {
+                    return Err(session_expired());
                 }
                 Ok(value) if value.status() == StatusCode::UNAUTHORIZED => {
                     return Err(AppError::new("AUTH_REQUIRED", "需要重新授权 YouTube 频道"));
                 }
-                Ok(_) => {
+                Ok(value)
+                    if !value.status().is_server_error()
+                        && value.status() != StatusCode::TOO_MANY_REQUESTS =>
+                {
                     return Err(AppError::new(
                         "UPLOAD_REQUEST_FAILED",
                         "YouTube 上传请求失败",
-                    ))
+                    ));
+                }
+                _ => {
+                    failures += 1;
+                    if failures > 5 {
+                        return Err(network_failed());
+                    }
+                    emit(
+                        &progress,
+                        YouTubeJobStatus::WaitingToRetry,
+                        checkpoint.uploaded_offset,
+                        source.size,
+                    );
+                    cancellation
+                        .interruptible(sleep(retry_delay(failures)))
+                        .await?;
+                    // A broken connection may have delivered all or part of the
+                    // chunk. Query server truth before sending any more bytes.
+                    needs_query = true;
                 }
             }
         }
@@ -280,6 +382,7 @@ impl ResumableUploader {
         let mut response = self
             .client
             .post(self.endpoint.clone())
+            .timeout(Duration::from_secs(30))
             .query(&[("uploadType", "resumable"), ("part", "snippet,status")])
             .bearer_auth(token.expose_secret())
             .header("X-Upload-Content-Type", "video/*")
@@ -294,6 +397,7 @@ impl ResumableUploader {
             response = self
                 .client
                 .post(self.endpoint.clone())
+                .timeout(Duration::from_secs(30))
                 .query(&[("uploadType", "resumable"), ("part", "snippet,status")])
                 .bearer_auth(token.expose_secret())
                 .header("X-Upload-Content-Type", "video/*")
@@ -336,12 +440,12 @@ impl ResumableUploader {
             .await
     }
 
-    async fn query_offset(
+    async fn query_status(
         &self,
         session: &Url,
         total: u64,
         token: &SecretString,
-    ) -> Result<u64, AppError> {
+    ) -> Result<SessionStatus, AppError> {
         let response = self
             .client
             .put(session.clone())
@@ -350,20 +454,67 @@ impl ResumableUploader {
             .header(CONTENT_RANGE, format!("bytes */{total}"))
             .send()
             .await
-            .map_err(|_| AppError::new("UPLOAD_NETWORK_FAILED", "无法恢复 YouTube 上传"))?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Err(AppError::new(
-                "UPLOAD_SESSION_EXPIRED",
-                "YouTube 上传会话已过期，请明确从头开始",
-            ));
+            .map_err(|_| network_failed())?;
+        match response.status() {
+            StatusCode::NOT_FOUND | StatusCode::GONE => Err(session_expired()),
+            StatusCode::UNAUTHORIZED => {
+                Err(AppError::new("AUTH_REQUIRED", "需要重新授权 YouTube 频道"))
+            }
+            status if status.as_u16() == 308 => {
+                let offset = next_offset(&response)?;
+                if offset >= total {
+                    return Err(AppError::new(
+                        "UPLOAD_SERVER_OFFSET_INVALID",
+                        "YouTube 返回的上传位置无效",
+                    ));
+                }
+                Ok(SessionStatus::Incomplete(offset))
+            }
+            status if status.is_success() => {
+                Ok(SessionStatus::Complete(response_result(response).await?))
+            }
+            status if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS => {
+                Err(network_failed())
+            }
+            _ => Err(AppError::new(
+                "UPLOAD_REQUEST_FAILED",
+                "无法恢复 YouTube 上传，请检查账号权限",
+            )),
         }
-        if response.status().as_u16() != 308 {
-            return Err(AppError::new(
-                "UPLOAD_NETWORK_FAILED",
-                "无法恢复 YouTube 上传",
-            ));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_session(
+        &self,
+        session: &Url,
+        total: u64,
+        token: &mut SecretString,
+        refresh: &RefreshCallback,
+        refreshed: &mut bool,
+        cancellation: &UploadCancellationToken,
+        progress: &Arc<dyn Fn(UploadProgressEvent) + Send + Sync>,
+        offset: u64,
+    ) -> Result<SessionStatus, AppError> {
+        let mut failures = 0;
+        loop {
+            match cancellation
+                .interruptible(self.query_status(session, total, token))
+                .await?
+            {
+                Err(error) if error.code == "AUTH_REQUIRED" && !*refreshed => {
+                    *token = cancellation.interruptible(refresh()).await??;
+                    *refreshed = true;
+                }
+                Err(error) if error.code == "UPLOAD_NETWORK_FAILED" && failures < 5 => {
+                    failures += 1;
+                    emit(progress, YouTubeJobStatus::WaitingToRetry, offset, total);
+                    cancellation
+                        .interruptible(sleep(retry_delay(failures)))
+                        .await?;
+                }
+                result => return result,
+            }
         }
-        next_offset(&response)
     }
 }
 
@@ -551,6 +702,9 @@ fn emit(
 }
 
 fn ensure_not_cancelled(cancellation: &UploadCancellationToken) -> Result<(), AppError> {
+    if cancellation.is_paused() {
+        return Err(AppError::new("UPLOAD_PAUSED", "YouTube 上传已暂停"));
+    }
     if cancellation.is_cancelled() {
         Err(AppError::new("UPLOAD_CANCELLED", "YouTube 上传已取消"))
     } else {
@@ -709,7 +863,7 @@ mod tests {
 
         fn uploader(&self, checkpoint_dir: PathBuf) -> ResumableUploader {
             ResumableUploader {
-                client: Client::new(),
+                client: Client::builder().no_proxy().build().unwrap(),
                 endpoint: self.endpoint.clone(),
                 checkpoint_dir,
             }
@@ -755,6 +909,30 @@ mod tests {
                 Err(AppError::new("UNEXPECTED_REFRESH", "测试中不应刷新令牌"))
             })
         })
+    }
+
+    #[tokio::test]
+    async fn cancelled_before_start_does_not_create_a_session_or_checkpoint() {
+        let root = temp_path("cancel-before-start");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "cancel-before-start");
+        let cancellation = UploadCancellationToken::default();
+        cancellation.cancel();
+        let checkpoint_dir = root.join("checkpoints");
+        let error = ResumableUploader::new(checkpoint_dir.clone())
+            .upload(
+                &intent,
+                "channel",
+                SecretString::new("unused"),
+                no_refresh(),
+                cancellation,
+                Arc::new(|_| panic!("cancelled upload must not start")),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "UPLOAD_CANCELLED");
+        assert!(!checkpoint_dir.exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -822,80 +1000,318 @@ mod tests {
     async fn cancellation_after_308_resumes_from_the_persisted_server_offset() {
         // Production mutation caught: recreating a session or retransmitting byte zero
         // after a cancelled upload has persisted a server-confirmed offset.
-        let root = temp_path("resume");
+        for pause in [false, true] {
+            let root = temp_path("resume");
+            fs::create_dir_all(&root).unwrap();
+            let intent = upload_intent(&root, CHUNK_SIZE as usize + 3, "resume-job");
+            let server = MockUploadServer::serve(|session| {
+                vec![
+                    MockReply {
+                        status: "200 OK",
+                        headers: vec![("Location", session.to_string())],
+                        body: "",
+                    },
+                    MockReply {
+                        status: "308 Permanent Redirect",
+                        headers: vec![("Range", format!("bytes=0-{}", CHUNK_SIZE - 1))],
+                        body: "",
+                    },
+                    MockReply {
+                        status: "308 Permanent Redirect",
+                        headers: vec![("Range", format!("bytes=0-{}", CHUNK_SIZE - 1))],
+                        body: "",
+                    },
+                    MockReply {
+                        status: "200 OK",
+                        headers: vec![],
+                        body: r#"{"id":"video-resumed","status":{"privacyStatus":"private"}}"#,
+                    },
+                ]
+            });
+            let checkpoint_dir = root.join("checkpoints");
+            let uploader = server.uploader(checkpoint_dir.clone());
+            let cancellation = UploadCancellationToken::default();
+            let cancel_on_checkpoint = cancellation.clone();
+            let progress: Arc<dyn Fn(UploadProgressEvent) + Send + Sync> = Arc::new(move |event| {
+                if event.uploaded_bytes == CHUNK_SIZE {
+                    if pause {
+                        cancel_on_checkpoint.pause();
+                    } else {
+                        cancel_on_checkpoint.cancel();
+                    }
+                }
+            });
+
+            let error = uploader
+                .upload(
+                    &intent,
+                    "UC_CHANNEL",
+                    SecretString::new("initial-token"),
+                    no_refresh(),
+                    cancellation,
+                    progress,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                if pause {
+                    "UPLOAD_PAUSED"
+                } else {
+                    "UPLOAD_CANCELLED"
+                }
+            );
+            assert!(checkpoint_dir.join("resume-job.json").is_file());
+
+            let result = uploader
+                .upload(
+                    &intent,
+                    "UC_CHANNEL",
+                    SecretString::new("initial-token"),
+                    no_refresh(),
+                    UploadCancellationToken::default(),
+                    Arc::new(|_| {}),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(result.video_id, "video-resumed");
+            assert!(!checkpoint_dir.join("resume-job.json").exists());
+            let requests = server.requests();
+            assert_eq!(requests.len(), 4);
+            assert!(requests[0].line.starts_with("POST /videos?"));
+            assert_eq!(
+                requests[1].headers.get("content-range").map(String::as_str),
+                Some("bytes 0-8388607/8388611")
+            );
+            assert_eq!(requests[1].body_bytes, CHUNK_SIZE as usize);
+            assert_eq!(
+                requests[3].headers.get("content-range").map(String::as_str),
+                Some("bytes 8388608-8388610/8388611")
+            );
+            assert_eq!(requests[3].body_bytes, 3);
+            assert_eq!(
+                requests[2].headers.get("content-range").map(String::as_str),
+                Some("bytes */8388611")
+            );
+            assert_eq!(requests[2].body_bytes, 0);
+            let _ = fs::remove_dir_all(root);
+        }
+    }
+
+    fn seed_checkpoint(root: &Path, intent: &UploadIntent, session: &str, offset: u64) -> PathBuf {
+        let dir = root.join("checkpoints");
+        fs::create_dir_all(&dir).unwrap();
+        let source = snapshot_source(&intent.file_path).unwrap();
+        save_checkpoint(
+            &dir.join(format!("{}.json", intent.job_id)),
+            &UploadCheckpoint {
+                file_path: source.path,
+                file_size: source.size,
+                modified_unix_nanos: source.modified_unix_nanos,
+                uploaded_offset: offset,
+                session_url: session.into(),
+                metadata_hash: intent_hash(intent),
+                channel_hash: hash_text("UC_CHANNEL"),
+            },
+        )
+        .unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn resume_recovers_a_lost_completion_response_without_resending_video() {
+        let root = temp_path("completed-response-lost");
         fs::create_dir_all(&root).unwrap();
-        let intent = upload_intent(&root, CHUNK_SIZE as usize + 3, "resume-job");
-        let server = MockUploadServer::serve(|session| {
-            vec![
-                MockReply {
-                    status: "200 OK",
-                    headers: vec![("Location", session.to_string())],
-                    body: "",
-                },
-                MockReply {
-                    status: "308 Permanent Redirect",
-                    headers: vec![("Range", format!("bytes=0-{}", CHUNK_SIZE - 1))],
-                    body: "",
-                },
-                MockReply {
-                    status: "200 OK",
-                    headers: vec![],
-                    body: r#"{"id":"video-resumed","status":{"privacyStatus":"private"}}"#,
-                },
-            ]
+        let intent = upload_intent(&root, 16, "completed-job");
+        let server = MockUploadServer::serve(|_| {
+            vec![MockReply {
+                status: "201 Created",
+                headers: vec![],
+                body: r#"{"id":"already-uploaded"}"#,
+            }]
         });
-        let checkpoint_dir = root.join("checkpoints");
-        let uploader = server.uploader(checkpoint_dir.clone());
-        let cancellation = UploadCancellationToken::default();
-        let cancel_on_checkpoint = cancellation.clone();
-        let progress: Arc<dyn Fn(UploadProgressEvent) + Send + Sync> = Arc::new(move |event| {
-            if event.uploaded_bytes == CHUNK_SIZE {
-                cancel_on_checkpoint.cancel();
-            }
-        });
-
-        let error = uploader
+        let dir = seed_checkpoint(
+            &root,
+            &intent,
+            server.endpoint.join("/session").unwrap().as_str(),
+            0,
+        );
+        let result = server
+            .uploader(dir.clone())
             .upload(
                 &intent,
                 "UC_CHANNEL",
-                SecretString::new("initial-token"),
-                no_refresh(),
-                cancellation,
-                progress,
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, "UPLOAD_CANCELLED");
-        assert!(checkpoint_dir.join("resume-job.json").is_file());
-
-        let result = uploader
-            .upload(
-                &intent,
-                "UC_CHANNEL",
-                SecretString::new("initial-token"),
+                SecretString::new("test"),
                 no_refresh(),
                 UploadCancellationToken::default(),
                 Arc::new(|_| {}),
             )
             .await
             .unwrap();
+        assert_eq!(result.video_id, "already-uploaded");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].line.starts_with("PUT /session"));
+        assert_eq!(requests[0].body_bytes, 0);
+        assert_eq!(requests[0].headers["content-range"], "bytes */16");
+        assert!(!dir.join("completed-job.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
-        assert_eq!(result.video_id, "video-resumed");
-        assert!(!checkpoint_dir.join("resume-job.json").exists());
+    #[tokio::test]
+    async fn retry_uses_server_offset_after_a_transient_status_query_failure() {
+        let root = temp_path("server-offset");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "offset-job");
+        let server = MockUploadServer::serve(|_| {
+            vec![
+                MockReply {
+                    status: "503 Service Unavailable",
+                    headers: vec![],
+                    body: "",
+                },
+                MockReply {
+                    status: "308 Permanent Redirect",
+                    headers: vec![("Range", "bytes=0-4".into())],
+                    body: "",
+                },
+                MockReply {
+                    status: "200 OK",
+                    headers: vec![],
+                    body: r#"{"id":"recovered"}"#,
+                },
+            ]
+        });
+        let dir = seed_checkpoint(
+            &root,
+            &intent,
+            server.endpoint.join("/session").unwrap().as_str(),
+            2,
+        );
+        let result = server
+            .uploader(dir)
+            .upload(
+                &intent,
+                "UC_CHANNEL",
+                SecretString::new("test"),
+                no_refresh(),
+                UploadCancellationToken::default(),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.video_id, "recovered");
         let requests = server.requests();
         assert_eq!(requests.len(), 3);
-        assert!(requests[0].line.starts_with("POST /videos?"));
-        assert_eq!(
-            requests[1].headers.get("content-range").map(String::as_str),
-            Some("bytes 0-8388607/8388611")
+        assert_eq!(requests[0].body_bytes, 0);
+        assert_eq!(requests[1].body_bytes, 0);
+        assert_eq!(requests[2].headers["content-range"], "bytes 5-15/16");
+        assert_eq!(requests[2].body_bytes, 11);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pause_interrupts_retry_backoff_and_keeps_the_session() {
+        let root = temp_path("pause-retry");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "pause-job");
+        let server = MockUploadServer::serve(|_| {
+            vec![MockReply {
+                status: "503 Service Unavailable",
+                headers: vec![],
+                body: "",
+            }]
+        });
+        let dir = seed_checkpoint(
+            &root,
+            &intent,
+            server.endpoint.join("/session").unwrap().as_str(),
+            2,
         );
-        assert_eq!(requests[1].body_bytes, CHUNK_SIZE as usize);
-        assert_eq!(
-            requests[2].headers.get("content-range").map(String::as_str),
-            Some("bytes 8388608-8388610/8388611")
-        );
-        assert_eq!(requests[2].body_bytes, 3);
-        let _ = fs::remove_dir_all(root);
+        let stop = UploadCancellationToken::default();
+        let pause = stop.clone();
+        let progress: Arc<dyn Fn(UploadProgressEvent) + Send + Sync> = Arc::new(move |event| {
+            if event.status == YouTubeJobStatus::WaitingToRetry {
+                pause.pause();
+            }
+        });
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            server.uploader(dir.clone()).upload(
+                &intent,
+                "UC_CHANNEL",
+                SecretString::new("test"),
+                no_refresh(),
+                stop,
+                progress,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert_eq!(error.code, "UPLOAD_PAUSED");
+        assert_eq!(server.requests().len(), 1);
+        assert!(dir.join("pause-job.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pause_interrupts_an_inflight_network_request_without_waiting_for_timeout() {
+        use tokio::io::AsyncReadExt;
+        let root = temp_path("pause-inflight");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "inflight-job");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = Url::parse(&format!(
+            "http://{}/session",
+            listener.local_addr().unwrap()
+        ))
+        .unwrap();
+        let dir = seed_checkpoint(&root, &intent, endpoint.as_str(), 2);
+        let (received, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            socket.read(&mut bytes).await.unwrap();
+            received.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        let uploader = ResumableUploader {
+            client: Client::builder().no_proxy().build().unwrap(),
+            endpoint,
+            checkpoint_dir: dir.clone(),
+        };
+        let stop = UploadCancellationToken::default();
+        let control = stop.clone();
+        let task = tokio::spawn(async move {
+            uploader
+                .upload(
+                    &intent,
+                    "UC_CHANNEL",
+                    SecretString::new("test"),
+                    no_refresh(),
+                    stop,
+                    Arc::new(|_| {}),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        control.pause();
+        let error = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, "UPLOAD_PAUSED");
+        assert!(dir.join("inflight-job.json").exists());
+        server.abort();
+        let _ = server.await;
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

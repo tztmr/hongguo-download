@@ -13,6 +13,8 @@ export type YouTubeChannel = {
 
 export type YouTubeJobStatus =
   | "queued"
+  | "pausing"
+  | "paused"
   | "preparingAuthorization"
   | "creatingSession"
   | "uploading"
@@ -77,6 +79,8 @@ export type YouTubeCommands = {
   removeCredential(): Promise<YouTubeSnapshot>;
   startUpload(request: YouTubeUploadIntent): Promise<YouTubeJob>;
   cancel(jobId: string): Promise<void>;
+  pause(jobId: string): Promise<YouTubeJob>;
+  resume(jobId: string): Promise<YouTubeJob>;
   retry(jobId: string): Promise<YouTubeJob>;
   retryThumbnail(jobId: string): Promise<YouTubeJob>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<YouTubeJob>;
@@ -94,6 +98,8 @@ export type YouTubeModel = YouTubeSnapshot & {
   removeCredential(): Promise<void>;
   startUpload(request: YouTubeUploadIntent): Promise<YouTubeJob>;
   cancel(jobId: string): Promise<void>;
+  pause(jobId: string): Promise<void>;
+  resume(jobId: string): Promise<void>;
   retry(jobId: string): Promise<void>;
   retryThumbnail(jobId: string): Promise<void>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<void>;

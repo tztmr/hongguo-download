@@ -11,6 +11,7 @@ import {
   fetchHealth,
   fetchRank,
   fetchSearch,
+  fetchSearchAll,
   fetchSeriesMetrics,
   fetchNewReleases,
   revealPath,
@@ -21,6 +22,7 @@ import { Cover } from "./components/Cover";
 import { DownloadManagerPage } from "./components/DownloadManagerPage";
 import { CheckIcon, CloseIcon, SearchIcon } from "./components/icons";
 import { SeriesInspector } from "./components/SeriesInspector";
+import { SeriesDialog } from "./components/SeriesDialog";
 import { useDownloadManager, type DownloadAdapter, type DownloadProgress } from "./download/useDownloadManager";
 import { useMediaJobs } from "./media/useMediaJobs";
 import {
@@ -36,6 +38,7 @@ import {
   createMemoryStorage,
   createPreviewDownloadState,
   previewDownloadAdapter,
+  previewAIComponents,
   previewEpisodes,
   previewMediaCommands,
   previewMediaJobs,
@@ -53,9 +56,14 @@ import type {
   EpisodeItem,
   NavId,
   RankPage,
+  RankReleaseType,
+  SearchContentType,
   SearchPage,
   SeriesItem,
 } from "./types";
+
+import { SearchCache, searchKey } from "./search/cache";
+import { combinedDiscovery, type CombinedDiscoveryPage } from "./feed/combinedDiscovery";
 
 type SearchMode = "fuzzy" | "exact";
 
@@ -81,6 +89,8 @@ const previewSettings: AppSettings = {
   notifyYouTubeResult: true,
   demucsModel: "htdemucs",
   whisperModel: "small",
+  downloadProxy: "",
+  downloadMirror: "",
 };
 const previewSettingsApi: AppSettingsDependencies = {
   getSettings: async () => previewSettings,
@@ -88,6 +98,13 @@ const previewSettingsApi: AppSettingsDependencies = {
   chooseSaveDir: async () => previewSettings.saveDir,
   openSaveDir: async () => undefined,
   getNotificationStatus: async () => "granted",
+  getAiComponents: async () => previewAIComponents,
+  installAiComponent: async (id) => {
+    const item = previewAIComponents.find((component) => component.id === id);
+    if (!item) throw new Error("预览组件不存在");
+    return { ...item, installed: true, installedVersion: item.version, installedPath: `/Preview/components/${id}` };
+  },
+  removeAiComponent: async () => undefined,
 };
 const previewMonitorApi = {
   fetchNewReleases: async () => ({
@@ -110,13 +127,24 @@ function filterSearchItems(items: SeriesItem[], keyword: string, mode: SearchMod
   return items.filter((item) => normalizeSearchTitle(item.title) === expected);
 }
 
+function rankTypeLabel(type: RankReleaseType) {
+  if (type === "comic_series_rank") return "漫剧";
+  if (type === "ai_playlet") return "AI剧";
+  return "真人剧";
+}
+
 export default function App() {
   const previewMode = new URLSearchParams(window.location.search).get("preview");
   const isPreview = previewMode === "library" || previewMode === "downloads";
   const [nav, setNav] = useState<NavId>(previewMode === "downloads" ? "queue" : "discover");
   const [managerFocus, setManagerFocus] = useState<NotificationTarget | null>(null);
   const [contentType, setContentType] = useState<ContentType>("drama");
+  const [searchContentType, setSearchContentType] = useState<SearchContentType>("all");
   const [query, setQuery] = useState("");
+  const [submittedQuery, setSubmittedQuery] = useState("");
+  const [searchRevision, setSearchRevision] = useState(0);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const searchCache = useRef(new SearchCache<GroupedPagingState<SeriesItem, SearchPage | null>>(20, 5 * 60_000, Date.now, (state) => state.allItems.length <= 500));
   const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
   const [items, setItems] = useState<SeriesItem[]>(isPreview ? previewSeries.slice(0, 20) : []);
   const [selected, setSelected] = useState<SeriesItem | null>(isPreview ? previewSeries[0] : null);
@@ -124,17 +152,20 @@ export default function App() {
   const [selectedEpisodeIds, setSelectedEpisodeIds] = useState<string[]>(isPreview ? [previewEpisodes[0].itemId] : []);
   const [loading, setLoading] = useState(false);
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [monitorDetailOpen, setMonitorDetailOpen] = useState(false);
   const [metricsLoading, setMetricsLoading] = useState(false);
   const [metricsError, setMetricsError] = useState("");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [healthOk, setHealthOk] = useState(isPreview);
+  const [backgroundMonitorStarted, setBackgroundMonitorStarted] = useState(isPreview);
   const [discovery, setDiscovery] = useState<DiscoveryPage | null>(null);
-  const [searchPage, setSearchPage] = useState<SearchPage | null>(null);
   const [selectedCategory, setSelectedCategory] = useState("");
   const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[]>([]);
   const [rankPage, setRankPage] = useState<RankPage | null>(null);
   const [rankBoard, setRankBoard] = useState("ranklist_hot_sc");
+  const [rankType, setRankType] = useState<RankReleaseType>("all");
   const pageRequestRef = useRef(0);
   const catalogRequestRef = useRef(0);
   const loadMoreInFlightRef = useRef(false);
@@ -159,7 +190,7 @@ export default function App() {
     api: isPreview ? previewMonitorApi : liveMonitorApi,
     storage,
     notifications: isPreview ? previewNotifications : appNotifications,
-    enabled: true,
+    enabled: backgroundMonitorStarted || nav === "monitor",
     notify: activeSettings.notifyNewReleases,
   });
   const adapter = useMemo<DownloadAdapter>(() => {
@@ -217,6 +248,13 @@ export default function App() {
   }, [isPreview]);
 
   useEffect(() => {
+    if (!healthOk || backgroundMonitorStarted) return;
+    // Give the first visible page priority over the full background scan.
+    const timer = window.setTimeout(() => setBackgroundMonitorStarted(true), 5000);
+    return () => window.clearTimeout(timer);
+  }, [healthOk, backgroundMonitorStarted]);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 4200);
     return () => window.clearTimeout(timer);
@@ -226,6 +264,7 @@ export default function App() {
     const requestId = ++catalogRequestRef.current;
     setSelected(item);
     setCatalogLoading(true);
+    setCatalogError("");
     setMetricsLoading(!isPreview);
     setMetricsError("");
     setSelectedEpisodeIds([]);
@@ -239,28 +278,30 @@ export default function App() {
       return;
     }
     setEpisodes([]);
-    const [catalogResult, metricsResult] = await Promise.allSettled([
-      fetchCatalog(item.bookId),
-      fetchSeriesMetrics(item.seriesId, item.contentTypeCode),
-    ]);
-    if (requestId !== catalogRequestRef.current) return;
-    if (metricsResult.status === "fulfilled") {
+    // Catalog and counters can finish independently; slow counters must not
+    // prevent choosing episodes or adding them to the queue.
+    const metricsRequest = fetchSeriesMetrics(item.seriesId, item.contentTypeCode).then((metrics) => {
+      if (requestId !== catalogRequestRef.current) return;
       setSelected((current) =>
         current?.seriesId === item.seriesId && current.contentTypeCode === item.contentTypeCode
-          ? { ...current, ...metricsResult.value }
+          ? { ...current, ...metrics }
           : current,
       );
-    } else {
-      setMetricsError(metricsResult.reason instanceof Error ? metricsResult.reason.message : String(metricsResult.reason));
-    }
-    if (catalogResult.status === "fulfilled") {
-      setEpisodes(catalogResult.value);
-      if (catalogResult.value[0]) setSelectedEpisodeIds([catalogResult.value[0].itemId]);
-    } else {
-      setError(catalogResult.reason instanceof Error ? catalogResult.reason.message : String(catalogResult.reason));
-    }
-    setCatalogLoading(false);
-    setMetricsLoading(false);
+    }).catch((reason) => {
+      if (requestId === catalogRequestRef.current) setMetricsError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => {
+      if (requestId === catalogRequestRef.current) setMetricsLoading(false);
+    });
+    const catalogRequest = fetchCatalog(item.bookId).then((catalog) => {
+      if (requestId !== catalogRequestRef.current) return;
+      setEpisodes(catalog);
+      if (catalog[0]) setSelectedEpisodeIds([catalog[0].itemId]);
+    }).catch((reason) => {
+      if (requestId === catalogRequestRef.current) setCatalogError(reason instanceof Error ? reason.message : String(reason));
+    }).finally(() => {
+      if (requestId === catalogRequestRef.current) setCatalogLoading(false);
+    });
+    await Promise.all([catalogRequest, metricsRequest]);
   }
 
   async function loadDiscover() {
@@ -268,23 +309,24 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      const groupsPromise = fetchCategoryGroups(contentType).catch(() => []);
+      if (searchContentType === "all") setCategoryGroups([]);
+      else void fetchCategoryGroups(contentType).then((groups) => {
+        if (requestId === pageRequestRef.current) setCategoryGroups(groups);
+      }).catch(() => undefined);
       const initial = createGroupedPagingState<SeriesItem, DiscoveryPage | null>(null);
       const result = await fillUniqueGroup(initial, async (cursor) => {
-        const page = cursor
-          ? await fetchDiscoveryMore(contentType, cursor)
+        const page = searchContentType === "all"
+          ? await combinedDiscovery(cursor, fetchDiscovery, fetchDiscoveryMore)
+          : cursor ? await fetchDiscoveryMore(contentType, cursor)
           : selectedCategory
             ? await fetchDiscoveryByCategory(contentType, selectedCategory)
             : await fetchDiscovery(contentType);
         return { items: page.items, nextCursor: page, hasMore: page.hasMore };
-      });
-      const groups = await groupsPromise;
+      }, { maxRequests: 1 });
       if (requestId !== pageRequestRef.current) return;
       discoveryPagingRef.current = result.state;
       const page = result.state.cursor;
       setDiscovery(page ? { ...page, items: result.state.allItems } : null);
-      setCategoryGroups(groups);
-      setSearchPage(null);
       setItems(result.visible);
       if (result.visible[0]) void selectSeries(result.visible[0]);
       setHealthOk(true);
@@ -306,7 +348,9 @@ export default function App() {
     try {
       const result = await fillUniqueGroup(current, async (cursor) => {
         if (!cursor) throw new Error("发现页分页状态丢失");
-        const page = await fetchDiscoveryMore(contentType, cursor);
+        const page = searchContentType === "all"
+          ? await combinedDiscovery(cursor as CombinedDiscoveryPage, fetchDiscovery, fetchDiscoveryMore)
+          : await fetchDiscoveryMore(contentType, cursor);
         return { items: page.items, nextCursor: page, hasMore: page.hasMore };
       });
       if (requestId !== pageRequestRef.current) return;
@@ -336,6 +380,7 @@ export default function App() {
       const result = await fillUniqueGroup(initial, async (cursor) => {
         const page = await fetchRank({
           board: rankBoard,
+          type: rankType,
           cursor: cursor?.nextCursor || "",
           limit: 20,
         });
@@ -349,7 +394,6 @@ export default function App() {
       rankPagingRef.current = result.state;
       const page = result.state.cursor;
       setRankPage(page ? { ...page, items: result.state.allItems } : null);
-      setSearchPage(null);
       setItems(result.visible);
       if (!append && result.visible[0]) void selectSeries(result.visible[0]);
       setHealthOk(true);
@@ -364,48 +408,45 @@ export default function App() {
   }
 
   async function runSearch(key: string, append = false) {
-    const keyword = key.trim();
-    if (!keyword) return;
-    if (isPreview) {
-      const matches = filterSearchItems(previewSeries.filter((item) => item.title.includes(keyword)), keyword, searchMode);
-      const results = searchMode === "fuzzy" && !matches.length ? previewSeries : matches;
-      const current = append ? searchPagingRef.current : { allItems: results, visibleCount: 0, cursor: null, hasMore: false };
-      const visibleCount = Math.min(current.visibleCount + 20, results.length);
-      searchPagingRef.current = { allItems: results, visibleCount, cursor: null, hasMore: false };
-      setItems(results.slice(0, visibleCount));
-      setNav("search");
-      if (matches[0]) void selectSeries(matches[0]);
-      return;
-    }
-    if (append && loadMoreInFlightRef.current) return;
+    const keyword = key.trim().replace(/\s+/g, " ");
+    if (!keyword || (append && loadMoreInFlightRef.current)) return;
     if (append) loadMoreInFlightRef.current = true;
     const requestId = ++pageRequestRef.current;
+    const cacheKey = searchKey(keyword, searchContentType, searchMode);
     setLoading(true);
     setError("");
+    if (!append) {
+      setItems([]);
+      setSelected(null);
+      setEpisodes([]);
+      catalogRequestRef.current += 1;
+    }
     try {
-      const initial = append
-        ? searchPagingRef.current
-        : createGroupedPagingState<SeriesItem, SearchPage | null>(null);
-      const result = await fillUniqueGroup(initial, async (cursor) => {
-        const page = await fetchSearch(
-          keyword,
-          contentType,
-          cursor?.nextOffset || 0,
-          cursor?.nextPassback || "",
-        );
-        return { items: page.items, nextCursor: page, hasMore: page.hasMore };
-      }, { include: (item) => filterSearchItems([item], keyword, searchMode).length === 1 });
+      const load = async () => {
+        const initial = append ? searchPagingRef.current : createGroupedPagingState<SeriesItem, SearchPage | null>(null);
+        if (isPreview) {
+          const matches = filterSearchItems(previewSeries.filter((item) => item.title.includes(keyword)
+            && (searchContentType === "all" || item.contentTypeCode === (searchContentType === "drama" ? 1 : 2))), keyword, searchMode);
+          const results = matches;
+          return { allItems: results, visibleCount: Math.min(initial.visibleCount + 20, results.length), cursor: null, hasMore: false };
+        }
+        const result = await fillUniqueGroup(initial, async (cursor) => {
+          const page = searchContentType === "all" ? await fetchSearchAll(keyword, cursor?.nextPassback || "")
+            : await fetchSearch(keyword, searchContentType, cursor?.nextOffset || 0, cursor?.nextPassback || "");
+          return { items: page.items, nextCursor: page, hasMore: page.hasMore };
+        }, { include: (item) => filterSearchItems([item], keyword, searchMode).length === 1 });
+        return result.state;
+      };
+      const result = append ? await load() : await searchCache.current.getOrLoad(cacheKey, load);
       if (requestId !== pageRequestRef.current) return;
-      searchPagingRef.current = result.state;
-      const page = result.state.cursor;
-      setSearchPage(page ? { ...page, items: result.state.allItems } : null);
+      if (append) searchCache.current.set(cacheKey, result);
+      searchPagingRef.current = result;
       setDiscovery(null);
-      setItems(result.visible);
-      if (!append && result.visible[0]) void selectSeries(result.visible[0]);
-      setNav("search");
+      const visible = result.allItems.slice(0, result.visibleCount);
+      setItems(visible);
+      if (!append && visible[0]) void selectSeries(visible[0]);
     } catch (nextError) {
-      if (requestId !== pageRequestRef.current) return;
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
+      if (requestId === pageRequestRef.current) setError(nextError instanceof Error ? nextError.message : String(nextError));
     } finally {
       if (append) loadMoreInFlightRef.current = false;
       if (requestId === pageRequestRef.current) setLoading(false);
@@ -413,41 +454,41 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (isPreview || nav === "queue" || nav === "monitor" || nav === "settings") return;
+    loadMoreInFlightRef.current = false;
+    setLoading(false);
     if (nav === "search") {
-      if (query.trim() && !searchPage && !loading) void runSearch(query);
-      return;
+      if (submittedQuery) void runSearch(submittedQuery);
+      else { setItems([]); setSelected(null); setEpisodes([]); setError(""); }
+    } else if (!isPreview) {
+      if (nav === "discover") void loadDiscover();
+      if (nav === "rank") void loadRank();
+    } else {
+      if (nav === "discover") setItems(discoveryPagingRef.current.allItems.slice(0, discoveryPagingRef.current.visibleCount));
+      if (nav === "rank") setItems(rankPagingRef.current.allItems.slice(0, rankPagingRef.current.visibleCount));
     }
-    if (nav === "discover") void loadDiscover();
-    if (nav === "rank") void loadRank();
-    // Data loaders intentionally react to these filter values.
+    return () => { pageRequestRef.current += 1; };
+    // Load from the submitted keyword, never from an unsubmitted input draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    return () => {
-      pageRequestRef.current += 1;
-    };
-  }, [nav, contentType, selectedCategory, rankBoard, isPreview]);
+  }, [nav, contentType, searchContentType, selectedCategory, rankBoard, rankType, isPreview, submittedQuery, searchMode, searchRevision]);
 
   useEffect(() => {
-    if (!isPreview) return;
-    if (nav === "discover") setItems(discoveryPagingRef.current.allItems.slice(0, discoveryPagingRef.current.visibleCount));
-    if (nav === "rank") setItems(rankPagingRef.current.allItems.slice(0, rankPagingRef.current.visibleCount));
-  }, [isPreview, nav]);
-
-  useEffect(() => {
-    if (isPreview) return;
-    setDiscovery(null);
-    setSearchPage(null);
-    setItems([]);
-    setSelectedCategory("");
-    setCategoryGroups([]);
-    discoveryPagingRef.current = createGroupedPagingState(null);
-    rankPagingRef.current = createGroupedPagingState(null);
-    searchPagingRef.current = createGroupedPagingState(null);
-  }, [contentType, isPreview]);
+    if (nav === "search") searchInput.current?.focus();
+  }, [nav]);
 
   function onSearchSubmit(event: FormEvent) {
     event.preventDefault();
-    void runSearch(query);
+    if (!query.trim()) return;
+    setMonitorDetailOpen(false);
+    setSubmittedQuery(query.trim());
+    setSearchRevision((value) => value + 1);
+    setNav("search");
+  }
+
+  function selectContentType(type: SearchContentType) {
+    setSearchContentType(type);
+    if (type !== "all") setContentType(type);
+    setSelectedCategory("");
+    setCategoryGroups([]);
   }
 
   function onLibraryScroll(event: UIEvent<HTMLDivElement>) {
@@ -459,7 +500,7 @@ export default function App() {
     const searchState = searchPagingRef.current;
     if (nav === "discover" && (discoveryState.hasMore || discoveryState.visibleCount < discoveryState.allItems.length)) void loadMoreDiscover();
     if (nav === "rank" && (rankState.hasMore || rankState.visibleCount < rankState.allItems.length)) void loadRank(true);
-    if (nav === "search" && (searchState.hasMore || searchState.visibleCount < searchState.allItems.length)) void runSearch(query, true);
+    if (nav === "search" && (searchState.hasMore || searchState.visibleCount < searchState.allItems.length)) void runSearch(submittedQuery, true);
   }
 
   function enqueueSelection() {
@@ -473,6 +514,7 @@ export default function App() {
   const rankBoards = discovery?.rankBoards || [];
   const pageTitle = nav === "rank" ? "本周榜单" : nav === "search" ? "搜索结果" : "首页推荐";
   const navigate = (next: NavId) => {
+    setMonitorDetailOpen(false);
     setNav(next);
     if (next === "monitor") monitor.clearUnseen();
   };
@@ -502,7 +544,7 @@ export default function App() {
           }}
         />
       ) : nav === "monitor" ? (
-        <NewReleasesPage model={monitor} onSelect={(item) => { navigate("discover"); void selectSeries(item); }} />
+        <NewReleasesPage model={monitor} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
       ) : nav === "settings" ? (
         <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />
       ) : (
@@ -511,7 +553,7 @@ export default function App() {
             <div className="library-title"><span>红果下载</span><h1>{pageTitle}</h1></div>
             <form className="search-form" onSubmit={onSearchSubmit}>
               <SearchIcon />
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索短剧或漫剧" aria-label="搜索短剧或漫剧" />
+              <input ref={searchInput} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索短剧或漫剧" aria-label="搜索短剧或漫剧" />
               <div className="search-mode-segment" role="group" aria-label="搜索识别方式">
                 <button type="button" className={searchMode === "fuzzy" ? "active" : ""} aria-pressed={searchMode === "fuzzy"} onClick={() => setSearchMode("fuzzy")}>模糊识别</button>
                 <button type="button" className={searchMode === "exact" ? "active" : ""} aria-pressed={searchMode === "exact"} onClick={() => setSearchMode("exact")}>匹配识别</button>
@@ -519,11 +561,25 @@ export default function App() {
               <button type="submit" className="search-submit" disabled={!query.trim()}>搜索</button>
             </form>
             <div className="content-segment" aria-label="内容类型">
-              <button type="button" className={contentType === "drama" ? "active" : ""} onClick={() => setContentType("drama")}>真人剧</button>
-              <button type="button" className={contentType === "manju" ? "active" : ""} onClick={() => setContentType("manju")}>漫剧</button>
+              {nav === "rank" ? (
+                <>
+                  <button type="button" className={rankType === "all" ? "active" : ""} onClick={() => setRankType("all")}>全部</button>
+                  <button type="button" className={rankType === "playlet" ? "active" : ""} onClick={() => setRankType("playlet")}>真人剧</button>
+                  <button type="button" className={rankType === "comic_series_rank" ? "active" : ""} onClick={() => setRankType("comic_series_rank")}>漫剧</button>
+                  <button type="button" className={rankType === "ai_playlet" ? "active" : ""} onClick={() => setRankType("ai_playlet")}>AI剧</button>
+                </>
+              ) : (
+                <>
+                  <button type="button" className={searchContentType === "all" ? "active" : ""} aria-pressed={searchContentType === "all"} onClick={() => selectContentType("all")} title="全部真人剧和漫剧">全部</button>
+                  <button type="button" className={searchContentType === "drama" ? "active" : ""} aria-pressed={searchContentType === "drama"} onClick={() => selectContentType("drama")}>真人剧</button>
+                  <button type="button" className={searchContentType === "manju" ? "active" : ""} aria-pressed={searchContentType === "manju"} onClick={() => selectContentType("manju")}>漫剧</button>
+                  <button type="button" className="content-type-unavailable" disabled title="AI剧暂不支持关键词搜索">AI剧</button>
+                </>
+              )}
             </div>
           </header>
 
+          {nav === "search" && submittedQuery ? <div className="search-result-summary"><span>“{submittedQuery}” · 已显示 {items.length} 项</span><button type="button" className="text-action" disabled={loading} onClick={() => { searchCache.current.clear(); setSearchRevision((value) => value + 1); }}>刷新结果</button></div> : null}
           {nav === "discover" && (categoryGroups.length || rankBoards.length) ? (
             <section className="filter-strip">
               {rankBoards.length ? <div className="filter-row"><span>榜单</span>{rankBoards.slice(0, 8).map((board) => <span className="filter-chip passive" key={board.schema || board.label}>{board.label}</span>)}</div> : null}
@@ -540,22 +596,23 @@ export default function App() {
           <section className="library-workspace">
             <div className="library-main" onScroll={onLibraryScroll}>
               {error ? <div className="inline-error">{error}</div> : null}
+              {catalogError ? <div className="inline-error">{catalogError}</div> : null}
               {loading ? <div className="library-loading-overlay" role="status" aria-label="正在加载内容"><span className="loading-spinner" aria-hidden="true" />正在加载内容…</div> : null}
-              {!loading && !items.length ? <div className="empty-library"><h2>没有找到短剧</h2><p>换一个关键词或分类试试</p></div> : null}
+              {!loading && !items.length ? <div className="empty-library"><h2>{nav === "search" && !submittedQuery ? "搜索你想看的剧" : "没有找到短剧"}</h2><p>{nav === "search" && !submittedQuery ? "输入剧名，默认搜索全部真人剧和漫剧" : "换一个关键词或分类试试"}</p></div> : null}
               <div className="poster-grid">
                 {items.map((item, index) => (
                   <button type="button" className={`poster-card ${selected?.bookId === item.bookId ? "selected" : ""}`} key={item.bookId} onClick={() => void selectSeries(item)}>
                     <div className="poster-image"><Cover src={item.cover} title={item.title} />{nav === "rank" ? <span className="rank-index">NO.{index + 1}</span> : null}{item.rankTags[0]?.label ? <span className="rank-label">{item.rankTags[0].label}</span> : null}</div>
-                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || (contentType === "manju" ? "漫剧" : "真人剧")}{item.score ? ` · ${item.score}分` : ""}</p></div>
+                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || (nav === "rank" ? rankTypeLabel(rankType) : item.contentTypeCode === 2 ? "漫剧" : "真人剧")}{item.score ? ` · ${item.score}分` : ""}</p></div>
                   </button>
                 ))}
               </div>
               {(nav === "discover"
                 ? discoveryPagingRef.current.hasMore || discoveryPagingRef.current.visibleCount < discoveryPagingRef.current.allItems.length
                 : nav === "search"
-                  ? searchPagingRef.current.hasMore || searchPagingRef.current.visibleCount < searchPagingRef.current.allItems.length
+                  ? Boolean(submittedQuery) && (searchPagingRef.current.hasMore || searchPagingRef.current.visibleCount < searchPagingRef.current.allItems.length)
                   : rankPagingRef.current.hasMore || rankPagingRef.current.visibleCount < rankPagingRef.current.allItems.length) ? (
-                <div className="load-more-row">{nav === "search" ? <button type="button" className="secondary-button" onClick={() => void runSearch(query, true)} disabled={loading}>{loading ? "加载中…" : "加载更多"}</button> : <span role="status">{loading ? "正在加载更多…" : "继续下拉加载更多"}</span>}</div>
+                <div className="load-more-row">{nav === "search" || nav === "discover" ? <button type="button" className="secondary-button" onClick={() => void (nav === "discover" ? loadMoreDiscover() : runSearch(submittedQuery, true))} disabled={loading}>{loading ? "加载中…" : "加载更多"}</button> : <span role="status">{loading ? "正在加载更多…" : "继续下拉加载更多"}</span>}</div>
               ) : null}
             </div>
             <SeriesInspector
@@ -572,6 +629,13 @@ export default function App() {
           </section>
         </main>
       )}
+      {nav === "monitor" && monitorDetailOpen ? (
+        <SeriesDialog onClose={() => setMonitorDetailOpen(false)}>
+          {catalogError ? <p className="inline-error" role="alert">{catalogError}</p> : null}
+          <SeriesInspector series={selected} definition={activeSettings.definition} episodes={episodes} selectedIds={selectedEpisodeIds} loading={catalogLoading} metricsLoading={metricsLoading} metricsError={metricsError} onSelectionChange={setSelectedEpisodeIds} onEnqueue={enqueueSelection} />
+          {toast ? <p className="series-dialog-status" role="status">{toast}</p> : null}
+        </SeriesDialog>
+      ) : null}
       {toast ? <div className="toast" role="status"><span><CheckIcon size={14} /></span>{toast}<button type="button" aria-label="关闭提示" onClick={() => setToast("")}><CloseIcon size={16} /></button></div> : null}
     </div>
   );

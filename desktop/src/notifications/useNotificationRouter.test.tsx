@@ -12,7 +12,8 @@ function mediaFixture(): MediaJobsModel {
       inputs: [], outputPath: null, errorCode: null, errorMessage: null,
       outputs: Array.from({ length: 20 }, (_, index) => ({ episodeIndex: index + 1, kind: "subtitles" as const, path: `/safe/${index}.srt` })),
     }],
-    startMerge: vi.fn(), startAudioSeparation: vi.fn(), startSubtitleExtraction: vi.fn(), cancel: vi.fn(), retry: vi.fn(),
+    startMerge: vi.fn(), startAudioSeparation: vi.fn(), startSubtitleExtraction: vi.fn(), cancel: vi.fn(),
+    pause: vi.fn(), resume: vi.fn(), deleteJob: vi.fn(), hasMergedVideo: vi.fn(), retry: vi.fn(),
     markNotified: vi.fn().mockResolvedValue(undefined),
   };
 }
@@ -21,7 +22,7 @@ function youtubeFixture(): YouTubeModel {
   return {
     credential: { configured: true, clientIdSuffix: "…123456" }, channels: [], activeChannelId: "UC_TEST", loading: false, busy: false,
     jobs: [{ id: "youtube-1", title: "测试剧", channelId: "UC_TEST", sourcePath: "/safe/video.mp4", status: "videoUploadedThumbnailFailed", uploadedBytes: 10, totalBytes: 10, percent: 100, errorCode: "THUMBNAIL_FORBIDDEN", errorMessage: "safe", videoId: "abc", youtubeUrl: "https://youtu.be/abc", actualPrivacyStatus: "private", thumbnailState: "failed" }],
-    importCredential: vi.fn(), authorize: vi.fn(), setChannel: vi.fn(), revoke: vi.fn(), removeCredential: vi.fn(), startUpload: vi.fn(), cancel: vi.fn(), retry: vi.fn(), retryThumbnail: vi.fn(),
+    importCredential: vi.fn(), authorize: vi.fn(), setChannel: vi.fn(), revoke: vi.fn(), removeCredential: vi.fn(), startUpload: vi.fn(), cancel: vi.fn(), pause: vi.fn(), resume: vi.fn(), retry: vi.fn(), retryThumbnail: vi.fn(),
     markNotified: vi.fn().mockResolvedValue(undefined),
   };
 }

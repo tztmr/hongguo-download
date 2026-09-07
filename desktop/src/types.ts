@@ -1,4 +1,6 @@
 export type ContentType = "drama" | "manju";
+export type SearchContentType = "all" | ContentType;
+export type RankReleaseType = "all" | NewReleaseType;
 export type NavId = "discover" | "search" | "rank" | "monitor" | "queue" | "settings";
 export type DefinitionPreference = "auto" | "1080p" | "720p";
 export type DemucsModel = "htdemucs" | "htdemucs_ft";
@@ -23,6 +25,7 @@ export type SeriesItem = {
   firstVid: string;
   contentTypeCode: number;
   episodeCount: number;
+  durationSeconds?: number;
   abstract: string;
   score: string;
   category: string;
@@ -61,6 +64,8 @@ export type AppSettings = {
   notifyYouTubeResult?: boolean;
   demucsModel: DemucsModel;
   whisperModel: WhisperModel;
+  downloadProxy?: string;
+  downloadMirror?: string;
   warning?: string;
 };
 
@@ -108,6 +113,7 @@ export type RankPage = {
   hasMore: boolean;
   board: string;
   boardName: string;
+  releaseType: RankReleaseType;
   boards: Array<{ id: string; name: string }>;
 };
 

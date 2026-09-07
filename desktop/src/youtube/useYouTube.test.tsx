@@ -22,6 +22,7 @@ function fixture() {
     importCredential: vi.fn().mockResolvedValue(snapshot.credential), authorize: vi.fn().mockResolvedValue(snapshot.channels[0]),
     setChannel: vi.fn().mockResolvedValue(snapshot), revoke: vi.fn().mockResolvedValue(snapshot),
     removeCredential: vi.fn().mockResolvedValue(snapshot), startUpload: vi.fn().mockResolvedValue(job),
+    pause: vi.fn().mockResolvedValue({ ...job, status: "paused" }), resume: vi.fn().mockResolvedValue(job),
     cancel: vi.fn().mockResolvedValue(undefined), retry: vi.fn().mockResolvedValue(job), retryThumbnail: vi.fn().mockResolvedValue(job),
     subscribeProgress: vi.fn(async (next) => { listener = next; return vi.fn(); }),
     emit: (value) => listener?.(value),
@@ -30,6 +31,28 @@ function fixture() {
 }
 
 describe("useYouTube", () => {
+  it("clears a previous callback timeout while retrying and shows the connected channel", async () => {
+    const commands = fixture();
+    vi.mocked(commands.authorize).mockRejectedValueOnce({ code: "OAUTH_CALLBACK_TIMEOUT", message: "YouTube 授权回调超时" });
+    const { result } = renderHook(() => useYouTube(commands));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    await act(async () => { await expect(result.current.authorize()).rejects.toMatchObject({ code: "OAUTH_CALLBACK_TIMEOUT" }); });
+    expect(result.current.error?.code).toBe("OAUTH_CALLBACK_TIMEOUT");
+    let complete!: (channel: typeof snapshot.channels[number]) => void;
+    vi.mocked(commands.authorize).mockImplementationOnce(() => new Promise((resolve) => { complete = resolve; }));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.authorize(); });
+    expect(result.current.busy).toBe(true);
+    expect(result.current.error).toBeUndefined();
+    await act(async () => {
+      complete({ channelId: "UC_NEW", title: "新频道", authorizedAt: "2026-09-05T00:00:00Z" });
+      await pending;
+    });
+    expect(result.current.busy).toBe(false);
+    expect(result.current.error).toBeUndefined();
+    expect(result.current.activeChannelId).toBe("UC_NEW");
+  });
+
   it("loads the safe snapshot and replaces progress events by job id", async () => {
     const commands = fixture();
     const { result } = renderHook(() => useYouTube(commands));
@@ -49,14 +72,31 @@ describe("useYouTube", () => {
     };
     await act(async () => {
       await result.current.startUpload(request);
+      await result.current.pause("youtube-1");
+      await result.current.resume("youtube-1");
       await result.current.cancel("youtube-1");
       await result.current.retry("youtube-1");
       await result.current.retryThumbnail("youtube-1");
     });
     expect(commands.startUpload).toHaveBeenCalledWith(request);
+    expect(commands.pause).toHaveBeenCalledWith("youtube-1");
+    expect(commands.resume).toHaveBeenCalledWith("youtube-1");
     expect(commands.cancel).toHaveBeenCalledWith("youtube-1");
     expect(commands.retry).toHaveBeenCalledWith("youtube-1");
     expect(commands.retryThumbnail).toHaveBeenCalledWith("youtube-1");
+  });
+
+  it("keeps the completed pause event when the IPC reply arrives later", async () => {
+    const commands = fixture();
+    const { result } = renderHook(() => useYouTube(commands));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    let resolve!: (job: YouTubeJob) => void;
+    vi.mocked(commands.pause).mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.pause(job.id); });
+    act(() => commands.emit({ ...job, status: "paused", uploadedBytes: 40, percent: 40 }));
+    await act(async () => { resolve({ ...job, status: "pausing" }); await pending; });
+    expect(result.current.jobs[0]).toMatchObject({ status: "paused", uploadedBytes: 40 });
   });
 
   it("does not expose arbitrary rejection text when no stable error code exists", async () => {

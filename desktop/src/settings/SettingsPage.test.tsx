@@ -1,4 +1,4 @@
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { UseAppSettingsResult } from "./useAppSettings";
 import { SettingsPage } from "./SettingsPage";
@@ -80,10 +80,23 @@ describe("SettingsPage", () => {
     const view = render(<SettingsPage model={settings} />);
     expect(view.getByText("htdemucs")).toBeTruthy();
     expect(view.getByText("/AppData/components/runtime/1")).toBeTruthy();
-    expect(view.getByText(/downloading/i)).toBeTruthy();
+    expect(view.getAllByText(/正在下载/).length).toBeGreaterThan(0);
     expect(view.getByText(/42%/)).toBeTruthy();
+    expect(view.getByRole("progressbar", { name: "runtime 下载进度" }).getAttribute("aria-valuenow")).toBe("42");
     const deletes = view.getAllByRole("button", { name: "删除模型" });
     expect(deletes.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
+  });
+
+  it("saves proxy and mainland mirror settings", () => {
+    const settings = model();
+    const view = render(<SettingsPage model={settings} />);
+    fireEvent.change(view.getByPlaceholderText(/127\.0\.0\.1:7890/), { target: { value: "socks5://127.0.0.1:7890" } });
+    fireEvent.change(view.getByPlaceholderText(/你的镜像域名/), { target: { value: "https://mirror.example/ai/" } });
+    fireEvent.click(view.getByRole("button", { name: "保存网络设置" }));
+    expect(settings.update).toHaveBeenCalledWith({
+      downloadProxy: "socks5://127.0.0.1:7890",
+      downloadMirror: "https://mirror.example/ai/",
+    });
   });
 
   it("confirms component download and installed sizes before starting network work", () => {
@@ -102,10 +115,79 @@ describe("SettingsPage", () => {
     });
     const view = render(<SettingsPage model={settings} />);
 
-    fireEvent.click(view.getByRole("button", { name: "安装 / 重下" }));
+    fireEvent.click(view.getByRole("button", { name: "下载" }));
 
     expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/runtime[\s\S]*1 KB[\s\S]*2 KB/));
     expect(settings.installComponent).not.toHaveBeenCalled();
     confirm.mockRestore();
   });
+
+  it("downloads only the components selected in settings", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const installComponent = vi.fn(async (_id: string): Promise<void> => undefined);
+    const settings = model({
+      components: [
+        {
+          id: "runtime",
+          version: "1",
+          installed: false,
+          installedVersion: null,
+          installedPath: null,
+          downloadBytes: 1024,
+          installedBytes: 2048,
+          inUse: false,
+        },
+        {
+          id: "whisper-small",
+          version: "1",
+          installed: false,
+          installedVersion: null,
+          installedPath: null,
+          downloadBytes: 4096,
+          installedBytes: 8192,
+          inUse: false,
+        },
+      ],
+      installComponent,
+    });
+    const view = render(<SettingsPage model={settings} />);
+
+    fireEvent.click(view.getByRole("checkbox", { name: "选择 runtime 下载" }));
+    fireEvent.click(view.getByRole("button", { name: /下载选中组件/ }));
+
+    await waitFor(() => expect(installComponent).toHaveBeenCalledWith("runtime"));
+    expect(installComponent).toHaveBeenCalledTimes(1);
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/runtime/));
+    confirm.mockRestore();
+  });
+  it("selects only missing components for current models and reports installation failures", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const settings = model({ components: ["runtime", "demucs-htdemucs", "whisper-small", "whisper-medium"].map((id) => ({
+      id, version: "1", installed: id === "runtime", installedVersion: null, installedPath: null,
+      downloadBytes: 1024, installedBytes: 2048, inUse: false,
+    })), installComponent: vi.fn().mockRejectedValue(new Error("组件下载失败")) });
+    const view = render(<SettingsPage model={settings} />);
+    fireEvent.click(view.getByRole("button", { name: "选择当前模型所需组件" }));
+    expect((view.getByRole("checkbox", { name: "选择 runtime 下载" }) as HTMLInputElement).checked).toBe(false);
+    expect((view.getByRole("checkbox", { name: "选择 demucs-htdemucs 下载" }) as HTMLInputElement).checked).toBe(true);
+    expect((view.getByRole("checkbox", { name: "选择 whisper-small 下载" }) as HTMLInputElement).checked).toBe(true);
+    expect((view.getByRole("checkbox", { name: "选择 whisper-medium 下载" }) as HTMLInputElement).checked).toBe(false);
+    expect(view.getByText("下载 2 KB · 安装后占用 4 KB")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: /下载选中组件/ }));
+    await waitFor(() => expect(view.getByRole("alert").textContent).toBe("组件下载失败"));
+    expect(settings.installComponent).toHaveBeenCalledTimes(1);
+    vi.mocked(window.confirm).mockRestore();
+  });
+
+  it("uses checked defaults when older settings omit model preferences", () => {
+    const settings = model();
+    Reflect.deleteProperty(settings.settings!, "demucsModel");
+    Reflect.deleteProperty(settings.settings!, "whisperModel");
+    const view = render(<SettingsPage model={settings} />);
+    expect((view.getByRole("radio", { name: /标准模式/ }) as HTMLInputElement).checked).toBe(true);
+    expect((view.getByRole("radio", { name: /轻量模式/ }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(view.getByRole("radio", { name: /高精度模式/ }));
+    expect(settings.update).toHaveBeenCalledWith({ whisperModel: "medium" });
+  });
+
 });

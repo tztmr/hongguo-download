@@ -1,6 +1,7 @@
 use super::model::{
-    MediaJob, MediaJobRequest, MediaJobStatus, MediaJobTransition, MediaJobsSnapshot,
-    PersistedMediaJobs, ValidatedAIJobRequest, ValidatedMergeRequest, MEDIA_JOBS_VERSION,
+    MediaJob, MediaJobPauseOrigin, MediaJobRequest, MediaJobStatus, MediaJobTransition,
+    MediaJobsSnapshot, PersistedMediaJobs, ValidatedAIJobRequest, ValidatedMergeRequest,
+    MEDIA_JOBS_VERSION,
 };
 use crate::app_error::AppError;
 use std::{
@@ -51,9 +52,13 @@ impl MediaJobManager {
         };
 
         let recovered_running = persisted.jobs.iter_mut().fold(false, |changed, job| {
-            if job.status == MediaJobStatus::Running {
+            if job.status == MediaJobStatus::Running
+                || (job.status == MediaJobStatus::Paused
+                    && job.pause_origin != Some(MediaJobPauseOrigin::Queued))
+            {
                 job.status = MediaJobStatus::Interrupted;
                 job.stage = "interrupted".into();
+                job.pause_origin = None;
                 true
             } else {
                 changed
@@ -131,7 +136,10 @@ impl MediaJobManager {
         let mut guard = self.state.lock().map_err(|_| manager_unavailable_error())?;
         if guard.jobs.iter().any(|job| {
             job.dedupe_key == dedupe_key
-                && matches!(job.status, MediaJobStatus::Queued | MediaJobStatus::Running)
+                && matches!(
+                    job.status,
+                    MediaJobStatus::Queued | MediaJobStatus::Running | MediaJobStatus::Paused
+                )
         }) {
             return Err(AppError::new(
                 "MEDIA_JOB_ALREADY_ACTIVE",
@@ -144,6 +152,7 @@ impl MediaJobManager {
             dedupe_key,
             kind,
             status: MediaJobStatus::Queued,
+            pause_origin: None,
             stage: "queued".into(),
             percent: 0.0,
             inputs,
@@ -283,7 +292,10 @@ impl MediaJobManager {
             .iter_mut()
             .find(|job| job.id == id)
             .ok_or_else(|| AppError::new("MEDIA_JOB_NOT_FOUND", "媒体任务不存在"))?;
-        if job.status != MediaJobStatus::Running {
+        if job.status != MediaJobStatus::Running
+            && !(job.status == MediaJobStatus::Paused
+                && job.pause_origin == Some(MediaJobPauseOrigin::Running))
+        {
             return Err(AppError::new(
                 "MEDIA_JOB_INVALID_TRANSITION",
                 "媒体任务当前状态不允许更新进度",
@@ -325,7 +337,10 @@ impl MediaJobManager {
         if next.jobs.iter().enumerate().any(|(other_index, job)| {
             other_index != index
                 && job.dedupe_key == dedupe_key
-                && matches!(job.status, MediaJobStatus::Queued | MediaJobStatus::Running)
+                && matches!(
+                    job.status,
+                    MediaJobStatus::Queued | MediaJobStatus::Running | MediaJobStatus::Paused
+                )
         }) {
             return Err(AppError::new(
                 "MEDIA_JOB_ALREADY_ACTIVE",
@@ -368,7 +383,10 @@ impl MediaJobManager {
         if next.jobs.iter().enumerate().any(|(other_index, job)| {
             other_index != index
                 && job.dedupe_key == dedupe_key
-                && matches!(job.status, MediaJobStatus::Queued | MediaJobStatus::Running)
+                && matches!(
+                    job.status,
+                    MediaJobStatus::Queued | MediaJobStatus::Running | MediaJobStatus::Paused
+                )
         }) {
             return Err(AppError::new(
                 "MEDIA_JOB_ALREADY_ACTIVE",
@@ -385,6 +403,36 @@ impl MediaJobManager {
 
     pub fn cancel(&self, id: &str) -> Result<MediaJob, AppError> {
         self.update(id, MediaJobTransition::Cancel)
+    }
+
+    pub fn pause_queued(&self, id: &str) -> Result<MediaJob, AppError> {
+        self.update(id, MediaJobTransition::PauseQueued)
+    }
+
+    pub fn pause_running(&self, id: &str) -> Result<MediaJob, AppError> {
+        self.update(id, MediaJobTransition::PauseRunning)
+    }
+
+    pub fn resume_queued(&self, id: &str) -> Result<MediaJob, AppError> {
+        self.update(id, MediaJobTransition::ResumeQueued)
+    }
+
+    pub fn resume_running(&self, id: &str) -> Result<MediaJob, AppError> {
+        self.update(id, MediaJobTransition::ResumeRunning)
+    }
+
+    pub fn remove(&self, id: &str) -> Result<MediaJob, AppError> {
+        let mut guard = self.state.lock().map_err(|_| manager_unavailable_error())?;
+        let mut next = guard.clone();
+        let index = next
+            .jobs
+            .iter()
+            .position(|job| job.id == id)
+            .ok_or_else(|| AppError::new("MEDIA_JOB_NOT_FOUND", "媒体任务不存在"))?;
+        let removed = next.jobs.remove(index);
+        persist_jobs(&self.store_dir, &next.jobs)?;
+        *guard = next;
+        Ok(removed)
     }
 
     pub fn retry(&self, id: &str) -> Result<MediaJob, AppError> {
@@ -407,7 +455,10 @@ impl MediaJobManager {
             let duplicate_active = next.jobs.iter().enumerate().any(|(index, job)| {
                 index != job_index
                     && job.dedupe_key == *dedupe_key
-                    && matches!(job.status, MediaJobStatus::Queued | MediaJobStatus::Running)
+                    && matches!(
+                        job.status,
+                        MediaJobStatus::Queued | MediaJobStatus::Running | MediaJobStatus::Paused
+                    )
             });
             if duplicate_active {
                 return Err(AppError::new(
@@ -432,14 +483,42 @@ fn apply_transition(job: &mut MediaJob, transition: MediaJobTransition) -> Resul
         (MediaJobStatus::Queued, MediaJobTransition::Start) => {
             job.status = MediaJobStatus::Running;
             job.stage = "running".into();
+            job.pause_origin = None;
+        }
+        (MediaJobStatus::Queued, MediaJobTransition::PauseQueued) => {
+            job.status = MediaJobStatus::Paused;
+            job.stage = "paused".into();
+            job.pause_origin = Some(MediaJobPauseOrigin::Queued);
+        }
+        (MediaJobStatus::Running, MediaJobTransition::PauseRunning) => {
+            job.status = MediaJobStatus::Paused;
+            job.stage = "paused".into();
+            job.pause_origin = Some(MediaJobPauseOrigin::Running);
+        }
+        (MediaJobStatus::Paused, MediaJobTransition::ResumeQueued)
+            if job.pause_origin == Some(MediaJobPauseOrigin::Queued) =>
+        {
+            job.status = MediaJobStatus::Queued;
+            job.stage = "queued".into();
+            job.pause_origin = None;
+        }
+        (MediaJobStatus::Paused, MediaJobTransition::ResumeRunning)
+            if job.pause_origin == Some(MediaJobPauseOrigin::Running) =>
+        {
+            job.status = MediaJobStatus::Running;
+            job.stage = "running".into();
+            job.pause_origin = None;
         }
         (
-            MediaJobStatus::Running,
+            status,
             MediaJobTransition::Complete {
                 output_path,
                 outputs,
             },
-        ) => {
+        ) if status == MediaJobStatus::Running
+            || (status == MediaJobStatus::Paused
+                && job.pause_origin == Some(MediaJobPauseOrigin::Running)) =>
+        {
             job.status = MediaJobStatus::Completed;
             job.stage = "completed".into();
             job.percent = 100.0;
@@ -447,16 +526,27 @@ fn apply_transition(job: &mut MediaJob, transition: MediaJobTransition) -> Resul
             job.outputs = outputs;
             job.error_code = None;
             job.error_message = None;
+            job.pause_origin = None;
         }
-        (MediaJobStatus::Running, MediaJobTransition::Fail { code, message }) => {
+        (status, MediaJobTransition::Fail { code, message })
+            if status == MediaJobStatus::Running
+                || (status == MediaJobStatus::Paused
+                    && job.pause_origin == Some(MediaJobPauseOrigin::Running)) =>
+        {
             job.status = MediaJobStatus::Failed;
             job.stage = "failed".into();
             job.error_code = Some(code);
             job.error_message = Some(message);
+            job.pause_origin = None;
         }
-        (MediaJobStatus::Running, MediaJobTransition::Cancel) => {
+        (status, MediaJobTransition::Cancel)
+            if status == MediaJobStatus::Running
+                || (status == MediaJobStatus::Paused
+                    && job.pause_origin == Some(MediaJobPauseOrigin::Running)) =>
+        {
             job.status = MediaJobStatus::Cancelled;
             job.stage = "cancelled".into();
+            job.pause_origin = None;
         }
         (
             MediaJobStatus::Failed | MediaJobStatus::Cancelled | MediaJobStatus::Interrupted,
@@ -471,6 +561,7 @@ fn apply_transition(job: &mut MediaJob, transition: MediaJobTransition) -> Resul
             job.outputs.clear();
             job.completion_notified_at = None;
             job.failure_notified_at = None;
+            job.pause_origin = None;
         }
         _ => {
             return Err(AppError::new(
@@ -601,6 +692,128 @@ mod notification_tests {
         );
         let retried = reloaded.retry(&job.id).unwrap();
         assert!(retried.failure_notified_at.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::media::{InputSnapshot, MediaJobKind, MediaJobPauseOrigin};
+
+    fn test_manager(label: &str) -> (PathBuf, MediaJobManager) {
+        let root = std::env::temp_dir().join(format!(
+            "hongguo-media-lifecycle-{label}-{}-{}",
+            std::process::id(),
+            JOB_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let manager = MediaJobManager::load(&root).unwrap();
+        (root, manager)
+    }
+
+    fn enqueue(manager: &MediaJobManager, key: &str) -> MediaJob {
+        manager
+            .enqueue(MediaJobRequest {
+                dedupe_key: key.into(),
+                kind: MediaJobKind::Merge,
+                inputs: vec![InputSnapshot {
+                    path: PathBuf::from("episode.mp4"),
+                    size_bytes: 1,
+                }],
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn queued_pause_survives_reload_and_resume_returns_to_queue() {
+        let (root, manager) = test_manager("queued-pause");
+        let job = enqueue(&manager, "queued-pause");
+        let paused = manager.pause_queued(&job.id).unwrap();
+        assert_eq!(paused.status, MediaJobStatus::Paused);
+        assert_eq!(paused.pause_origin, Some(MediaJobPauseOrigin::Queued));
+        drop(manager);
+
+        let reloaded = MediaJobManager::load(&root).unwrap();
+        let persisted = reloaded.job(&job.id).unwrap();
+        assert_eq!(persisted.status, MediaJobStatus::Paused);
+        assert_eq!(persisted.pause_origin, Some(MediaJobPauseOrigin::Queued));
+        let resumed = reloaded.resume_queued(&job.id).unwrap();
+        assert_eq!(resumed.status, MediaJobStatus::Queued);
+        assert_eq!(resumed.pause_origin, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn running_pause_accepts_last_progress_and_recovers_as_interrupted() {
+        let (root, manager) = test_manager("running-pause");
+        let job = enqueue(&manager, "running-pause");
+        manager.claim_oldest_queued().unwrap();
+        let paused = manager.pause_running(&job.id).unwrap();
+        assert_eq!(paused.pause_origin, Some(MediaJobPauseOrigin::Running));
+        let progressed = manager
+            .update_progress(&job.id, "merging".into(), 48.0)
+            .unwrap();
+        assert_eq!(progressed.percent, 48.0);
+        drop(manager);
+
+        let reloaded = MediaJobManager::load(&root).unwrap();
+        let recovered = reloaded.job(&job.id).unwrap();
+        assert_eq!(recovered.status, MediaJobStatus::Interrupted);
+        assert_eq!(recovered.pause_origin, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remove_deletes_record_from_persisted_snapshot() {
+        let (root, manager) = test_manager("remove");
+        let job = enqueue(&manager, "remove");
+        let removed = manager.remove(&job.id).unwrap();
+        assert_eq!(removed.id, job.id);
+        assert_eq!(
+            manager.job(&job.id).unwrap_err().code,
+            "MEDIA_JOB_NOT_FOUND"
+        );
+        drop(manager);
+        let reloaded = MediaJobManager::load(&root).unwrap();
+        assert!(reloaded.snapshot().jobs.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn paused_job_blocks_duplicate_enqueue() {
+        let (root, manager) = test_manager("dedupe");
+        let job = enqueue(&manager, "same-key");
+        manager.pause_queued(&job.id).unwrap();
+        let error = manager
+            .enqueue(MediaJobRequest {
+                dedupe_key: "same-key".into(),
+                kind: MediaJobKind::Merge,
+                inputs: Vec::new(),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "MEDIA_JOB_ALREADY_ACTIVE");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn running_origin_pause_can_finish_at_the_process_exit_boundary() {
+        let (root, manager) = test_manager("paused-terminal");
+        let job = enqueue(&manager, "paused-terminal");
+        manager.claim_oldest_queued().unwrap();
+        manager.pause_running(&job.id).unwrap();
+
+        let completed = manager
+            .update(
+                &job.id,
+                MediaJobTransition::Complete {
+                    output_path: root.join("合并视频/output.mp4"),
+                    outputs: Vec::new(),
+                },
+            )
+            .unwrap();
+        assert_eq!(completed.status, MediaJobStatus::Completed);
+        assert_eq!(completed.pause_origin, None);
         let _ = fs::remove_dir_all(root);
     }
 }

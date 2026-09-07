@@ -18,6 +18,8 @@ __pycache__/
 
 # Local planning and generated output
 .superpowers/
+.worktrees/
+.playwright-cli/
 output/
 dist/
 
@@ -27,4 +29,3 @@ desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/schemas/
 desktop/*.local
-
