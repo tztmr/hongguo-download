@@ -66,6 +66,7 @@ function runningFixture() {
     abstract: "",
     score: "",
     category: "真人剧",
+    categoryTags: ["都市", "逆袭", "甜宠"],
     author: "",
     rankTags: [],
   };
@@ -123,6 +124,7 @@ describe("download storage", () => {
     const item = result.state.batches[0].items[0];
 
     expect(item).toMatchObject({ status: "queued", percent: 0, received: 0 });
+    expect(result.state.batches[0].series.categoryTags).toEqual(["都市", "逆袭", "甜宠"]);
     expect(item.total).toBeUndefined();
     expect(result.warning).toBeUndefined();
   });

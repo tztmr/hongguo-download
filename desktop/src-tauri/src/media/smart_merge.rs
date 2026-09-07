@@ -151,6 +151,7 @@ fn controlled_read<T: Send + 'static>(
     let status = loop {
         if control.is_cancelled() {
             terminate_and_wait(&mut child);
+            control.kill_registered_group();
             break Err(cancelled_error());
         }
         match child.try_wait() {
@@ -850,7 +851,10 @@ mod tests {
     #[test]
     fn cancelling_probe_terminates_the_process_and_unblocks_reader() {
         let mut command = Command::new("/bin/sh");
-        command.args(["-c", "printf 'ready\\n'; sleep 30"]);
+        command.args([
+            "-c",
+            "trap 'sleep 3 &' TERM; printf 'ready\\n'; while true; do sleep 3; done",
+        ]);
         let control = CancellationToken::new();
         let worker_control = control.clone();
         let (sender, receiver) = mpsc::channel();

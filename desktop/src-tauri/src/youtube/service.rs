@@ -294,6 +294,27 @@ impl YouTubeService {
         Ok(())
     }
 
+    pub fn delete_upload(&self, job_id: &str) -> Result<(), AppError> {
+        // Match dispatch's running -> uploads lock order so deletion cannot
+        // race with a queued job being assigned to a worker.
+        let running = self.running.lock().map_err(state_lock_error)?;
+        let mut uploads = self.uploads.lock().map_err(state_lock_error)?;
+        let (next, removed_id) = uploads_without_job(&uploads, job_id)?;
+        persist_uploads(&self.data_dir, &next)?;
+        *uploads = next;
+        if let Some(token) = running.get(job_id) {
+            token.cancel();
+        }
+        drop(uploads);
+        drop(running);
+        let checkpoint = self
+            .data_dir
+            .join("youtube/uploads")
+            .join(format!("{removed_id}.json"));
+        let _ = fs::remove_file(checkpoint);
+        Ok(())
+    }
+
     pub async fn retry_thumbnail(&self, job_id: &str) -> Result<YouTubeJob, AppError> {
         let stored = self
             .uploads
@@ -648,6 +669,24 @@ fn ensure_upload_not_duplicate(uploads: &[StoredUpload], job: &YouTubeJob) -> Re
     Ok(())
 }
 
+fn uploads_without_job(
+    uploads: &[StoredUpload],
+    job_id: &str,
+) -> Result<(Vec<StoredUpload>, String), AppError> {
+    let removed = uploads
+        .iter()
+        .find(|item| item.job.id == job_id)
+        .ok_or_else(|| AppError::new("UPLOAD_JOB_NOT_FOUND", "YouTube 上传任务不存在"))?;
+    Ok((
+        uploads
+            .iter()
+            .filter(|item| item.job.id != job_id)
+            .cloned()
+            .collect(),
+        removed.job.id.clone(),
+    ))
+}
+
 fn pause_upload_job(job: &mut YouTubeJob, has_worker: bool) -> Result<(), AppError> {
     if matches!(
         job.status,
@@ -936,6 +975,21 @@ mod tests {
         next.channel_id = "another-channel".into();
         assert!(ensure_upload_not_duplicate(&jobs, &next).is_ok());
         assert!(ensure_upload_not_duplicate(&jobs, &jobs[0].job).is_ok());
+    }
+
+    #[test]
+    fn deleting_an_upload_removes_only_the_requested_stable_job_id() {
+        let jobs = vec![queued("first"), queued("second")];
+
+        let (remaining, removed_id) = uploads_without_job(&jobs, "first").unwrap();
+
+        assert_eq!(removed_id, "first");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].job.id, "second");
+        assert_eq!(
+            uploads_without_job(&remaining, "missing").unwrap_err().code,
+            "UPLOAD_JOB_NOT_FOUND"
+        );
     }
 
     #[test]

@@ -95,6 +95,20 @@ describe("useAppSettings", () => {
     expect(result.current.warning).toContain("disk full");
   });
 
+  it("extracts the message from a structured native error", async () => {
+    const deps = dependencies({
+      getSettings: vi.fn(async () => {
+        throw { code: "SETTINGS_LOAD_FAILED", message: "无法读取设置" };
+      }),
+    });
+    const { result } = renderHook(() => useAppSettings(deps));
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.warning).toBe("无法读取设置");
+    expect(result.current.warning).not.toBe("[object Object]");
+  });
+
   it("serializes rapid updates so later changes are not overwritten", async () => {
     const order: string[] = [];
     let server = defaultSettings;

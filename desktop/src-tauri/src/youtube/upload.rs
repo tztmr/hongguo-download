@@ -3,6 +3,7 @@ use super::{
     models::{PrivacyStatus, ThumbnailState, UploadIntent, UploadResult, YouTubeJobStatus},
 };
 use crate::AppError;
+use bytes::Bytes;
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE},
     Client, Response, StatusCode,
@@ -27,7 +28,7 @@ use tokio::{sync::Notify, time::sleep};
 use url::Url;
 
 const UPLOAD_ENDPOINT: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
-pub const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
+pub const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
 
 #[derive(Default)]
 struct UploadStopState {
@@ -275,6 +276,7 @@ impl ResumableUploader {
             file.seek(SeekFrom::Start(start)).map_err(upload_io)?;
             let mut bytes = vec![0u8; length as usize];
             file.read_exact(&mut bytes).map_err(upload_io)?;
+            let bytes = Bytes::from(bytes);
             let mut response = cancellation
                 .interruptible(self.send_chunk(
                     &session,
@@ -427,7 +429,7 @@ impl ResumableUploader {
         start: u64,
         end: u64,
         total: u64,
-        bytes: Vec<u8>,
+        bytes: Bytes,
         token: &SecretString,
     ) -> Result<Response, reqwest::Error> {
         self.client
@@ -1003,7 +1005,7 @@ mod tests {
         for pause in [false, true] {
             let root = temp_path("resume");
             fs::create_dir_all(&root).unwrap();
-            let intent = upload_intent(&root, CHUNK_SIZE as usize + 3, "resume-job");
+            let intent = upload_intent(&root, 67_108_867, "resume-job");
             let server = MockUploadServer::serve(|session| {
                 vec![
                     MockReply {
@@ -1013,12 +1015,12 @@ mod tests {
                     },
                     MockReply {
                         status: "308 Permanent Redirect",
-                        headers: vec![("Range", format!("bytes=0-{}", CHUNK_SIZE - 1))],
+                        headers: vec![("Range", "bytes=0-67108863".into())],
                         body: "",
                     },
                     MockReply {
                         status: "308 Permanent Redirect",
-                        headers: vec![("Range", format!("bytes=0-{}", CHUNK_SIZE - 1))],
+                        headers: vec![("Range", "bytes=0-67108863".into())],
                         body: "",
                     },
                     MockReply {
@@ -1033,7 +1035,7 @@ mod tests {
             let cancellation = UploadCancellationToken::default();
             let cancel_on_checkpoint = cancellation.clone();
             let progress: Arc<dyn Fn(UploadProgressEvent) + Send + Sync> = Arc::new(move |event| {
-                if event.uploaded_bytes == CHUNK_SIZE {
+                if event.uploaded_bytes == 67_108_864 {
                     if pause {
                         cancel_on_checkpoint.pause();
                     } else {
@@ -1082,17 +1084,17 @@ mod tests {
             assert!(requests[0].line.starts_with("POST /videos?"));
             assert_eq!(
                 requests[1].headers.get("content-range").map(String::as_str),
-                Some("bytes 0-8388607/8388611")
+                Some("bytes 0-67108863/67108867")
             );
-            assert_eq!(requests[1].body_bytes, CHUNK_SIZE as usize);
+            assert_eq!(requests[1].body_bytes, 67_108_864);
             assert_eq!(
                 requests[3].headers.get("content-range").map(String::as_str),
-                Some("bytes 8388608-8388610/8388611")
+                Some("bytes 67108864-67108866/67108867")
             );
             assert_eq!(requests[3].body_bytes, 3);
             assert_eq!(
                 requests[2].headers.get("content-range").map(String::as_str),
-                Some("bytes */8388611")
+                Some("bytes */67108867")
             );
             assert_eq!(requests[2].body_bytes, 0);
             let _ = fs::remove_dir_all(root);

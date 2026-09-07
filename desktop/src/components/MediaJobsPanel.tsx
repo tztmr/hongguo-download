@@ -31,8 +31,14 @@ function sourceTitle(job: MediaJob, batches: DownloadBatch[], jobs: MediaJob[]) 
     || job.outputPath?.split(/[\\/]/).pop() || job.inputs[0]?.path.split(/[\\/]/).pop() || "媒体任务";
 }
 
-export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, focusId }: {
-  media: MediaJobsModel; batches: DownloadBatch[]; onRevealPath: (path: string) => void; onShowDownloads: () => void; focusId?: string;
+export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, focusId, onUploadToYouTube, youtubeUploadDisabledReason }: {
+  media: MediaJobsModel;
+  batches: DownloadBatch[];
+  onRevealPath: (path: string) => void;
+  onShowDownloads: () => void;
+  focusId?: string;
+  onUploadToYouTube?: (job: MediaJob, sourcePath: string) => void;
+  youtubeUploadDisabledReason?: (job: MediaJob) => string | undefined;
 }) {
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
@@ -67,6 +73,10 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
         {!visible.length ? <div className="download-empty"><div className="empty-download-icon"><QueueIcon size={26} /></div><h3>{media.jobs.length ? "没有匹配的媒体任务" : "还没有媒体任务"}</h3><p>{media.jobs.length ? "试试其他状态或搜索关键词" : "先完成剧集下载，再选择合并视频、分离背景音乐或提取字幕。"}</p>{media.jobs.length ? <button type="button" className="secondary-button" onClick={() => { setFilter("all"); setQuery(""); }}>清除筛选</button> : <button type="button" className="primary-button" onClick={onShowDownloads}>查看下载任务</button>}</div> : visible.map((job) => {
           const percent = job.status === "completed" ? 100 : Math.round(Number.isFinite(job.percent) ? Math.max(0, Math.min(100, job.percent)) : 0);
           const stage = job.stage.replace(/\b[a-zA-Z]+\b/g, (word) => stages[word] || word);
+          const uploadSource = job.kind === "separateBackgroundMusic" && job.status === "completed" && job.aiRequest?.scope === "merged"
+            ? job.outputs?.find((output) => output.kind === "noBackgroundMusicVideo")?.path
+            : undefined;
+          const uploadDisabledReason = uploadSource ? youtubeUploadDisabledReason?.(job) : undefined;
           return (
             <article className={`media-job-row media-task-card status-${job.status}`} data-testid="media-job-row" data-focus-id={job.id} key={job.id}>
               <div className={`media-task-icon status-${job.status}`}>{job.status === "completed" ? <CheckIcon size={21} /> : ["failed", "interrupted"].includes(job.status) ? <AlertIcon size={21} /> : <QueueIcon size={21} />}</div>
@@ -84,6 +94,7 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
                 {job.status === "paused" ? <button type="button" className="secondary-button" disabled={busyIds.includes(job.id)} onClick={() => void act(job, "resume")}><PlayIcon size={15} />继续</button> : null}
                 {["failed", "cancelled", "interrupted"].includes(job.status) ? <button type="button" className="secondary-button" disabled={busyIds.includes(job.id)} onClick={() => void act(job, "retry")}>重试</button> : null}
                 {job.status === "completed" && job.outputPath ? <button type="button" className="secondary-button" onClick={() => onRevealPath(job.outputPath!)}><FolderIcon size={15} />定位</button> : null}
+                {uploadSource ? <button type="button" className="primary-button compact" disabled={Boolean(uploadDisabledReason)} title={uploadDisabledReason} onClick={() => onUploadToYouTube?.(job, uploadSource)}>上传 YouTube</button> : null}
                 <button type="button" className="secondary-button danger" disabled={busyIds.includes(job.id)} onClick={() => void act(job, "deleteJob")}><TrashIcon size={15} />删除</button>
               </div>
             </article>

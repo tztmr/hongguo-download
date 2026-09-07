@@ -62,6 +62,9 @@ function readSeriesSnapshot(value: unknown): DownloadSeriesSnapshot {
     cover: value.cover,
     abstract: value.abstract,
     category: value.category,
+    categoryTags: Array.isArray(value.categoryTags)
+      ? value.categoryTags.filter((tag): tag is string => typeof tag === "string")
+      : undefined,
     contentTypeCode: value.contentTypeCode,
     episodeCount: typeof value.episodeCount === "number" ? value.episodeCount : 0,
     durationSeconds: typeof value.durationSeconds === "number" ? value.durationSeconds : undefined,

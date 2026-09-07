@@ -83,6 +83,7 @@ export type YouTubeCommands = {
   resume(jobId: string): Promise<YouTubeJob>;
   retry(jobId: string): Promise<YouTubeJob>;
   retryThumbnail(jobId: string): Promise<YouTubeJob>;
+  removeJob(jobId: string): Promise<void>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<YouTubeJob>;
   subscribeProgress(listener: (job: YouTubeJob) => void): Promise<() => void>;
 };
@@ -102,5 +103,6 @@ export type YouTubeModel = YouTubeSnapshot & {
   resume(jobId: string): Promise<void>;
   retry(jobId: string): Promise<void>;
   retryThumbnail(jobId: string): Promise<void>;
+  removeJob(jobId: string): Promise<void>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<void>;
 };

@@ -42,6 +42,7 @@ export function MergeVideoDialog({ batch, onSubmit, onClose }: MergeVideoDialogP
           <h2 id="merge-dialog-title">合并视频</h2>
           <p>将已完成的剧集按集数顺序合并。默认保留兼容画面的原始画质，并校正音轨。</p>
         </header>
+        <div className="media-scope-summary"><strong>{batch.title}</strong><span>{inputs.length} 集 · 当前合并对象</span></div>
         <section className="media-episode-list" aria-label="合并剧集">
           <h3>包含剧集</h3>
           <ol>

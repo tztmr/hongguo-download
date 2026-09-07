@@ -10,17 +10,28 @@ type Props = {
   onSubmit: (request: YouTubeUploadIntent) => void;
 };
 
+const CATEGORY_SEPARATOR = /[·,，、/|]+/;
+
+function youtubeTags(batch: DownloadBatch) {
+  const source = batch.series.categoryTags?.length
+    ? batch.series.categoryTags
+    : batch.series.category.split(CATEGORY_SEPARATOR);
+  const tags = source.map((value) => value.trim()).filter((value, index, values) => value && values.indexOf(value) === index);
+  return tags.length ? tags : ["短剧"];
+}
+
 export function YouTubeUploadDialog({ batch, sourcePath, onClose, onSubmit }: Props) {
   const [title, setTitle] = useState(batch.title.slice(0, 100));
   const [description, setDescription] = useState((batch.series.abstract || batch.title).slice(0, 5000));
-  const [tags, setTags] = useState(batch.series.category || "短剧");
+  const [tags, setTags] = useState(youtubeTags(batch).join(", "));
   const [privacy, setPrivacy] = useState<YouTubePrivacy>("private");
+  const [categoryId, setCategoryId] = useState("1");
   const [madeForKids, setMadeForKids] = useState(false);
-  const [synthetic, setSynthetic] = useState(/ai|人工智能/i.test(`${batch.series.category} ${batch.title}`));
+  const [synthetic, setSynthetic] = useState(true);
   const [coverPath, setCoverPath] = useState<string | null>(null);
-  const [audienceConfirmed, setAudienceConfirmed] = useState(false);
-  const [syntheticConfirmed, setSyntheticConfirmed] = useState(false);
-  const [publishConfirmed, setPublishConfirmed] = useState(false);
+  const [audienceConfirmed, setAudienceConfirmed] = useState(true);
+  const [syntheticConfirmed, setSyntheticConfirmed] = useState(true);
+  const [publishConfirmed, setPublishConfirmed] = useState(true);
   const canSubmit = title.trim().length > 0 && audienceConfirmed && syntheticConfirmed && publishConfirmed;
 
   async function chooseCover() {
@@ -37,6 +48,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, onClose, onSubmit }: Pr
         <label>简介<textarea aria-label="YouTube 简介" value={description} maxLength={5000} onChange={(event) => setDescription(event.target.value)} /></label>
         <label>标签<input aria-label="YouTube 标签" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="多个标签用逗号分隔" /></label>
         <div className="youtube-form-grid">
+          <label>类别<select aria-label="YouTube 类别" value={categoryId} onChange={(event) => setCategoryId(event.target.value)}><option value="1">电影/动漫</option><option value="24">娱乐</option></select></label>
           <label>可见性<select aria-label="YouTube 可见性" value={privacy} onChange={(event) => setPrivacy(event.target.value as YouTubePrivacy)}><option value="private">私享</option><option value="unlisted">不公开</option><option value="public">公开</option></select></label>
           <label>儿童受众<select aria-label="儿童受众" value={madeForKids ? "yes" : "no"} onChange={(event) => setMadeForKids(event.target.value === "yes")}><option value="no">不是面向儿童</option><option value="yes">面向儿童</option></select></label>
           <label>合成内容<select aria-label="合成内容" value={synthetic ? "yes" : "no"} onChange={(event) => setSynthetic(event.target.value === "yes")}><option value="no">不包含</option><option value="yes">包含 AI/合成内容</option></select></label>
@@ -54,7 +66,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, onClose, onSubmit }: Pr
           title: title.trim(),
           description,
           tags: tags.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
-          categoryId: "24",
+          categoryId,
           privacyStatus: privacy,
           selfDeclaredMadeForKids: madeForKids,
           containsSyntheticMedia: synthetic,

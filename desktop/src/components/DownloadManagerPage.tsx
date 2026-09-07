@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { deriveBatchStatus, type DownloadBatch, type DownloadItem } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
 import { completedMergeInputs, isCompletedBatch, seriesRootFromInputs } from "../media/paths";
-import type { MediaJobsModel, MergeSubmitOptions } from "../media/types";
+import type { MediaCommandError, MediaJob, MediaJobsModel, MergeSubmitOptions } from "../media/types";
 import type { MediaJobScope } from "../media/types";
 import type { AIComponentStatus, DemucsModel, WhisperModel } from "../types";
 import type { NotificationTarget } from "../notifications";
@@ -10,7 +10,7 @@ import type { YouTubeModel, YouTubeUploadIntent } from "../youtube/types";
 import { YouTubeUploadDialog } from "../youtube/YouTubeUploadDialog";
 import { YouTubeUploadJobs } from "../youtube/YouTubeUploadJobs";
 import { Cover } from "./Cover";
-import { AlertIcon, CheckIcon, ChevronLeftIcon, FolderIcon, PauseIcon, PlayIcon, RetryIcon, TrashIcon } from "./icons";
+import { AlertIcon, CheckIcon, ChevronLeftIcon, CloseIcon, FolderIcon, PauseIcon, PlayIcon, RetryIcon, TrashIcon } from "./icons";
 import { MergeVideoDialog } from "./MergeVideoDialog";
 import { MediaScopeDialog } from "./MediaScopeDialog";
 import { MediaJobsPanel } from "./MediaJobsPanel";
@@ -56,6 +56,47 @@ function batchProgress(batch: DownloadBatch) {
   return batch.items.reduce((sum, item) => sum + (item.status === "done" ? 100 : item.percent), 0) / batch.items.length;
 }
 
+function batchSeriesRoot(batch: DownloadBatch) {
+  return isCompletedBatch(batch) ? seriesRootFromInputs(completedMergeInputs(batch)) : "";
+}
+
+function completedPathsFor(batch: DownloadBatch) {
+  return new Set(batch.items.filter((item) => item.status === "done" && item.path).map((item) => item.path as string));
+}
+
+function mergedPathFor(batch: DownloadBatch, jobs: MediaJob[]) {
+  const completedPaths = completedPathsFor(batch);
+  return jobs.slice().reverse().find((job) =>
+    job.kind === "merge" && job.status === "completed" && Boolean(job.outputPath)
+      && job.inputs.some((input) => completedPaths.has(input.path)))?.outputPath || undefined;
+}
+
+function noBackgroundPathFor(batch: DownloadBatch, jobs: MediaJob[], mergedPath = mergedPathFor(batch, jobs)) {
+  const seriesRoot = batchSeriesRoot(batch);
+  return jobs.slice().reverse().find((job) =>
+    job.kind === "separateBackgroundMusic" && job.status === "completed"
+      && job.aiRequest?.scope === "merged"
+      && (job.aiRequest.bookId && job.aiRequest.seriesRoot
+        ? job.aiRequest.bookId === batch.bookId && job.aiRequest.seriesRoot === seriesRoot
+        : Boolean(mergedPath) && job.inputs.some((input) => input.path === mergedPath))
+      && job.outputs?.some((output) => output.kind === "noBackgroundMusicVideo"))
+    ?.outputs?.find((output) => output.kind === "noBackgroundMusicVideo")?.path;
+}
+
+function batchForMediaJob(job: MediaJob, batches: DownloadBatch[], jobs: MediaJob[]) {
+  if (job.aiRequest?.bookId && job.aiRequest.seriesRoot) {
+    const exact = batches.find((batch) => batch.bookId === job.aiRequest?.bookId && batchSeriesRoot(batch) === job.aiRequest?.seriesRoot);
+    if (exact) return exact;
+  }
+  const paths = new Set(job.inputs.map((input) => input.path));
+  for (const merge of jobs) {
+    if (merge.kind === "merge" && merge.outputPath && paths.has(merge.outputPath)) {
+      for (const input of merge.inputs) paths.add(input.path);
+    }
+  }
+  return batches.find((batch) => batch.items.some((item) => item.path && paths.has(item.path)));
+}
+
 export function DownloadManagerPage({
   manager,
   media,
@@ -85,28 +126,26 @@ export function DownloadManagerPage({
   const [selectedBatchId, setSelectedBatchId] = useState(manager.state.batches[0]?.id || "");
   const [detailOpen, setDetailOpen] = useState(false);
   const [mergingBatchId, setMergingBatchId] = useState<string | null>(null);
-  const [mediaDialogKind, setMediaDialogKind] = useState<"audioSeparation" | "subtitleExtraction" | null>(null);
-  const [pendingInstall, setPendingInstall] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; scope: MediaJobScope; ids: string[] } | null>(null);
+  const [mediaDialog, setMediaDialog] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; batchId: string } | null>(null);
+  const [pendingInstall, setPendingInstall] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; scope: MediaJobScope; ids: string[]; batchId: string } | null>(null);
   const [installing, setInstalling] = useState(false);
-  const [uploadingBatchId, setUploadingBatchId] = useState<string | null>(null);
+  const [uploadDraft, setUploadDraft] = useState<{ batchId: string; sourcePath: string } | null>(null);
   const [selectedHasMergedVideo, setSelectedHasMergedVideo] = useState(false);
+  const [dismissedMediaError, setDismissedMediaError] = useState<MediaCommandError>();
   const selectedBatch = manager.state.batches.find((batch) => batch.id === selectedBatchId) || manager.state.batches[0];
   const mergingBatch = manager.state.batches.find((batch) => batch.id === mergingBatchId) || null;
-  const completedPaths = new Set((selectedBatch?.items || []).filter((item) => item.status === "done" && item.path).map((item) => item.path as string));
-  const mergedPath = media.jobs.slice().reverse().find((job) =>
-    job.kind === "merge" && job.status === "completed" && Boolean(job.outputPath)
-      && job.inputs.some((input) => completedPaths.has(input.path)))?.outputPath || undefined;
-  const selectedSeriesRoot = selectedBatch && isCompletedBatch(selectedBatch)
-    ? seriesRootFromInputs(completedMergeInputs(selectedBatch))
-    : "";
-  const noBackgroundPath = media.jobs.slice().reverse().find((job) =>
+  const mediaDialogBatch = manager.state.batches.find((batch) => batch.id === mediaDialog?.batchId) || null;
+  const uploadBatch = manager.state.batches.find((batch) => batch.id === uploadDraft?.batchId) || null;
+  const completedPaths = selectedBatch ? completedPathsFor(selectedBatch) : new Set<string>();
+  const mergedPath = selectedBatch ? mergedPathFor(selectedBatch, media.jobs) : undefined;
+  const selectedSeriesRoot = selectedBatch ? batchSeriesRoot(selectedBatch) : "";
+  const noBackgroundPath = selectedBatch ? noBackgroundPathFor(selectedBatch, media.jobs, mergedPath) : undefined;
+  const hasCompletedBackgroundSeparation = Boolean(selectedBatch && media.jobs.some((job) =>
     job.kind === "separateBackgroundMusic" && job.status === "completed"
-      && job.aiRequest?.scope === "merged"
-      && (job.aiRequest.bookId && job.aiRequest.seriesRoot
-        ? job.aiRequest.bookId === selectedBatch?.bookId && job.aiRequest.seriesRoot === selectedSeriesRoot
-        : Boolean(mergedPath) && job.inputs.some((input) => input.path === mergedPath))
-      && job.outputs?.some((output) => output.kind === "noBackgroundMusicVideo"))
-    ?.outputs?.find((output) => output.kind === "noBackgroundMusicVideo")?.path;
+      && (job.aiRequest?.bookId && job.aiRequest.seriesRoot
+        ? job.aiRequest.bookId === selectedBatch.bookId && job.aiRequest.seriesRoot === selectedSeriesRoot
+        : job.inputs.some((input) => completedPaths.has(input.path) || input.path === mergedPath))
+  ));
   const uploadSourcePath = noBackgroundPath || mergedPath;
   const uploadDisabledReason = !uploadSourcePath
     ? "请先完成合并视频或整季背景音乐分离"
@@ -148,6 +187,12 @@ export function DownloadManagerPage({
       document.querySelector<HTMLElement>(`[data-focus-id="${focusTarget.id}"]`)?.scrollIntoView?.({ block: "center" });
     }, 0);
   }, [focusTarget, manager.state.batches]);
+  useEffect(() => {
+    if (media.error?.code !== "MEDIA_JOB_ALREADY_ACTIVE" || media.error === dismissedMediaError) return;
+    const timeout = window.setTimeout(() => setDismissedMediaError(media.error), 5_000);
+    return () => window.clearTimeout(timeout);
+  }, [dismissedMediaError, media.error]);
+  const visibleMediaError = media.error && media.error !== dismissedMediaError ? media.error : undefined;
   const hasCompletedBatch = useMemo(
     () => manager.state.batches.some((batch) => batch.items.length > 0 && batch.items.every((item) => item.status === "done")),
     [manager.state.batches],
@@ -164,30 +209,32 @@ export function DownloadManagerPage({
     }
   }
 
-  async function enqueueAI(kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
-    if (!selectedBatch) return;
+  async function enqueueAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
+    const batch = manager.state.batches.find((item) => item.id === batchId);
+    if (!batch) return;
+    const targetMergedPath = mergedPathFor(batch, media.jobs);
     if (kind === "audioSeparation") {
-      await media.startAudioSeparation(selectedBatch, scope, demucsModel, mergedPath);
+      await media.startAudioSeparation(batch, scope, demucsModel, targetMergedPath);
     } else {
-      await media.startSubtitleExtraction(selectedBatch, scope, whisperModel, mergedPath);
+      await media.startSubtitleExtraction(batch, scope, whisperModel, targetMergedPath);
     }
-    setMediaDialogKind(null);
+    setMediaDialog(null);
     setPendingInstall(null);
     setSection("media");
   }
 
-  async function submitAI(kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
+  async function submitAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
     const modelId = kind === "audioSeparation" ? `demucs-${demucsModel}` : `whisper-${whisperModel}`;
     const ids = ["runtime", modelId];
     const missing = aiComponents === undefined
       ? []
       : ids.filter((id) => !aiComponents.some((component) => component.id === id && component.installed));
     if (missing.length) {
-      setPendingInstall({ kind, scope, ids: missing });
-      setMediaDialogKind(null);
+      setPendingInstall({ kind, scope, ids: missing, batchId });
+      setMediaDialog(null);
       return;
     }
-    await enqueueAI(kind, scope);
+    await enqueueAI(batchId, kind, scope);
   }
 
   async function installAndEnqueue() {
@@ -195,7 +242,7 @@ export function DownloadManagerPage({
     setInstalling(true);
     try {
       for (const id of pendingInstall.ids) await onInstallComponent(id);
-      await enqueueAI(pendingInstall.kind, pendingInstall.scope);
+      await enqueueAI(pendingInstall.batchId, pendingInstall.kind, pendingInstall.scope);
     } finally {
       setInstalling(false);
     }
@@ -229,7 +276,7 @@ export function DownloadManagerPage({
 
       {manager.warning ? <div className="warning-banner"><AlertIcon />{manager.warning}</div> : null}
       {media.warning ? <div className="warning-banner"><AlertIcon />{media.warning}</div> : null}
-      {media.error ? <div className="warning-banner" role="alert"><AlertIcon />{media.error.message}</div> : null}
+      {visibleMediaError ? <div className="warning-banner" role="alert"><AlertIcon /><span>{visibleMediaError.message}</span><button type="button" className="icon-button warning-dismiss" aria-label="关闭提示" onClick={() => setDismissedMediaError(visibleMediaError)}><CloseIcon size={14} /></button></div> : null}
       {youtube?.error ? <div className="warning-banner" role="alert"><AlertIcon />{youtube.error.message}</div> : null}
 
       {section === "downloads" ? (
@@ -309,14 +356,20 @@ export function DownloadManagerPage({
                       onClick={() => { if (!selectedHasMergedVideo) setMergingBatchId(selectedBatch.id); }}
                       disabled={!isCompletedBatch(selectedBatch) || selectedHasMergedVideo}
                     >{selectedHasMergedVideo ? "已合并" : "合并视频"}</button>
-                    <button type="button" className="secondary-button" disabled={!isCompletedBatch(selectedBatch)} onClick={() => setMediaDialogKind("audioSeparation")}>分离背景音乐</button>
-                    <button type="button" className="secondary-button" disabled={!isCompletedBatch(selectedBatch)} onClick={() => setMediaDialogKind("subtitleExtraction")}>提取字幕</button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={!isCompletedBatch(selectedBatch) || hasCompletedBackgroundSeparation}
+                      title={hasCompletedBackgroundSeparation ? "该剧已完成背景音乐分离" : undefined}
+                      onClick={() => { if (!hasCompletedBackgroundSeparation) setMediaDialog({ kind: "audioSeparation", batchId: selectedBatch.id }); }}
+                    >{hasCompletedBackgroundSeparation ? "背景音乐已分离" : "分离背景音乐"}</button>
+                    <button type="button" className="secondary-button" disabled={!isCompletedBatch(selectedBatch)} onClick={() => setMediaDialog({ kind: "subtitleExtraction", batchId: selectedBatch.id })}>提取字幕</button>
                     <button
                       type="button"
                       className="secondary-button"
                       disabled={Boolean(uploadDisabledReason)}
                       title={uploadDisabledReason}
-                      onClick={() => setUploadingBatchId(selectedBatch.id)}
+                      onClick={() => { if (uploadSourcePath) setUploadDraft({ batchId: selectedBatch.id, sourcePath: uploadSourcePath }); }}
                     >上传 YouTube</button>
                   </div>
                   <div className="episode-task-list">
@@ -347,7 +400,23 @@ export function DownloadManagerPage({
       ) : null}
 
       {section === "media" ? (
-        <MediaJobsPanel media={media} batches={manager.state.batches} onRevealPath={onRevealPath} onShowDownloads={() => setSection("downloads")} focusId={focusTarget?.kind === "mediaJob" ? focusTarget.id : undefined} />
+        <MediaJobsPanel
+          media={media}
+          batches={manager.state.batches}
+          onRevealPath={onRevealPath}
+          onShowDownloads={() => setSection("downloads")}
+          focusId={focusTarget?.kind === "mediaJob" ? focusTarget.id : undefined}
+          youtubeUploadDisabledReason={(job) => {
+            if (!batchForMediaJob(job, manager.state.batches, media.jobs)) return "对应的下载任务已被移除";
+            if (!youtube?.credential.configured) return "请先在设置中导入 YouTube OAuth 凭证";
+            if (!youtube.activeChannelId) return "请先在设置中授权并选择 YouTube 频道";
+            return undefined;
+          }}
+          onUploadToYouTube={(job, sourcePath) => {
+            const batch = batchForMediaJob(job, manager.state.batches, media.jobs);
+            if (batch) setUploadDraft({ batchId: batch.id, sourcePath });
+          }}
+        />
       ) : null}
 
       {section === "youtube" ? (
@@ -365,15 +434,15 @@ export function DownloadManagerPage({
           onClose={() => setMergingBatchId(null)}
         />
       ) : null}
-      {selectedBatch && mediaDialogKind ? (
+      {mediaDialogBatch && mediaDialog ? (
         <MediaScopeDialog
-          kind={mediaDialogKind}
-          hasMergedVideo={Boolean(mergedPath)}
-          title={selectedBatch.title}
-          episodeCount={selectedBatch.items.length}
-          modelName={mediaDialogKind === "audioSeparation" ? demucsModel : `Whisper ${whisperModel}`}
-          onSubmit={(scope) => { void submitAI(mediaDialogKind, scope); }}
-          onClose={() => setMediaDialogKind(null)}
+          kind={mediaDialog.kind}
+          hasMergedVideo={Boolean(mergedPathFor(mediaDialogBatch, media.jobs))}
+          title={mediaDialogBatch.title}
+          episodeCount={mediaDialogBatch.items.length}
+          modelName={mediaDialog.kind === "audioSeparation" ? demucsModel : `Whisper ${whisperModel}`}
+          onSubmit={(scope) => { void submitAI(mediaDialog.batchId, mediaDialog.kind, scope); }}
+          onClose={() => setMediaDialog(null)}
         />
       ) : null}
       {pendingInstall ? (
@@ -389,14 +458,14 @@ export function DownloadManagerPage({
           </section>
         </div>
       ) : null}
-      {selectedBatch && uploadingBatchId === selectedBatch.id && uploadSourcePath && youtube ? (
+      {uploadBatch && uploadDraft && youtube ? (
         <YouTubeUploadDialog
-          batch={selectedBatch}
-          sourcePath={uploadSourcePath}
-          onClose={() => setUploadingBatchId(null)}
+          batch={uploadBatch}
+          sourcePath={uploadDraft.sourcePath}
+          onClose={() => setUploadDraft(null)}
           onSubmit={(request: YouTubeUploadIntent) => {
             void youtube.startUpload(request).then(() => {
-              setUploadingBatchId(null);
+              setUploadDraft(null);
               setSection("youtube");
             });
           }}

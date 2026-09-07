@@ -21,7 +21,7 @@ export type DownloadItem = {
 
 export type DownloadSeriesSnapshot = Pick<
   SeriesItem,
-  "bookId" | "seriesId" | "title" | "cover" | "abstract" | "category" | "contentTypeCode"
+  "bookId" | "seriesId" | "title" | "cover" | "abstract" | "category" | "categoryTags" | "contentTypeCode"
 > & Partial<Pick<
   SeriesItem,
   "episodeCount" | "durationSeconds" | "author" | "onlineTime" | "releaseType"
@@ -145,6 +145,7 @@ export function enqueueEpisodes(
           cover: series.cover,
           abstract: series.abstract,
           category: series.category,
+          categoryTags: series.categoryTags,
           contentTypeCode: series.contentTypeCode,
           episodeCount: series.episodeCount,
           durationSeconds: series.durationSeconds,

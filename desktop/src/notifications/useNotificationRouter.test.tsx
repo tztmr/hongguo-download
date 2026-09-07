@@ -22,7 +22,7 @@ function youtubeFixture(): YouTubeModel {
   return {
     credential: { configured: true, clientIdSuffix: "…123456" }, channels: [], activeChannelId: "UC_TEST", loading: false, busy: false,
     jobs: [{ id: "youtube-1", title: "测试剧", channelId: "UC_TEST", sourcePath: "/safe/video.mp4", status: "videoUploadedThumbnailFailed", uploadedBytes: 10, totalBytes: 10, percent: 100, errorCode: "THUMBNAIL_FORBIDDEN", errorMessage: "safe", videoId: "abc", youtubeUrl: "https://youtu.be/abc", actualPrivacyStatus: "private", thumbnailState: "failed" }],
-    importCredential: vi.fn(), authorize: vi.fn(), setChannel: vi.fn(), revoke: vi.fn(), removeCredential: vi.fn(), startUpload: vi.fn(), cancel: vi.fn(), pause: vi.fn(), resume: vi.fn(), retry: vi.fn(), retryThumbnail: vi.fn(),
+    importCredential: vi.fn(), authorize: vi.fn(), setChannel: vi.fn(), revoke: vi.fn(), removeCredential: vi.fn(), startUpload: vi.fn(), cancel: vi.fn(), pause: vi.fn(), resume: vi.fn(), retry: vi.fn(), retryThumbnail: vi.fn(), removeJob: vi.fn(),
     markNotified: vi.fn().mockResolvedValue(undefined),
   };
 }
