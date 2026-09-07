@@ -481,6 +481,7 @@ fn collect_process(
             }
         }
         if cancellation.is_cancelled() {
+            cancellation.kill();
             let _ = child.kill();
             let _ = child.wait();
             cancellation.clear_child(child_id);

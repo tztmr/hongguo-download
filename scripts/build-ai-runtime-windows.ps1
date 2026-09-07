@@ -12,10 +12,10 @@ $Temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("hongguo-ai-build-" + 
 try {
     & $Python -m venv (Join-Path $Temporary "venv")
     $VenvPython = Join-Path $Temporary "venv/Scripts/python.exe"
-    & $VenvPython -m pip install --disable-pip-version-check -r (Join-Path $ProjectRoot "requirements-ai-windows-common.txt")
     & $VenvPython -m pip install --disable-pip-version-check -r (Join-Path $ProjectRoot "requirements-ai-windows-$Flavor.txt")
+    & $VenvPython -m pip install --disable-pip-version-check -r (Join-Path $ProjectRoot "requirements-ai-windows-common.txt")
     & $VenvPython -m PyInstaller --clean --noconfirm --onedir --name hongguo-ai-worker `
-        --paths $ProjectRoot --collect-all torch --collect-all demucs --collect-all whisper `
+        --paths $ProjectRoot --collect-all torch --collect-all torchaudio --collect-all demucs --collect-all whisper --collect-all soundfile `
         --distpath (Join-Path $Temporary "dist") --workpath (Join-Path $Temporary "work") `
         --specpath (Join-Path $Temporary "spec") (Join-Path $ProjectRoot "ai_worker/main.py")
     $Worker = Join-Path $Temporary "dist/hongguo-ai-worker/hongguo-ai-worker.exe"

@@ -67,6 +67,17 @@ impl NativeAIExecutor {
     }
 }
 
+fn runtime_candidates_for(platform: &str, device: &str) -> Vec<&'static str> {
+    if platform != "windows" {
+        return vec!["runtime"];
+    }
+    match device {
+        "cpu" => vec!["runtime-cpu", "runtime-modern", "runtime-legacy"],
+        "cuda" => vec!["runtime-modern", "runtime-legacy", "runtime"],
+        _ => vec!["runtime-modern", "runtime-legacy", "runtime-cpu"],
+    }
+}
+
 struct ComponentUseGuard {
     manager: Arc<ComponentManager>,
     ids: Vec<String>,
@@ -104,10 +115,23 @@ impl AIExecutor for NativeAIExecutor {
                 return Err(AppError::new("AI_REQUEST_INVALID", "AI 任务类型无效"))
             }
         };
-        let runtime = self.components.resolve_installed("runtime")?;
+        let (runtime_id, runtime) = runtime_candidates_for(std::env::consts::OS, &request.device)
+            .into_iter()
+            .find_map(|id| {
+                self.components
+                    .resolve_installed(id)
+                    .ok()
+                    .map(|item| (id, item))
+            })
+            .ok_or_else(|| {
+                AppError::new(
+                    "AI_COMPONENT_NOT_INSTALLED",
+                    "适合当前计算设备的 AI 运行环境尚未安装",
+                )
+            })?;
         let model = self.components.resolve_installed(&model_id)?;
         let _in_use =
-            ComponentUseGuard::new(self.components.clone(), vec!["runtime".into(), model_id]);
+            ComponentUseGuard::new(self.components.clone(), vec![runtime_id.into(), model_id]);
         let mut outputs = Vec::new();
         let total = request.inputs.len().max(1) as f64;
         let context = AIItemContext {
@@ -874,7 +898,24 @@ fn ai_io(error: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_subtitle_source, SubtitleSource};
+    use super::{runtime_candidates_for, select_subtitle_source, SubtitleSource};
+
+    #[test]
+    fn windows_runtime_candidates_preserve_modern_legacy_and_cpu_fallbacks() {
+        assert_eq!(
+            runtime_candidates_for("windows", "auto"),
+            ["runtime-modern", "runtime-legacy", "runtime-cpu"]
+        );
+        assert_eq!(
+            runtime_candidates_for("windows", "cuda"),
+            ["runtime-modern", "runtime-legacy", "runtime"]
+        );
+        assert_eq!(
+            runtime_candidates_for("windows", "cpu"),
+            ["runtime-cpu", "runtime-modern", "runtime-legacy"]
+        );
+        assert_eq!(runtime_candidates_for("macos", "cuda"), ["runtime"]);
+    }
 
     #[cfg(unix)]
     fn worker_fixture(script: &str) -> (super::JobTemp, std::path::PathBuf) {

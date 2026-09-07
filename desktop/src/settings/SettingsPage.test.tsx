@@ -194,4 +194,20 @@ describe("SettingsPage", () => {
     expect(settings.update).toHaveBeenCalledWith({ whisperModel: "medium" });
   });
 
+  it("selects the CPU runtime when Windows AI is pinned to CPU", () => {
+    const settings = model({
+      settings: { ...model().settings!, aiDevice: "cpu" },
+      components: ["runtime-modern", "runtime-cpu", "demucs-htdemucs", "whisper-small"].map((id) => ({
+        id, version: "1", installed: false, installedVersion: null, installedPath: null,
+        downloadBytes: 1024, installedBytes: 2048, inUse: false,
+      })),
+    });
+    const view = render(<SettingsPage model={settings} />);
+
+    fireEvent.click(view.getByRole("button", { name: "选择当前模型所需组件" }));
+
+    expect((view.getByRole("checkbox", { name: "选择 runtime-cpu 下载" }) as HTMLInputElement).checked).toBe(true);
+    expect((view.getByRole("checkbox", { name: "选择 runtime-modern 下载" }) as HTMLInputElement).checked).toBe(false);
+  });
+
 });

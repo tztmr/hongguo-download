@@ -381,7 +381,7 @@ mod tests {
     fn embedded_ai_manifest_is_a_valid_component_catalog() {
         let manifest = media::components::parse_manifest(EMBEDDED_AI_COMPONENT_MANIFEST)
             .expect("embedded AI component manifest should be valid");
-        assert_eq!(manifest.components.len(), 5);
+        assert_eq!(manifest.components.len(), if cfg!(windows) { 7 } else { 5 });
     }
 
     #[test]

@@ -5,6 +5,7 @@ import { DownloadIcon, QueueIcon } from "../components/icons";
 
 const componentNames: Record<string, string> = {
   runtime: "AI 运行环境", "demucs-htdemucs": "标准音频分离模型", "demucs-htdemucs_ft": "高质量音频分离模型",
+  "runtime-modern": "NVIDIA 现代显卡运行环境", "runtime-legacy": "NVIDIA 旧显卡兼容运行环境", "runtime-cpu": "CPU 运行环境",
   "whisper-small": "轻量字幕识别模型", "whisper-medium": "高精度字幕识别模型",
 };
 const stageNames: Record<string, string> = {
@@ -27,7 +28,10 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
   const selected = model.components.filter((item) => selectedIds.includes(item.id) && !isInstalling(item) && !item.inUse);
   const totalDownload = selected.reduce((sum, item) => sum + item.downloadBytes, 0);
   const totalInstalled = selected.reduce((sum, item) => sum + item.installedBytes, 0);
-  const recommendedIds = ["runtime", `demucs-${settings.demucsModel || "htdemucs"}`, `whisper-${settings.whisperModel || "small"}`];
+  const runtimeId = model.components.some((item) => item.id === "runtime")
+    ? "runtime"
+    : (settings.aiDevice === "cpu" ? "runtime-cpu" : "runtime-modern");
+  const recommendedIds = [runtimeId, `demucs-${settings.demucsModel || "htdemucs"}`, `whisper-${settings.whisperModel || "small"}`];
   const missing = model.components.filter((item) => recommendedIds.includes(item.id) && !item.installed && !item.inUse && !isInstalling(item));
   async function install(items: AIComponentStatus[]) {
     if (!items.length || installLock.current) return;
@@ -92,7 +96,7 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
               <span className={`component-state ${item.stage === "failed" ? "failed" : item.installed ? "ready" : ""}`}>{busy ? (stageNames[item.stage || ""] || "等待安装") : item.inUse ? "使用中" : item.stage === "failed" ? "安装失败" : item.installed ? "已安装" : "未安装"}</span>
               <div className="component-library-actions"><button type="button" className="secondary-button" disabled={!!pendingIds.length || busy || item.inUse} onClick={() => void install([item])}>{busy ? "安装中…" : item.installed ? "重新下载" : "下载"}</button><button type="button" className="text-action" aria-label="删除模型" title={item.inUse ? "任务正在使用此组件" : "删除本机组件"} disabled={item.inUse || !item.installed || busy || !!pendingIds.length} onClick={() => void model.removeComponent(item.id)}>删除模型</button></div>
             </div>
-            <div className="component-size-row"><span>下载 <strong>{formatBytes(item.downloadBytes)}</strong></span><span>安装占用 <strong>{formatBytes(item.installedBytes)}</strong></span>{item.id === "runtime" ? <span>所有 AI 任务共用</span> : null}</div>
+            <div className="component-size-row"><span>下载 <strong>{formatBytes(item.downloadBytes)}</strong></span><span>安装占用 <strong>{formatBytes(item.installedBytes)}</strong></span>{item.id.startsWith("runtime") ? <span>AI 任务运行环境</span> : null}</div>
             {item.stage && item.stage !== "installed" ? <div className={`component-install-progress ${item.stage === "failed" ? "failed" : ""}`}><div className="progress-track" role="progressbar" aria-label={`${item.id} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><span style={{ width: `${percent}%` }} /></div><small>{stageNames[item.stage] || "处理中"} · {percent}%</small></div> : null}
             {item.installedPath ? <details className="component-location"><summary>安装位置{item.installedVersion ? ` · v${item.installedVersion}` : ""}</summary><code>{item.installedPath}</code></details> : null}
           </article>;

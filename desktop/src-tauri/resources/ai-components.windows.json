@@ -3,10 +3,30 @@
   "platform": "x86_64-pc-windows-msvc",
   "components": [
     {
-      "id": "runtime",
+      "id": "runtime-modern",
       "version": "windows-modern-1",
       "platform": "x86_64-pc-windows-msvc",
       "url": "https://github.com/tztmr/hongguo-download/releases/download/windows-components-v1/hongguo-ai-runtime-windows-modern.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "downloadBytes": 1,
+      "installedBytes": 1,
+      "entrypoint": "hongguo-ai-worker/hongguo-ai-worker.exe"
+    },
+    {
+      "id": "runtime-legacy",
+      "version": "windows-legacy-1",
+      "platform": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/tztmr/hongguo-download/releases/download/windows-components-v1/hongguo-ai-runtime-windows-legacy.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "downloadBytes": 1,
+      "installedBytes": 1,
+      "entrypoint": "hongguo-ai-worker/hongguo-ai-worker.exe"
+    },
+    {
+      "id": "runtime-cpu",
+      "version": "windows-cpu-1",
+      "platform": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/tztmr/hongguo-download/releases/download/windows-components-v1/hongguo-ai-runtime-windows-cpu.zip",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "downloadBytes": 1,
       "installedBytes": 1,
