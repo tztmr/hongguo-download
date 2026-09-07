@@ -10,11 +10,12 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     fs::{self, File, OpenOptions},
     future::Future,
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -665,22 +666,37 @@ fn save_checkpoint(path: &Path, value: &UploadCheckpoint) -> Result<(), AppError
     let parent = path
         .parent()
         .ok_or_else(|| AppError::new("UPLOAD_IO", "YouTube 上传文件操作失败"))?;
-    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(upload_io)?;
+    protect_checkpoint_path(parent, true)?;
     let temporary = path.with_extension("json.tmp");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
+    let mut file = checkpoint_write_options()
         .open(&temporary)
         .map_err(upload_io)?;
-    fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600)).map_err(upload_io)?;
+    protect_checkpoint_path(&temporary, false)?;
     serde_json::to_writer(&mut file, value).map_err(upload_io)?;
     file.flush()
         .and_then(|_| file.sync_all())
         .map_err(upload_io)?;
     drop(file);
     fs::rename(temporary, path).map_err(upload_io)
+}
+
+fn checkpoint_write_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+}
+
+#[cfg(unix)]
+fn protect_checkpoint_path(path: &Path, directory: bool) -> Result<(), AppError> {
+    let mode = if directory { 0o700 } else { 0o600 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(upload_io)
+}
+
+#[cfg(windows)]
+fn protect_checkpoint_path(_path: &Path, _directory: bool) -> Result<(), AppError> {
+    Ok(())
 }
 
 fn emit(
@@ -716,7 +732,7 @@ fn upload_io(error: impl std::fmt::Display) -> AppError {
     AppError::with_cause("UPLOAD_IO", "YouTube 上传文件操作失败", error.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{

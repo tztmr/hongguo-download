@@ -16,7 +16,10 @@ use std::{
 use url::Url;
 
 pub const AI_COMPONENTS_MANIFEST_VERSION: u32 = 1;
+#[cfg(target_os = "macos")]
 pub const AI_COMPONENT_PLATFORM: &str = "aarch64-apple-darwin";
+#[cfg(windows)]
+pub const AI_COMPONENT_PLATFORM: &str = "x86_64-pc-windows-msvc";
 const INSTALLED_STORE: &str = "installed.json";
 const DOWNLOADS_DIR: &str = ".downloads";
 
@@ -495,7 +498,9 @@ impl ComponentManager {
                 return Ok(forced);
             }
         }
-        unix_free_bytes(&self.root)
+        fs2::available_space(&self.root).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法读取磁盘空间", error.to_string())
+        })
     }
 
     fn resolve_download_url(&self, original: &str) -> String {
@@ -911,7 +916,7 @@ fn publish_atomically(
 }
 
 fn extract_archive(archive: &Path, destination: &Path) -> Result<(), AppError> {
-    let listing = Command::new("/usr/bin/tar")
+    let listing = Command::new(tar_program())
         .args(["-tf", &archive.to_string_lossy()])
         .output()
         .map_err(|error| {
@@ -939,7 +944,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), AppError> {
             ));
         }
     }
-    let status = Command::new("/usr/bin/tar")
+    let status = Command::new(tar_program())
         .args([
             "-xf",
             &archive.to_string_lossy(),
@@ -1083,19 +1088,17 @@ fn run_self_test(entrypoint: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn unix_free_bytes(path: &Path) -> Result<u64, AppError> {
-    let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())
-        .map_err(|_| AppError::new("AI_COMPONENT_IO", "组件目录无效"))?;
-    unsafe {
-        let mut stats: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(c_path.as_ptr(), &mut stats) != 0 {
-            return Err(AppError::new("AI_COMPONENT_IO", "无法读取磁盘空间"));
-        }
-        Ok(stats.f_bavail as u64 * stats.f_frsize as u64)
-    }
+#[cfg(unix)]
+fn tar_program() -> &'static str {
+    "/usr/bin/tar"
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn tar_program() -> &'static str {
+    "tar.exe"
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::json;

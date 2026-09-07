@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "platform": "x86_64-pc-windows-msvc",
+  "components": [
+    {
+      "id": "runtime",
+      "version": "windows-modern-1",
+      "platform": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/tztmr/hongguo-download/releases/download/windows-components-v1/hongguo-ai-runtime-windows-modern.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "downloadBytes": 1,
+      "installedBytes": 1,
+      "entrypoint": "hongguo-ai-worker/hongguo-ai-worker.exe"
+    },
+    {
+      "id": "demucs-htdemucs",
+      "version": "4.0.1",
+      "platform": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/ai-components-v1/demucs-htdemucs.tar.gz",
+      "sha256": "17fc0483800762ff020dbabb20191231a7804f203a80006cd0ee7a4336456d75",
+      "downloadBytes": 77960165,
+      "installedBytes": 84141932,
+      "entrypoint": "htdemucs.yaml"
+    },
+    {
+      "id": "whisper-small",
+      "version": "20250625",
+      "platform": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/ai-components-v1/whisper-small.tar.gz",
+      "sha256": "6765ab2aed9ef12b6d9fedb9cbfab33d955b5c84c45ebdcda334c135912b34fd",
+      "downloadBytes": 445457618,
+      "installedBytes": 483617219,
+      "entrypoint": "small.pt"
+    },
+    {
+      "id": "demucs-htdemucs_ft",
+      "version": "4.0.1",
+      "platform": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/ai-components-v1/demucs-htdemucs_ft.tar.gz",
+      "sha256": "ad3787d2dfe6f5248a70a78f42d4c10c92f0e83b5986a6ad50f9ead4271ff92e",
+      "downloadBytes": 311824838,
+      "installedBytes": 336565233,
+      "entrypoint": "htdemucs_ft.yaml"
+    },
+    {
+      "id": "whisper-medium",
+      "version": "20250625",
+      "platform": "x86_64-pc-windows-msvc",
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/ai-components-v1/whisper-medium.tar.gz",
+      "sha256": "6f3285da46bbd30cc8bbda45aab1d1faa1499e08d947dece8b073b9cade8f529",
+      "downloadBytes": 1411865773,
+      "installedBytes": 1528008539,
+      "entrypoint": "medium.pt"
+    }
+  ]
+}

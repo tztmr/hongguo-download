@@ -2,10 +2,13 @@ use super::models::CredentialSummary;
 use crate::AppError;
 use serde::Deserialize;
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::{
     fmt, fs,
     io::Write,
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 use url::Url;
@@ -137,7 +140,7 @@ pub fn import_private(
 ) -> Result<ImportedCredential, AppError> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|_| AppError::new("OAUTH_CONFIG_READ_FAILED", "无法读取 OAuth 凭证文件"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.nlink() != 1 {
+    if unsafe_credential_metadata(&metadata) || !metadata.is_file() {
         return Err(AppError::new(
             "OAUTH_CONFIG_INVALID",
             "OAuth 凭证源文件不安全",
@@ -159,28 +162,16 @@ pub fn import_private(
             error.to_string(),
         )
     })?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+    protect_private_path(&directory, true)?;
+    let target = directory.join("oauth-client.json");
+    let temporary = directory.join("oauth-client.json.tmp");
+    let mut file = private_write_options().open(&temporary).map_err(|error| {
         AppError::with_cause(
             "OAUTH_CONFIG_WRITE_FAILED",
-            "无法保护 OAuth 私有目录",
+            "无法保存 OAuth 凭证",
             error.to_string(),
         )
     })?;
-    let target = directory.join("oauth-client.json");
-    let temporary = directory.join("oauth-client.json.tmp");
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(&temporary)
-        .map_err(|error| {
-            AppError::with_cause(
-                "OAUTH_CONFIG_WRITE_FAILED",
-                "无法保存 OAuth 凭证",
-                error.to_string(),
-            )
-        })?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
         .map_err(|error| {
@@ -198,17 +189,48 @@ pub fn import_private(
             error.to_string(),
         )
     })?;
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).map_err(|error| {
-        AppError::with_cause(
-            "OAUTH_CONFIG_WRITE_FAILED",
-            "无法保护 OAuth 凭证",
-            error.to_string(),
-        )
-    })?;
+    protect_private_path(&target, false)?;
     Ok(ImportedCredential {
         path: target,
         summary: config.summary(),
     })
+}
+
+#[cfg(unix)]
+fn unsafe_credential_metadata(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink() || metadata.nlink() != 1
+}
+
+#[cfg(windows)]
+fn unsafe_credential_metadata(metadata: &fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn private_write_options() -> fs::OpenOptions {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+}
+
+#[cfg(unix)]
+fn protect_private_path(path: &Path, directory: bool) -> Result<(), AppError> {
+    let mode = if directory { 0o700 } else { 0o600 };
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|error| {
+        AppError::with_cause(
+            "OAUTH_CONFIG_WRITE_FAILED",
+            "无法保护 OAuth 私有文件",
+            error.to_string(),
+        )
+    })
+}
+
+#[cfg(windows)]
+fn protect_private_path(_path: &Path, _directory: bool) -> Result<(), AppError> {
+    // The application config directory inherits the current user's private ACL.
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -270,7 +292,7 @@ fn desktop_credentials_required() -> AppError {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{fs, os::unix::fs::PermissionsExt};

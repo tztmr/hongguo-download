@@ -1,8 +1,11 @@
 use super::merge::{probe_media, MediaProbe};
 use crate::AppError;
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
 use std::{
     fs,
-    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -28,13 +31,13 @@ impl MediaTools {
                 error.to_string(),
             )
         })?;
-        let ffmpeg = root.join("ffmpeg");
-        let ffprobe = root.join("ffprobe");
+        let ffmpeg = root.join(tool_name("ffmpeg"));
+        let ffprobe = root.join(tool_name("ffprobe"));
         for path in [&ffmpeg, &ffprobe] {
             let metadata = fs::symlink_metadata(path).map_err(|error| {
                 AppError::with_cause("MEDIA_TOOL_MISSING", "缺少打包媒体工具", error.to_string())
             })?;
-            if metadata.file_type().is_symlink() || metadata.nlink() != 1 {
+            if unsafe_tool_metadata(&metadata) {
                 return Err(AppError::with_cause(
                     "MEDIA_TOOL_UNSAFE",
                     "打包媒体工具不得是链接",
@@ -62,7 +65,7 @@ impl MediaTools {
                     path.display().to_string(),
                 ));
             }
-            if metadata.permissions().mode() & 0o111 == 0 {
+            if !tool_is_executable(&metadata) {
                 return Err(AppError::with_cause(
                     "MEDIA_TOOL_NOT_EXECUTABLE",
                     "打包媒体工具不可执行",
@@ -94,7 +97,38 @@ impl MediaTools {
     }
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn tool_name(stem: &str) -> String {
+    format!("{stem}.exe")
+}
+
+#[cfg(not(windows))]
+fn tool_name(stem: &str) -> String {
+    stem.to_owned()
+}
+
+#[cfg(unix)]
+fn unsafe_tool_metadata(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink() || metadata.nlink() != 1
+}
+
+#[cfg(windows)]
+fn unsafe_tool_metadata(metadata: &fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(unix)]
+fn tool_is_executable(metadata: &fs::Metadata) -> bool {
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(windows)]
+fn tool_is_executable(_metadata: &fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::MediaTools;
     use std::{

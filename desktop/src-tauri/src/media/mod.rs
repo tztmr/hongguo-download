@@ -1,7 +1,16 @@
 pub mod ai;
 pub mod components;
+pub mod hardware;
+#[cfg(unix)]
+pub mod merge;
+#[cfg(windows)]
+#[path = "merge_windows.rs"]
 pub mod merge;
 pub mod model;
+#[cfg(unix)]
+pub mod process_control;
+#[cfg(windows)]
+#[path = "process_control_windows.rs"]
 pub mod process_control;
 pub mod storage;
 pub mod tools;
@@ -30,7 +39,6 @@ use crate::AppError;
 use std::{
     collections::HashSet,
     fs,
-    os::unix::ffi::OsStrExt,
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Component, Path, PathBuf},
     sync::{
@@ -223,8 +231,8 @@ fn ai_dedupe_key(
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        for byte in input.path.as_os_str().as_bytes() {
-            hash ^= u64::from(*byte);
+        for byte in path_identity_bytes(&input.path) {
+            hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
         for byte in input.modified_unix_nanos.to_le_bytes() {
@@ -415,11 +423,26 @@ fn merge_dedupe_key(
     write(if transcode_h264 { b"h264" } else { b"copy" });
     for input in inputs {
         write(&input.episode_index.to_le_bytes());
-        write(input.path.as_os_str().as_bytes());
+        write(&path_identity_bytes(&input.path));
         write(&input.size.to_le_bytes());
         write(&input.modified_unix_nanos.to_le_bytes());
     }
     format!("merge-{hash:016x}")
+}
+
+#[cfg(unix)]
+fn path_identity_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn path_identity_bytes(path: &Path) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect()
 }
 
 fn input_changed(cause: impl std::fmt::Display) -> AppError {

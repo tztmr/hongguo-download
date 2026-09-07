@@ -29,7 +29,20 @@ atomicwrites = "0.4.4"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 getrandom = "0.3"
-keyring = { version = "3.6.3", features = ["apple-native"] }
+fs2 = "0.4"
+keyring = { version = "3.6.3", default-features = false }
 subtle = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time", "sync"] }
 tauri-plugin-opener = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }

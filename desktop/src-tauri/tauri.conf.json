@@ -32,7 +32,8 @@
       "../../core": "api/core",
       "../../endpoints": "api/endpoints",
       "resources/ai-components.schema.json": "resources/ai-components.schema.json",
-      "resources/ai-components.json": "resources/ai-components.json"
+      "resources/ai-components.json": "resources/ai-components.json",
+      "resources/ai-components.windows.json": "resources/ai-components.windows.json"
     },
     "macOS": {
       "signingIdentity": "-",

@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from ai_worker.model_package import validate_whisper_package
 from ai_worker.protocol import WorkerError, WorkerRequest, progress
-from ai_worker.separate import _select_device
+from ai_worker.devices import select_device
 
 
 SUPPORTED_MODELS = {"small", "medium"}
@@ -93,7 +93,7 @@ def transcribe_audio(
     model = options.get("model", "small")
     if model not in SUPPORTED_MODELS:
         raise WorkerError("AI_MODEL_UNSUPPORTED", "不支持所选 Whisper 模型")
-    device = _select_device(options.get("device", "auto"))
+    device = select_device(options.get("device", "auto"))
     language = options.get("language")
     if language is not None and (not isinstance(language, str) or len(language) > 16):
         raise WorkerError("AI_REQUEST_INVALID", "字幕语言设置无效")

@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 from typing import Callable
 
+from ai_worker.devices import select_device
 from ai_worker.model_package import validate_demucs_package
 from ai_worker.protocol import WorkerError, WorkerRequest, progress
 
@@ -33,20 +34,7 @@ def _wav_duration(path: Path) -> float:
 
 
 def _select_device(requested: str) -> str:
-    if requested in {"cpu", "mps"}:
-        return requested
-    if requested != "auto":
-        raise WorkerError("AI_REQUEST_INVALID", "AI 设备设置无效")
-    try:
-        import torch
-
-        if torch.backends.mps.is_available():
-            value = torch.ones(1, device="mps")
-            if float(value.cpu()[0]) == 1.0:
-                return "mps"
-    except Exception:
-        pass
-    return "cpu"
+    return select_device(requested)
 
 
 def _demucs_separator(
@@ -112,9 +100,10 @@ def _demucs_separator(
                             sources = infer()
                         except (RuntimeError, NotImplementedError) as error:
                             message = str(error).lower()
-                            if device != "mps" or "mps" not in message or not any(
+                            accelerator = "mps" if device == "mps" else "cuda" if device.startswith("cuda") else None
+                            if accelerator is None or accelerator not in message and not any(
                                 token in message for token in (
-                                    "out of memory", "not supported", "not implemented",
+                                    "out of memory", "not supported", "not implemented", "no kernel image",
                                     "not currently implemented", "unsupported",
                                 )
                             ):
@@ -125,7 +114,10 @@ def _demucs_separator(
                         if retry_on_cpu:
                             device = "cpu"
                             network.cpu()
-                            torch.mps.empty_cache()
+                            if accelerator == "mps":
+                                torch.mps.empty_cache()
+                            else:
+                                torch.cuda.empty_cache()
                             emit(progress("加速不可用，已切换 CPU 继续分离", 10 + 65 * index / count))
                             sources = infer()
                         sources = sources.cpu() * std + mean

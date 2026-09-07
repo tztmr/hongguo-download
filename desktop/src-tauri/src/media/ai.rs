@@ -650,7 +650,7 @@ fn run_worker(
     progress: &mut dyn FnMut(String, f64),
 ) -> Result<Value, AppError> {
     let mut options = invocation.options;
-    if invocation.operation == "transcribe" {
+    if invocation.operation == "transcribe" && cfg!(target_os = "macos") {
         // The installed Torch 2.5.1 runtime cannot move Whisper's sparse alignment
         // buffers to MPS. This also fixes older installed workers without downloading
         // a replacement runtime or any model weights.
@@ -675,14 +675,17 @@ fn run_worker(
             .ffmpeg
             .and_then(Path::parent)
             .ok_or_else(|| AppError::new("MEDIA_TOOL_MISSING", "语音转写缺少打包的 FFmpeg"))?;
-        let path = std::env::join_paths([ffmpeg_dir, Path::new("/usr/bin"), Path::new("/bin")])
-            .map_err(|error| {
-                AppError::with_cause(
-                    "MEDIA_TOOL_UNSAFE",
-                    "语音转写媒体工具路径无效",
-                    error.to_string(),
-                )
-            })?;
+        let mut search_paths = vec![ffmpeg_dir.to_path_buf()];
+        if let Some(existing) = std::env::var_os("PATH") {
+            search_paths.extend(std::env::split_paths(&existing));
+        }
+        let path = std::env::join_paths(search_paths).map_err(|error| {
+            AppError::with_cause(
+                "MEDIA_TOOL_UNSAFE",
+                "语音转写媒体工具路径无效",
+                error.to_string(),
+            )
+        })?;
         command.env("PATH", path);
     }
 

@@ -40,9 +40,15 @@ const API_CONTRACT: &str = "hongguo-desktop-v2";
 const MEDIA_JOB_PROGRESS_EVENT: &str = "media-job-progress";
 const AI_COMPONENT_PROGRESS_EVENT: &str = "ai-component-progress";
 const YOUTUBE_JOB_PROGRESS_EVENT: &str = "youtube-job-progress";
+#[cfg(target_os = "macos")]
 const EMBEDDED_AI_COMPONENT_MANIFEST: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/resources/ai-components.json"
+));
+#[cfg(windows)]
+const EMBEDDED_AI_COMPONENT_MANIFEST: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/resources/ai-components.windows.json"
 ));
 
 struct AppState {
@@ -113,7 +119,7 @@ struct DevelopmentApiCommand {
 #[cfg(debug_assertions)]
 fn development_api_command(port: u16) -> DevelopmentApiCommand {
     DevelopmentApiCommand {
-        program: "python3",
+        program: if cfg!(windows) { "python" } else { "python3" },
         args: vec![
             "-B".into(),
             "-m".into(),
@@ -146,7 +152,7 @@ fn default_save_dir() -> PathBuf {
 }
 
 fn dirs_fallback() -> PathBuf {
-    let home = std::env::var_os("HOME")
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join("Downloads").join("红果下载")
@@ -855,8 +861,8 @@ fn choose_save_dir(app: AppHandle, state: State<AppState>) -> AppResult<String> 
 fn open_save_dir(state: State<AppState>) -> AppResult<()> {
     let dir = state.settings.lock().unwrap().save_dir.clone();
     fs::create_dir_all(&dir).map_err(|e| err(format!("创建目录失败: {e}")))?;
-    Command::new("open")
-        .arg(&dir)
+    let mut command = platform_open_command(&dir, false);
+    command
         .spawn()
         .map_err(|e| err(format!("打开目录失败: {e}")))?;
     Ok(())
@@ -864,11 +870,33 @@ fn open_save_dir(state: State<AppState>) -> AppResult<()> {
 
 #[tauri::command]
 fn reveal_path(path: String) -> AppResult<()> {
-    Command::new("open")
-        .args(["-R", &path])
+    let mut command = platform_open_command(Path::new(&path), true);
+    command
         .spawn()
         .map_err(|e| err(format!("打开文件失败: {e}")))?;
     Ok(())
+}
+
+fn platform_open_command(path: &Path, reveal: bool) -> Command {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = Command::new("open");
+        if reveal {
+            command.arg("-R");
+        }
+        command.arg(path);
+        command
+    }
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("explorer.exe");
+        if reveal {
+            command.arg(format!("/select,{}", path.display()));
+        } else {
+            command.arg(path);
+        }
+        command
+    }
 }
 
 #[tauri::command]
@@ -1254,10 +1282,18 @@ fn load_ai_component_manager(
     data_dir: &Path,
 ) -> Option<std::sync::Arc<ComponentManager>> {
     let resource_dir = app.path().resource_dir().ok()?;
-    let manifest_path = resource_dir.join("resources/ai-components.json");
+    let manifest_file = if cfg!(windows) {
+        "ai-components.windows.json"
+    } else {
+        "ai-components.json"
+    };
+    let manifest_path = resource_dir.join("resources").join(manifest_file);
     #[cfg(debug_assertions)]
-    let fallback_path =
-        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/ai-components.json"));
+    let fallback_path = Some(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join(manifest_file),
+    );
     #[cfg(not(debug_assertions))]
     let fallback_path: Option<PathBuf> = None;
     let json = read_ai_manifest(&manifest_path, fallback_path.as_deref())
