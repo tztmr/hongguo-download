@@ -44,7 +44,7 @@ describe("YouTube video link", () => {
 });
 
 
-it("shows concurrent uploads and lets a waiting job be cancelled independently", () => {
+it("shows concurrent uploads and lets a waiting job be cancelled independently", async () => {
   const cancel = vi.fn().mockResolvedValue(undefined);
   const jobs = ["uploading", "uploading", "uploading", "queued"].map((status, i) => ({
     ...completed.jobs[0], id: `job-${i}`, title: `视频 ${i}`, youtubeUrl: null,
@@ -53,11 +53,11 @@ it("shows concurrent uploads and lets a waiting job be cancelled independently",
   const view = render(<YouTubeUploadJobs model={{ ...completed, jobs, cancel }} onRevealPath={vi.fn()} />);
   expect(view.getByRole("status").textContent).toBe("最多同时上传 5 个 · 正在处理 3 个 · 排队 1 个");
   fireEvent.click(within(view.getAllByTestId("youtube-job-row")[3]).getByRole("button", { name: "取消" }));
-  expect(cancel).toHaveBeenCalledExactlyOnceWith("job-3");
+  await waitFor(() => expect(cancel).toHaveBeenCalledExactlyOnceWith("job-3"));
 });
 
 
-it("offers pause, continue and retry on the appropriate jobs", () => {
+it("offers pause, continue and retry on the appropriate jobs", async () => {
   const pause = vi.fn().mockResolvedValue(undefined);
   const resume = vi.fn().mockResolvedValue(undefined);
   const retry = vi.fn().mockResolvedValue(undefined);
@@ -69,9 +69,20 @@ it("offers pause, continue and retry on the appropriate jobs", () => {
   fireEvent.click(within(rows[0]).getByRole("button", { name: "暂停" }));
   fireEvent.click(within(rows[1]).getByRole("button", { name: "继续" }));
   fireEvent.click(within(rows[2]).getByRole("button", { name: "重试" }));
-  expect(pause).toHaveBeenCalledExactlyOnceWith("control-0");
-  expect(resume).toHaveBeenCalledExactlyOnceWith("control-1");
-  expect(retry).toHaveBeenCalledExactlyOnceWith("control-2");
+  await waitFor(() => {
+    expect(pause).toHaveBeenCalledExactlyOnceWith("control-0");
+    expect(resume).toHaveBeenCalledExactlyOnceWith("control-1");
+    expect(retry).toHaveBeenCalledExactlyOnceWith("control-2");
+  });
   expect(within(rows[3]).getByText("正在暂停")).toBeTruthy();
   expect(within(rows[3]).queryByRole("button", { name: "继续" })).toBeNull();
+});
+
+it("deletes an upload record by its stable job id", async () => {
+  const removeJob = vi.fn().mockResolvedValue(undefined);
+  const view = render(<YouTubeUploadJobs model={{ ...completed, removeJob }} onRevealPath={vi.fn()} />);
+
+  fireEvent.click(view.getByRole("button", { name: "删除" }));
+
+  await waitFor(() => expect(removeJob).toHaveBeenCalledExactlyOnceWith("preview-upload-private"));
 });

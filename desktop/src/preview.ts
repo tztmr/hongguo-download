@@ -90,6 +90,7 @@ function batch(
       cover: series.cover,
       abstract: series.abstract,
       category: series.category,
+      categoryTags: series.categoryTags,
       contentTypeCode: series.contentTypeCode,
     },
     paused: false,
@@ -231,6 +232,7 @@ export const previewYouTubeModel: YouTubeModel = {
   resume: async () => undefined,
   retry: async () => undefined,
   retryThumbnail: async () => undefined,
+  removeJob: async () => undefined,
   markNotified: async () => undefined,
 };
 

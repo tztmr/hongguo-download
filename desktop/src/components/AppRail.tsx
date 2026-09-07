@@ -1,5 +1,6 @@
 import type { NavId } from "../types";
 import { BellIcon, ChartIcon, DownloadIcon, HomeIcon, SearchIcon, SettingsIcon } from "./icons";
+import packageJson from "../../package.json";
 
 type AppRailProps = {
   nav: NavId;
@@ -41,7 +42,7 @@ export function AppRail({ nav, pendingCount, unseenReleases, healthOk, onNavigat
           );
         })}
       </nav>
-      <div className="service-health"><span className={healthOk ? "online" : ""} />{healthOk ? "服务正常" : "服务离线"}</div>
+      <div className="service-health"><span className={healthOk ? "online" : ""} />{healthOk ? "服务正常" : "服务离线"}<small>v{packageJson.version}</small></div>
     </aside>
   );
 }

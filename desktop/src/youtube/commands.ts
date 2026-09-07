@@ -15,6 +15,7 @@ export const youtubeCommands: YouTubeCommands = {
   resume: (jobId) => invoke<YouTubeJob>("resume_youtube_upload_job", { jobId }),
   retry: (jobId) => invoke<YouTubeJob>("retry_youtube_upload_job", { jobId }),
   retryThumbnail: (jobId) => invoke<YouTubeJob>("retry_youtube_thumbnail", { jobId }),
+  removeJob: (jobId) => invoke<void>("delete_youtube_upload_job", { jobId }),
   markNotified: (jobId, outcome) => invoke<YouTubeJob>("mark_youtube_job_notified", { jobId, outcome }),
   subscribeProgress: async (listener) => listen<YouTubeJob>("youtube-job-progress", (event) => listener(event.payload)),
 };

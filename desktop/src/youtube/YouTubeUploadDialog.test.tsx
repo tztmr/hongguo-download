@@ -10,18 +10,41 @@ const batch: DownloadBatch = {
 };
 
 describe("YouTubeUploadDialog", () => {
-  it("requires all three explicit confirmations and defaults AI titles to synthetic content", () => {
+  it("defaults to film and animation, synthetic content, and all three confirmations", () => {
     const submit = vi.fn();
-    const view = render(<YouTubeUploadDialog batch={batch} sourcePath="/Downloads/merged.mp4" onClose={vi.fn()} onSubmit={submit} />);
+    const ordinaryBatch = {
+      ...batch,
+      title: "普通短剧",
+      series: { ...batch.series, title: "普通短剧", category: "真人剧" },
+    };
+    const view = render(<YouTubeUploadDialog batch={ordinaryBatch} sourcePath="/Downloads/merged.mp4" onClose={vi.fn()} onSubmit={submit} />);
     const button = view.getByRole("button", { name: "确认上传" }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
+    expect((view.getByLabelText("YouTube 类别") as HTMLSelectElement).value).toBe("1");
     expect((view.getByLabelText("合成内容") as HTMLSelectElement).value).toBe("yes");
-    for (const checkbox of view.getAllByRole("checkbox")) fireEvent.click(checkbox);
+    expect(view.getAllByRole("checkbox").every((checkbox) => (checkbox as HTMLInputElement).checked)).toBe(true);
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
     expect(submit).toHaveBeenCalledWith(expect.objectContaining({
-      filePath: "/Downloads/merged.mp4", privacyStatus: "private", containsSyntheticMedia: true,
+      filePath: "/Downloads/merged.mp4", categoryId: "1", privacyStatus: "private", containsSyntheticMedia: true,
       audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,
     }));
+  });
+
+  it("uses the drama category labels as separate YouTube tags", () => {
+    const submit = vi.fn();
+    const categorizedBatch = {
+      ...batch,
+      series: {
+        ...batch.series,
+        category: "真人剧",
+        categoryTags: ["都市", "逆袭", "甜宠"],
+      },
+    };
+
+    const view = render(<YouTubeUploadDialog batch={categorizedBatch} sourcePath="/Downloads/merged.mp4" onClose={vi.fn()} onSubmit={submit} />);
+
+    expect((view.getByLabelText("YouTube 标签") as HTMLInputElement).value).toBe("都市, 逆袭, 甜宠");
+    fireEvent.click(view.getByRole("button", { name: "确认上传" }));
+    expect(submit).toHaveBeenCalledWith(expect.objectContaining({ tags: ["都市", "逆袭", "甜宠"] }));
   });
 });

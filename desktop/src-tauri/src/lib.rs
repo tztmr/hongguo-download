@@ -1124,6 +1124,11 @@ fn cancel_youtube_upload_job(state: State<AppState>, job_id: String) -> AppResul
 }
 
 #[tauri::command]
+fn delete_youtube_upload_job(state: State<AppState>, job_id: String) -> AppResult<()> {
+    state.youtube.delete_upload(&job_id)
+}
+
+#[tauri::command]
 fn pause_youtube_upload_job(state: State<AppState>, job_id: String) -> AppResult<YouTubeJob> {
     state.youtube.pause_upload(&job_id)
 }
@@ -1440,6 +1445,7 @@ pub fn run() {
             remove_youtube_oauth_config,
             start_youtube_upload_job,
             cancel_youtube_upload_job,
+            delete_youtube_upload_job,
             pause_youtube_upload_job,
             resume_youtube_upload_job,
             retry_youtube_upload_job,

@@ -113,6 +113,7 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId }: { model: 
             {job.status === "videoUploadedThumbnailFailed" ? <button type="button" className="primary-button compact" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.retryThumbnail(job.id))}>仅重试封面</button> : null}
             <button type="button" className="text-action" onClick={() => onRevealPath(job.sourcePath)}>源文件</button>
             {["queued", "pausing", "paused", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing"].includes(job.status) ? <button type="button" className="text-action upload-cancel" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.cancel(job.id))}>取消</button> : null}
+            <button type="button" className="text-action upload-delete" disabled={pending.has(job.id)} onClick={() => void runAction(job.id, () => model.removeJob(job.id))}>删除</button>
           </div>
         </article>
       ))}

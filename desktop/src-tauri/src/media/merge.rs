@@ -1450,6 +1450,7 @@ fn run_ffmpeg(
         if cancellation.is_cancelled() {
             cancellation.kill();
             terminate_and_wait(&mut child);
+            cancellation.kill();
             cancellation.clear_child(child_id);
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();

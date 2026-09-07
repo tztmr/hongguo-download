@@ -8,6 +8,7 @@ describe("AppRail", () => {
     const view = render(<AppRail nav="discover" pendingCount={21} unseenReleases={3} healthOk onNavigate={onNavigate} />);
 
     expect(view.getByText("21")).toBeTruthy();
+    expect(view.getByText("v0.1.11")).toBeTruthy();
     expect(view.getByRole("button", { name: /首页/ }).className).toContain("active");
     fireEvent.click(view.getByRole("button", { name: /下载管理/ }));
     expect(onNavigate).toHaveBeenCalledWith("queue");

@@ -41,6 +41,7 @@ describe("MergeVideoDialog", () => {
       <MergeVideoDialog batch={batchWithOutOfOrderItems} onSubmit={submit} onClose={vi.fn()} />,
     );
     expect((view.getByRole("combobox", { name: "合并方式" }) as HTMLSelectElement).value).toBe("auto");
+    expect(view.getByText("天下第一纨绔")).toBeTruthy();
     expect(view.getByLabelText("合并剧集").textContent).toContain("第 1 集");
     expect(view.getByLabelText("合并剧集").textContent).toContain("第 2 集");
     fireEvent.click(view.getByRole("button", { name: "开始合并" }));

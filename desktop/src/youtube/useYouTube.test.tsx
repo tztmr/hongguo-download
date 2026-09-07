@@ -24,6 +24,7 @@ function fixture() {
     removeCredential: vi.fn().mockResolvedValue(snapshot), startUpload: vi.fn().mockResolvedValue(job),
     pause: vi.fn().mockResolvedValue({ ...job, status: "paused" }), resume: vi.fn().mockResolvedValue(job),
     cancel: vi.fn().mockResolvedValue(undefined), retry: vi.fn().mockResolvedValue(job), retryThumbnail: vi.fn().mockResolvedValue(job),
+    removeJob: vi.fn().mockResolvedValue(undefined),
     subscribeProgress: vi.fn(async (next) => { listener = next; return vi.fn(); }),
     emit: (value) => listener?.(value),
   };
@@ -61,7 +62,7 @@ describe("useYouTube", () => {
     await waitFor(() => expect(result.current.jobs[0].percent).toBe(40));
   });
 
-  it("routes upload, retry, cancel, and thumbnail retry by stable job id", async () => {
+  it("routes upload controls and deletion by stable job id", async () => {
     const commands = fixture();
     const { result } = renderHook(() => useYouTube(commands));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -77,6 +78,7 @@ describe("useYouTube", () => {
       await result.current.cancel("youtube-1");
       await result.current.retry("youtube-1");
       await result.current.retryThumbnail("youtube-1");
+      await result.current.removeJob("youtube-1");
     });
     expect(commands.startUpload).toHaveBeenCalledWith(request);
     expect(commands.pause).toHaveBeenCalledWith("youtube-1");
@@ -84,6 +86,10 @@ describe("useYouTube", () => {
     expect(commands.cancel).toHaveBeenCalledWith("youtube-1");
     expect(commands.retry).toHaveBeenCalledWith("youtube-1");
     expect(commands.retryThumbnail).toHaveBeenCalledWith("youtube-1");
+    expect(commands.removeJob).toHaveBeenCalledWith("youtube-1");
+    expect(result.current.jobs).toEqual([]);
+    act(() => commands.emit({ ...job, status: "cancelled" }));
+    expect(result.current.jobs).toEqual([]);
   });
 
   it("keeps the completed pause event when the IPC reply arrives later", async () => {

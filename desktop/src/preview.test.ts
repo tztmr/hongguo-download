@@ -14,6 +14,7 @@ describe("preview fixtures", () => {
       cover: previewSeries[0].cover,
       abstract: previewSeries[0].abstract,
       category: previewSeries[0].category,
+      categoryTags: previewSeries[0].categoryTags,
       contentTypeCode: previewSeries[0].contentTypeCode,
     });
     expect(getDownloadStats(state)).toEqual({ running: 5, queued: 16, done: 150, error: 2 });

@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { getDownloadStats, type DownloadManagerState } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
@@ -141,7 +141,7 @@ function managerFixture(): DownloadManager {
   };
 }
 
-it("filters download tasks by failures and title and resets filters for notifications", () => {
+it("filters download tasks by failures and title and resets filters for notifications", async () => {
   const props = { manager: managerFixture(), media: mediaFixture(), saveDir: "/Downloads", onOpenDir: vi.fn(), onChooseDir: vi.fn(), onRevealPath: vi.fn() };
   const view = render(<DownloadManagerPage {...props} />);
   fireEvent.click(within(view.getByRole("group", { name: "下载状态筛选" })).getByRole("button", { name: /有失败/ }));
@@ -152,8 +152,10 @@ it("filters download tasks by failures and title and resets filters for notifica
   expect(view.getAllByTestId("download-batch-row")).toHaveLength(2);
   fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), { target: { value: "无匹配" } });
   view.rerender(<DownloadManagerPage {...props} focusTarget={{ kind: "downloadBatch", id: "batch-b" }} />);
-  expect(view.getAllByTestId("download-batch-row")).toHaveLength(2);
-  expect(view.getByRole("searchbox", { name: "搜索下载任务" }).getAttribute("value")).toBe("");
+  await waitFor(() => {
+    expect(view.getAllByTestId("download-batch-row")).toHaveLength(2);
+    expect(view.getByRole("searchbox", { name: "搜索下载任务" }).getAttribute("value")).toBe("");
+  });
 });
 
 describe("DownloadManagerPage", () => {
@@ -261,6 +263,73 @@ describe("DownloadManagerPage", () => {
     await waitFor(() => expect(media.startSubtitleExtraction).toHaveBeenCalledTimes(1));
     expect(media.startAudioSeparation).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the chosen series fixed while a media dialog is open", async () => {
+    const media = mediaFixture();
+    const view = render(
+      <DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+
+    fireEvent.click(view.getByRole("button", { name: "查看 天下第一纨绔 任务详情" }));
+    const dialog = view.getByRole("dialog", { name: "分离背景音乐" });
+    expect(within(dialog).getByText("女子爱财，取之有道")).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole("button", { name: "开始分离" }));
+
+    await waitFor(() => expect(media.startAudioSeparation).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "batch-b" }), "episodes", "htdemucs", "/Downloads/merged.mp4",
+    ));
+  });
+
+  it("does not offer another background music separation after the series completed one", () => {
+    const completedSeparation = {
+      ...mediaFixture().jobs[2],
+      id: "separation-completed",
+      kind: "separateBackgroundMusic" as const,
+      aiRequest: { title: "女子爱财，取之有道", scope: "merged" as const, model: "htdemucs" as const, bookId: "book-b", seriesRoot: "/Downloads" },
+    };
+    const media = mediaFixture({ jobs: [...mediaFixture().jobs, completedSeparation] });
+    const view = render(
+      <DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />,
+    );
+
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+
+    const button = view.getByRole("button", { name: "背景音乐已分离" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(view.queryByRole("dialog", { name: "分离背景音" })).toBeNull();
+  });
+
+  it("lets a media error be dismissed manually", () => {
+    const media = mediaFixture({ error: { code: "MEDIA_JOB_ALREADY_ACTIVE", message: "同一媒体任务已在队列中或正在运行" } });
+    const view = render(
+      <DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />,
+    );
+
+    expect(view.getByRole("alert").textContent).toContain("同一媒体任务已在队列中或正在运行");
+    fireEvent.click(view.getByRole("button", { name: "关闭提示" }));
+    expect(view.queryByRole("alert")).toBeNull();
+  });
+
+  it("automatically dismisses the duplicate media task reminder after five seconds", () => {
+    vi.useFakeTimers();
+    try {
+      const media = mediaFixture({ error: { code: "MEDIA_JOB_ALREADY_ACTIVE", message: "同一媒体任务已在队列中或正在运行" } });
+      const view = render(
+        <DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />,
+      );
+
+      act(() => vi.advanceTimersByTime(4_999));
+      expect(view.getByRole("alert")).toBeTruthy();
+      act(() => vi.advanceTimersByTime(1));
+      expect(view.queryByRole("alert")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("filters media by status and title, then clears an empty search", () => {
     const view = render(<DownloadManagerPage manager={managerFixture()} media={mediaFixture()} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
     fireEvent.click(view.getByRole("tab", { name: "媒体处理" }));
@@ -324,5 +393,23 @@ describe("YouTube separated upload source", () => {
       expect(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByText("上传文件：/Downloads/音频分离/去背景音乐.mp4")).toBeTruthy();
       expect(youtube.startUpload).not.toHaveBeenCalled();
     }
+  });
+
+  it("offers YouTube upload directly on a completed background separation job", () => {
+    const separation = {
+      ...mediaFixture().jobs[2], id: "separation-upload", kind: "separateBackgroundMusic" as const,
+      aiRequest: { title: "女子爱财，取之有道", scope: "merged" as const, model: "htdemucs" as const, bookId: "book-b", seriesRoot: "/Downloads" },
+      inputs: [{ path: "/Downloads/merged.mp4", sizeBytes: 100 }],
+      outputs: [{ episodeIndex: 1, kind: "noBackgroundMusicVideo" as const, path: "/Downloads/音频分离/去背景音乐.mp4" }],
+    };
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={mediaFixture({ jobs: [separation] })}
+      youtube={youtube} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+
+    fireEvent.click(view.getByRole("tab", { name: "媒体处理" }));
+    fireEvent.click(within(view.getByTestId("media-job-row")).getByRole("button", { name: "上传 YouTube" }));
+
+    const dialog = view.getByRole("dialog", { name: "上传到 YouTube" });
+    expect(within(dialog).getByText("上传文件：/Downloads/音频分离/去背景音乐.mp4")).toBeTruthy();
+    expect((within(dialog).getByLabelText("YouTube 标题") as HTMLInputElement).value).toBe("女子爱财，取之有道");
   });
 });
