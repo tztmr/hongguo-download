@@ -51,7 +51,12 @@ jobs:
           assert run['status'] == 'completed' and run['conclusion'] == 'success', 'Build has not passed'
           assert run['path'] == '.github/workflows/windows-release.yml', 'Unexpected source workflow'
           assert run['head_repository']['full_name'] == repo, 'Unexpected source repository'
-          release = api(f'releases/tags/{tag}')
+          # A draft tag may not exist as a Git ref yet; lookup by tag returns 404.
+          pages = json.loads(subprocess.check_output(
+              ['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/releases?per_page=100'], text=True))
+          matches = [item for page in pages for item in page if item['tag_name'] == tag]
+          assert len(matches) == 1, 'Expected one existing release draft'
+          release = matches[0]
           assert release['draft'], 'Only draft releases may be uploaded'
           assert release['target_commitish'] == run['head_sha'], 'Release/build commit mismatch'
 
@@ -69,7 +74,7 @@ jobs:
               shutil.copyfile(source, destination)
               # Recheck just before mutation. Never replace a different asset or
               # upload into a release that was published while downloading.
-              release = api(f'releases/tags/{tag}')
+              release = api(f'releases/{release["id"]}')
               assert release['draft'] and release['target_commitish'] == run['head_sha']
               existing = [asset for asset in release['assets'] if asset['name'] == destination.name]
               if existing:
