@@ -35,3 +35,30 @@ export function safeOutputFileName(name: string): string {
 export function isCompletedBatch(batch: DownloadBatch): boolean {
   return batch.items.length > 0 && batch.items.every((item) => item.status === "done" && Boolean(item.path));
 }
+
+export function normalizeFsPath(path: string): string {
+  if (!path) return "";
+  let normalized = path.replace(/\\/g, "/");
+  const upper = normalized.toUpperCase();
+  if (upper.startsWith("//?/UNC/")) {
+    normalized = `//${normalized.slice("//?/UNC/".length)}`;
+  } else if (upper.startsWith("//?/")) {
+    normalized = normalized.slice("//?/".length);
+  }
+  if (/^[a-zA-Z]:/.test(normalized)) {
+    normalized = `${normalized[0].toUpperCase()}${normalized.slice(1)}`;
+  }
+  return normalized;
+}
+
+function isWindowsLikePath(path: string): boolean {
+  return /^[A-Z]:/i.test(path) || path.startsWith("//");
+}
+
+export function sameFsPath(left?: string | null, right?: string | null): boolean {
+  if (!left || !right) return false;
+  const first = normalizeFsPath(left);
+  const second = normalizeFsPath(right);
+  if (first === second) return true;
+  return (isWindowsLikePath(first) || isWindowsLikePath(second)) && first.toLowerCase() === second.toLowerCase();
+}

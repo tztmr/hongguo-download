@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { deriveBatchStatus, type DownloadBatch, type DownloadItem } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
-import { completedMergeInputs, isCompletedBatch, seriesRootFromInputs } from "../media/paths";
+import { missingAiComponentIds } from "../media/aiRuntime";
+import { completedMergeInputs, isCompletedBatch, sameFsPath, seriesRootFromInputs } from "../media/paths";
 import type { MediaCommandError, MediaJob, MediaJobsModel, MergeSubmitOptions } from "../media/types";
 import type { MediaJobScope } from "../media/types";
 import type { AIComponentStatus, DemucsModel, WhisperModel } from "../types";
@@ -61,14 +62,23 @@ function batchSeriesRoot(batch: DownloadBatch) {
 }
 
 function completedPathsFor(batch: DownloadBatch) {
-  return new Set(batch.items.filter((item) => item.status === "done" && item.path).map((item) => item.path as string));
+  return batch.items.filter((item) => item.status === "done" && item.path).map((item) => item.path as string);
+}
+
+function includesPath(paths: Array<string | null | undefined>, candidate?: string | null) {
+  return Boolean(candidate) && paths.some((path) => sameFsPath(path, candidate));
+}
+
+function matchesBatchSeries(batch: DownloadBatch, bookId?: string, seriesRoot?: string) {
+  return Boolean(bookId && seriesRoot) && bookId === batch.bookId && sameFsPath(seriesRoot, batchSeriesRoot(batch));
 }
 
 function mergedPathFor(batch: DownloadBatch, jobs: MediaJob[]) {
   const completedPaths = completedPathsFor(batch);
   return jobs.slice().reverse().find((job) =>
     job.kind === "merge" && job.status === "completed" && Boolean(job.outputPath)
-      && job.inputs.some((input) => completedPaths.has(input.path)))?.outputPath || undefined;
+      && (job.inputs.some((input) => includesPath(completedPaths, input.path))
+        || matchesBatchSeries(batch, job.mergeRequest?.bookId, job.mergeRequest?.seriesRoot)))?.outputPath || undefined;
 }
 
 function noBackgroundPathFor(batch: DownloadBatch, jobs: MediaJob[], mergedPath = mergedPathFor(batch, jobs)) {
@@ -77,24 +87,28 @@ function noBackgroundPathFor(batch: DownloadBatch, jobs: MediaJob[], mergedPath 
     job.kind === "separateBackgroundMusic" && job.status === "completed"
       && job.aiRequest?.scope === "merged"
       && (job.aiRequest.bookId && job.aiRequest.seriesRoot
-        ? job.aiRequest.bookId === batch.bookId && job.aiRequest.seriesRoot === seriesRoot
-        : Boolean(mergedPath) && job.inputs.some((input) => input.path === mergedPath))
+        ? job.aiRequest.bookId === batch.bookId && sameFsPath(job.aiRequest.seriesRoot, seriesRoot)
+        : Boolean(mergedPath) && job.inputs.some((input) => sameFsPath(input.path, mergedPath)))
       && job.outputs?.some((output) => output.kind === "noBackgroundMusicVideo"))
     ?.outputs?.find((output) => output.kind === "noBackgroundMusicVideo")?.path;
 }
 
 function batchForMediaJob(job: MediaJob, batches: DownloadBatch[], jobs: MediaJob[]) {
   if (job.aiRequest?.bookId && job.aiRequest.seriesRoot) {
-    const exact = batches.find((batch) => batch.bookId === job.aiRequest?.bookId && batchSeriesRoot(batch) === job.aiRequest?.seriesRoot);
+    const exact = batches.find((batch) => matchesBatchSeries(batch, job.aiRequest?.bookId, job.aiRequest?.seriesRoot));
     if (exact) return exact;
   }
-  const paths = new Set(job.inputs.map((input) => input.path));
+  if (job.mergeRequest?.bookId && job.mergeRequest.seriesRoot) {
+    const exact = batches.find((batch) => matchesBatchSeries(batch, job.mergeRequest?.bookId, job.mergeRequest?.seriesRoot));
+    if (exact) return exact;
+  }
+  const paths = job.inputs.map((input) => input.path);
   for (const merge of jobs) {
-    if (merge.kind === "merge" && merge.outputPath && paths.has(merge.outputPath)) {
-      for (const input of merge.inputs) paths.add(input.path);
+    if (merge.kind === "merge" && merge.outputPath && includesPath(paths, merge.outputPath)) {
+      for (const input of merge.inputs) paths.push(input.path);
     }
   }
-  return batches.find((batch) => batch.items.some((item) => item.path && paths.has(item.path)));
+  return batches.find((batch) => batch.items.some((item) => item.path && includesPath(paths, item.path)));
 }
 
 export function DownloadManagerPage({
@@ -136,15 +150,15 @@ export function DownloadManagerPage({
   const mergingBatch = manager.state.batches.find((batch) => batch.id === mergingBatchId) || null;
   const mediaDialogBatch = manager.state.batches.find((batch) => batch.id === mediaDialog?.batchId) || null;
   const uploadBatch = manager.state.batches.find((batch) => batch.id === uploadDraft?.batchId) || null;
-  const completedPaths = selectedBatch ? completedPathsFor(selectedBatch) : new Set<string>();
+  const completedPaths = selectedBatch ? completedPathsFor(selectedBatch) : [];
   const mergedPath = selectedBatch ? mergedPathFor(selectedBatch, media.jobs) : undefined;
   const selectedSeriesRoot = selectedBatch ? batchSeriesRoot(selectedBatch) : "";
   const noBackgroundPath = selectedBatch ? noBackgroundPathFor(selectedBatch, media.jobs, mergedPath) : undefined;
   const hasCompletedBackgroundSeparation = Boolean(selectedBatch && media.jobs.some((job) =>
     job.kind === "separateBackgroundMusic" && job.status === "completed"
       && (job.aiRequest?.bookId && job.aiRequest.seriesRoot
-        ? job.aiRequest.bookId === selectedBatch.bookId && job.aiRequest.seriesRoot === selectedSeriesRoot
-        : job.inputs.some((input) => completedPaths.has(input.path) || input.path === mergedPath))
+        ? job.aiRequest.bookId === selectedBatch.bookId && sameFsPath(job.aiRequest.seriesRoot, selectedSeriesRoot)
+        : job.inputs.some((input) => includesPath(completedPaths, input.path) || sameFsPath(input.path, mergedPath)))
   ));
   const uploadSourcePath = noBackgroundPath || mergedPath;
   const uploadDisabledReason = !uploadSourcePath
@@ -225,10 +239,7 @@ export function DownloadManagerPage({
 
   async function submitAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
     const modelId = kind === "audioSeparation" ? `demucs-${demucsModel}` : `whisper-${whisperModel}`;
-    const ids = ["runtime", modelId];
-    const missing = aiComponents === undefined
-      ? []
-      : ids.filter((id) => !aiComponents.some((component) => component.id === id && component.installed));
+    const missing = missingAiComponentIds(aiComponents, modelId);
     if (missing.length) {
       setPendingInstall({ kind, scope, ids: missing, batchId });
       setMediaDialog(null);

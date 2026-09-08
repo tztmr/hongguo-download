@@ -55,7 +55,7 @@ export type MediaJobOutput = {
 export type MediaJob = {
   id: string;
   dedupeKey: string;
-  mergeRequest?: { title: string } | null;
+  mergeRequest?: { title: string; bookId?: string; seriesRoot?: string } | null;
   aiRequest?: { title: string; scope: MediaJobScope; model: AIModel; bookId?: string; seriesRoot?: string } | null;
   kind: MediaJobKind;
   status: MediaJobStatus;

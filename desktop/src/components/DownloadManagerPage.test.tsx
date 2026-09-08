@@ -4,6 +4,7 @@ import { getDownloadStats, type DownloadManagerState } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
 import type { YouTubeModel } from "../youtube/types";
 import type { MediaJobsModel } from "../media/types";
+import type { AIComponentStatus } from "../types";
 import { DownloadManagerPage } from "./DownloadManagerPage";
 
 const state: DownloadManagerState = {
@@ -411,5 +412,130 @@ describe("YouTube separated upload source", () => {
     const dialog = view.getByRole("dialog", { name: "上传到 YouTube" });
     expect(within(dialog).getByText("上传文件：/Downloads/音频分离/去背景音乐.mp4")).toBeTruthy();
     expect((within(dialog).getByLabelText("YouTube 标题") as HTMLInputElement).value).toBe("女子爱财，取之有道");
+  });
+});
+
+function aiComponent(id: string, installed = false): AIComponentStatus {
+  return {
+    id,
+    version: "1",
+    installed,
+    installedVersion: installed ? "1" : null,
+    installedPath: null,
+    downloadBytes: 1024,
+    installedBytes: 2048,
+    inUse: false,
+  };
+}
+
+const windowsCatalog = [
+  aiComponent("runtime-modern"),
+  aiComponent("runtime-legacy"),
+  aiComponent("runtime-cpu"),
+  aiComponent("demucs-htdemucs"),
+  aiComponent("whisper-small"),
+];
+
+describe("Windows post-merge media actions", () => {
+  const youtube = {
+    credential: { configured: true, clientIdSuffix: "test" },
+    activeChannelId: "channel", channels: [], jobs: [],
+    loading: false, busy: false, startUpload: vi.fn(),
+  } as unknown as YouTubeModel;
+
+  function windowsManager(): DownloadManager {
+    const windowsState: DownloadManagerState = {
+      ...state,
+      batches: [
+        state.batches[0],
+        {
+          ...state.batches[1],
+          items: [{ ...state.batches[1].items[0], path: "C:\\Users\\edking\\Downloads\\e21.mp4" }],
+        },
+      ],
+    };
+    return {
+      ...managerFixture(),
+      state: windowsState,
+      stats: getDownloadStats(windowsState),
+    };
+  }
+
+  const windowsMerge = {
+    ...mediaFixture().jobs[2],
+    outputPath: "\\\\?\\C:\\Users\\edking\\Downloads\\merged.mp4",
+    inputs: [{ path: "\\\\?\\C:\\Users\\edking\\Downloads\\e21.mp4", sizeBytes: 100 }],
+    mergeRequest: {
+      title: "女子爱财，取之有道",
+      bookId: "book-b",
+      seriesRoot: "\\\\?\\C:\\Users\\edking\\Downloads",
+    },
+  };
+
+  it("offers 合并视频 and YouTube after a Windows merge whose paths use the \\\\?\\ prefix", async () => {
+    const view = render(
+      <DownloadManagerPage
+        manager={windowsManager()}
+        media={mediaFixture({ jobs: [windowsMerge] })}
+        youtube={youtube}
+        saveDir="C:\\Users\\edking\\Downloads"
+        onOpenDir={vi.fn()}
+        onChooseDir={vi.fn()}
+        onRevealPath={vi.fn()}
+      />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+    expect(view.getByRole("radio", { name: "合并视频" })).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "取消" }));
+    const button = view.getByRole("button", { name: "上传 YouTube" }) as HTMLButtonElement;
+    await waitFor(() => expect(button.disabled).toBe(false));
+    expect(button.title).toBe("");
+  });
+
+  it("starts background separation when runtime-modern and the model are already installed", async () => {
+    const media = mediaFixture();
+    const view = render(
+      <DownloadManagerPage
+        manager={managerFixture()}
+        media={media}
+        aiComponents={[aiComponent("runtime-modern", true), aiComponent("demucs-htdemucs", true)]}
+        onInstallComponent={vi.fn()}
+        saveDir="/Downloads"
+        onOpenDir={vi.fn()}
+        onChooseDir={vi.fn()}
+        onRevealPath={vi.fn()}
+      />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+    fireEvent.click(view.getByRole("button", { name: "开始分离" }));
+    await waitFor(() => expect(media.startAudioSeparation).toHaveBeenCalledTimes(1));
+    expect(view.queryByRole("dialog", { name: "安装 AI 组件" })).toBeNull();
+  });
+
+  it("asks Windows catalogs to install runtime-modern instead of an unconfigured runtime", async () => {
+    const media = mediaFixture();
+    const view = render(
+      <DownloadManagerPage
+        manager={managerFixture()}
+        media={media}
+        aiComponents={windowsCatalog}
+        onInstallComponent={vi.fn()}
+        saveDir="/Downloads"
+        onOpenDir={vi.fn()}
+        onChooseDir={vi.fn()}
+        onRevealPath={vi.fn()}
+      />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+    fireEvent.click(view.getByRole("button", { name: "开始分离" }));
+    const dialog = await waitFor(() => view.getByRole("dialog", { name: "安装 AI 组件" }));
+    expect(dialog.textContent).toContain("runtime-modern");
+    expect(dialog.textContent).not.toContain("runtime · 未在发布清单中配置");
+    expect(dialog.textContent).not.toContain("未在发布清单中配置");
+    expect(media.startAudioSeparation).not.toHaveBeenCalled();
+    expect((within(dialog).getByRole("button", { name: "确认安装并继续" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
