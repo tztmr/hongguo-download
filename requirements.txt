@@ -3,3 +3,4 @@ uvicorn[standard]>=0.20.0
 orjson>=3.8.0
 httpx[socks]>=0.24.0
 pycryptodome>=3.18.0
+tzdata==2026.3
