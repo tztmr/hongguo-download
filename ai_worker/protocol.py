@@ -98,5 +98,5 @@ def safe_error(error: BaseException) -> dict[str, str]:
 
 def emit_event(event: Mapping[str, Any], stream: TextIO | None = None) -> None:
     stream = sys.stdout if stream is None else stream
-    stream.write(json.dumps(dict(event), ensure_ascii=False, separators=(",", ":")) + "\n")
+    stream.write(json.dumps(dict(event), ensure_ascii=True, separators=(",", ":")) + "\n")
     stream.flush()

@@ -1032,6 +1032,11 @@ fn has_merged_video(state: State<AppState>, series_root: PathBuf) -> AppResult<b
 }
 
 #[tauri::command]
+fn find_merged_video(state: State<AppState>, series_root: PathBuf) -> AppResult<Option<PathBuf>> {
+    state.media_jobs.find_merged_video(&series_root)
+}
+
+#[tauri::command]
 fn retry_media_job(state: State<AppState>, job_id: String) -> AppResult<MediaJob> {
     state.media_jobs.retry(&job_id)
 }
@@ -1456,6 +1461,7 @@ pub fn run() {
             resume_media_job,
             delete_media_job,
             has_merged_video,
+            find_merged_video,
             retry_media_job,
             mark_media_job_notified,
             get_ai_components,

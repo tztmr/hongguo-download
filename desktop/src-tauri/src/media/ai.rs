@@ -215,6 +215,7 @@ fn process_separation(
     let worker_outputs = run_worker(
         WorkerInvocation {
             runtime: context.runtime,
+            args: &[],
             ffmpeg: Some(context.tools.ffmpeg()),
             job_id: &request.dedupe_key,
             operation: "separate",
@@ -336,6 +337,7 @@ fn process_subtitles(
             let outputs = run_worker(
                 WorkerInvocation {
                     runtime: context.runtime,
+                    args: &[],
                     ffmpeg: Some(context.tools.ffmpeg()),
                     job_id: &request.dedupe_key,
                     operation: "transcribe",
@@ -661,6 +663,7 @@ fn parse_srt_time(value: &str) -> Result<u64, AppError> {
 
 struct WorkerInvocation<'a> {
     runtime: &'a Path,
+    args: &'a [&'a str],
     ffmpeg: Option<&'a Path>,
     job_id: &'a str,
     operation: &'a str,
@@ -715,6 +718,10 @@ fn run_worker(
     }
 
     command
+        .args(invocation.args)
+        .env("PYTHONUTF8", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .env_remove("PYTHONLEGACYWINDOWSSTDIO")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -743,9 +750,23 @@ fn run_worker(
         .ok_or_else(|| AppError::new("AI_WORKER_FAILED", "AI 工作程序输出不可用"))?;
     let (sender, receiver) = mpsc::sync_channel(32);
     thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if sender.send(line).is_err() {
-                break;
+        let mut reader = BufReader::new(stdout);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match reader.read_until(b'\n', &mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if let Some(line) = decode_worker_stdout_line(&buffer) {
+                        if sender.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    break;
+                }
             }
         }
     });
@@ -844,6 +865,20 @@ fn run_worker(
     outcome
 }
 
+fn decode_worker_stdout_line(buffer: &[u8]) -> Option<String> {
+    let mut line = buffer;
+    if let Some(without_lf) = line.strip_suffix(&[b'\n']) {
+        line = without_lf;
+    }
+    if let Some(without_cr) = line.strip_suffix(&[b'\r']) {
+        line = without_cr;
+    }
+    if line.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(line).ok().map(str::to_owned)
+}
+
 fn worker_output_path(value: &Value, field: &str, root: &Path) -> Result<PathBuf, AppError> {
     let raw = value
         .get(field)
@@ -898,7 +933,9 @@ fn ai_io(error: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_candidates_for, select_subtitle_source, SubtitleSource};
+    use super::{
+        decode_worker_stdout_line, runtime_candidates_for, select_subtitle_source, SubtitleSource,
+    };
 
     #[test]
     fn windows_runtime_candidates_preserve_modern_legacy_and_cpu_fallbacks() {
@@ -952,6 +989,7 @@ echo '{"type":"result","outputs":{"ok":true}}'
         let result = super::run_worker(
             super::WorkerInvocation {
                 runtime: &runtime,
+                args: &[],
                 ffmpeg: Some(&ffmpeg),
                 job_id: "test",
                 operation: "transcribe",
@@ -977,7 +1015,7 @@ echo '{"type":"result","outputs":{"ok":true}}'
         std::fs::copy(path("HONGGUO_TEST_SPEECH_WAV"), &input).unwrap();
         let outputs = super::run_worker(
             super::WorkerInvocation {
-                runtime: &runtime, ffmpeg: Some(&ffmpeg), job_id: "test", operation: "transcribe",
+                runtime: &runtime, args: &[], ffmpeg: Some(&ffmpeg), job_id: "test", operation: "transcribe",
                 input: &input, output: &temp.output,
                 options: serde_json::json!({"model":"small", "device":"auto", "modelRoot":model_root}),
             },
@@ -1017,6 +1055,7 @@ echo '{"type":"result","outputs":{"ok":true}}'
         let result = super::run_worker(
             super::WorkerInvocation {
                 runtime: &runtime,
+                args: &[],
                 ffmpeg: None,
                 job_id: "test",
                 operation: "separate",
@@ -1046,6 +1085,7 @@ echo '{"type":"result","outputs":{"ok":true}}'
         let result = super::run_worker(
             super::WorkerInvocation {
                 runtime: &runtime,
+                args: &[],
                 ffmpeg: None,
                 job_id: "test",
                 operation: "separate",
@@ -1069,6 +1109,7 @@ echo '{"type":"result","outputs":{"ok":true}}'
         let result = super::run_worker(
             super::WorkerInvocation {
                 runtime: &runtime,
+                args: &[],
                 ffmpeg: None,
                 job_id: "test",
                 operation: "separate",
@@ -1138,5 +1179,123 @@ echo '{"type":"result","outputs":{"ok":true}}'
             select_subtitle_source(&["ass".into()], true),
             SubtitleSource::EmbeddedText
         );
+    }
+
+    #[test]
+    fn worker_stdout_skips_non_utf8_and_keeps_utf8_json() {
+        assert_eq!(decode_worker_stdout_line(b"\xff\xfe\n"), None);
+        assert_eq!(decode_worker_stdout_line(b"\n"), None);
+        assert_eq!(
+            decode_worker_stdout_line(b"{\"type\":\"result\"}\r\n").as_deref(),
+            Some("{\"type\":\"result\"}")
+        );
+        let chinese = "{\"path\":\"D:\\\\红果下载\"}\n";
+        assert_eq!(
+            decode_worker_stdout_line(chinese.as_bytes()).as_deref(),
+            Some("{\"path\":\"D:\\\\红果下载\"}")
+        );
+    }
+
+    fn python_program() -> &'static str {
+        if cfg!(windows) {
+            "python"
+        } else {
+            "python3"
+        }
+    }
+
+    fn python_worker_fixture(body: &str) -> (super::JobTemp, std::path::PathBuf) {
+        let temp = super::JobTemp::create(&std::env::temp_dir()).unwrap();
+        let script = temp.root.join("worker.py");
+        std::fs::write(
+            &script,
+            format!(
+                "# -*- coding: utf-8 -*-\nimport os\nimport sys\n_ = sys.stdin.read()\n{body}\n"
+            ),
+        )
+        .unwrap();
+        (temp, script)
+    }
+
+    fn run_python_worker(
+        body: &str,
+        operation: &str,
+    ) -> Result<serde_json::Value, crate::AppError> {
+        let (temp, script) = python_worker_fixture(body);
+        let script = script.to_str().unwrap().to_string();
+        super::run_worker(
+            super::WorkerInvocation {
+                runtime: std::path::Path::new(python_program()),
+                args: &[script.as_str()],
+                ffmpeg: None,
+                job_id: "test",
+                operation,
+                input: &temp.root,
+                output: &temp.output,
+                options: serde_json::json!({}),
+            },
+            &super::CancellationToken::default(),
+            &mut |_, _| {},
+        )
+    }
+
+    #[test]
+    fn worker_accepts_utf8_chinese_json_after_non_utf8_noise() {
+        let result = run_python_worker(
+            "sys.stdout.buffer.write(bytes([0xFF, 0xFE, 10]))\n\
+             sys.stdout.buffer.write(('{\\\"type\\\":\\\"result\\\",\\\"outputs\\\":{\\\"ok\\\":true,\\\"path\\\":\\\"D:\\\\\\\\红果下载\\\\\\\\a\\\"}}\\n').encode('utf-8'))\n\
+             sys.stdout.buffer.flush()\n",
+            "separate",
+        );
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!({"ok": true, "path": "D:\\红果下载\\a"})
+        );
+    }
+
+    #[test]
+    fn worker_forces_utf8_python_stdio_environment() {
+        let result = run_python_worker(
+            "encoding = (os.environ.get('PYTHONIOENCODING') or '').lower().replace('-', '')\n\
+             assert os.environ.get('PYTHONUTF8') == '1' and encoding.startswith('utf8')\n\
+             sys.stdout.buffer.write(b'{\\\"type\\\":\\\"result\\\",\\\"outputs\\\":{\\\"ok\\\":true}}\\n')\n\
+             sys.stdout.buffer.flush()\n",
+            "separate",
+        );
+        assert_eq!(result.unwrap(), serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn windows_nsis_hooks_stop_running_app_before_overwrite() {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let hooks = std::fs::read_to_string(manifest_dir.join("windows/installer-hooks.nsh"))
+            .expect("installer hooks");
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest_dir.join("tauri.conf.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            config["bundle"]["windows"]["nsis"]["installerHooks"],
+            "windows/installer-hooks.nsh"
+        );
+        let release: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest_dir.join("tauri.release.conf.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(release.pointer("/bundle/windows").is_none());
+        assert!(hooks.contains("NSIS_HOOK_PREINSTALL"));
+        assert!(hooks.contains("NSIS_HOOK_PREUNINSTALL"));
+        assert!(hooks.contains("红果下载.exe"));
+        assert!(hooks.contains("hongguo-api.exe"));
+        assert!(hooks.contains("hongguo-ai-worker.exe"));
+        let taskkill = hooks
+            .lines()
+            .filter(|line| !line.trim_start().starts_with(';'))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .to_ascii_lowercase();
+        assert!(taskkill.contains("taskkill"));
+        assert!(!taskkill.contains("ffmpeg.exe"));
+        assert!(!taskkill.contains("ffprobe.exe"));
     }
 }

@@ -71,11 +71,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
 
+def configure_utf8_stdio() -> None:
+    # Chinese Windows defaults to GBK/cp936 for piped stdio. Protocol JSON may
+    # include non-ASCII paths; force UTF-8 so the desktop can read worker output.
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
+
 def entrypoint(
     freeze_support: Callable[[], None] = multiprocessing.freeze_support,
     worker_main: Callable[[], int] = main,
+    configure_stdio: Callable[[], None] = configure_utf8_stdio,
 ) -> int:
     freeze_support()
+    configure_stdio()
     return worker_main()
 
 

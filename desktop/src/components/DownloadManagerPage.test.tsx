@@ -118,6 +118,7 @@ function mediaFixture(overrides: Partial<MediaJobsModel> = {}): MediaJobsModel {
     resume: vi.fn().mockResolvedValue(undefined),
     deleteJob: vi.fn().mockResolvedValue(undefined),
     hasMergedVideo: vi.fn().mockResolvedValue(false),
+    findMergedVideo: vi.fn().mockResolvedValue(null),
     retry: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
@@ -235,7 +236,10 @@ describe("DownloadManagerPage", () => {
   });
 
   it("shows 已合并 and blocks the dialog when the filesystem reports a merged MP4", async () => {
-    const media = mediaFixture({ hasMergedVideo: vi.fn().mockResolvedValue(true) });
+    const media = mediaFixture({
+      hasMergedVideo: vi.fn().mockResolvedValue(true),
+      findMergedVideo: vi.fn().mockResolvedValue("/Downloads/merged.mp4"),
+    });
     const view = render(
       <DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />,
     );
@@ -537,5 +541,104 @@ describe("Windows post-merge media actions", () => {
     expect(dialog.textContent).not.toContain("未在发布清单中配置");
     expect(media.startAudioSeparation).not.toHaveBeenCalled();
     expect((within(dialog).getByRole("button", { name: "确认安装并继续" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+
+describe("macOS post-merge media actions", () => {
+  const youtube = {
+    credential: { configured: true, clientIdSuffix: "test" },
+    activeChannelId: "channel", channels: [], jobs: [],
+    loading: false, busy: false, startUpload: vi.fn(),
+  } as unknown as YouTubeModel;
+
+  function macosManager(): DownloadManager {
+    const macosState: DownloadManagerState = {
+      ...state,
+      batches: [
+        state.batches[0],
+        {
+          ...state.batches[1],
+          items: [{ ...state.batches[1].items[0], path: "/var/folders/xx/e21.mp4" }],
+        },
+      ],
+    };
+    return {
+      ...managerFixture(),
+      state: macosState,
+      stats: getDownloadStats(macosState),
+    };
+  }
+
+  const macosMerge = {
+    ...mediaFixture().jobs[2],
+    outputPath: "/private/var/folders/xx/合并视频/merged.mp4",
+    inputs: [{ path: "/private/var/folders/xx/e21.mp4", sizeBytes: 100 }],
+    mergeRequest: {
+      title: "女子爱财，取之有道",
+      bookId: "book-b",
+      seriesRoot: "/private/var/folders/xx",
+    },
+  };
+
+  it("offers 合并视频 and YouTube after a macOS merge whose paths use /private", async () => {
+    const view = render(
+      <DownloadManagerPage
+        manager={macosManager()}
+        media={mediaFixture({ jobs: [macosMerge] })}
+        youtube={youtube}
+        saveDir="/var/folders/xx"
+        onOpenDir={vi.fn()}
+        onChooseDir={vi.fn()}
+        onRevealPath={vi.fn()}
+      />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+    expect(view.getByRole("radio", { name: "合并视频" })).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "取消" }));
+    const button = view.getByRole("button", { name: "上传 YouTube" }) as HTMLButtonElement;
+    await waitFor(() => expect(button.disabled).toBe(false));
+    expect(button.title).toBe("");
+  });
+
+  it("falls back to the filesystem merged path for a custom series folder", async () => {
+    const media = mediaFixture({
+      jobs: [],
+      findMergedVideo: vi.fn().mockResolvedValue("/custom/剧目/合并视频/成片.mp4"),
+    });
+    const customState: DownloadManagerState = {
+      ...state,
+      batches: [
+        state.batches[0],
+        {
+          ...state.batches[1],
+          items: [{ ...state.batches[1].items[0], path: "/custom/剧目/e21.mp4" }],
+        },
+      ],
+    };
+    const view = render(
+      <DownloadManagerPage
+        manager={{ ...managerFixture(), state: customState, stats: getDownloadStats(customState) }}
+        media={media}
+        youtube={youtube}
+        saveDir="/custom"
+        onOpenDir={vi.fn()}
+        onChooseDir={vi.fn()}
+        onRevealPath={vi.fn()}
+      />,
+    );
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    await waitFor(() => expect(media.findMergedVideo).toHaveBeenCalledWith("/custom/剧目"));
+    fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+    expect(view.getByRole("radio", { name: "合并视频" })).toBeTruthy();
+    fireEvent.click(view.getByRole("radio", { name: "合并视频" }));
+    fireEvent.click(view.getByRole("button", { name: "开始分离" }));
+    await waitFor(() => expect(media.startAudioSeparation).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "batch-b" }),
+      "merged",
+      expect.anything(),
+      "/custom/剧目/合并视频/成片.mp4",
+    ));
   });
 });

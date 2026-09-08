@@ -13,7 +13,7 @@ function mediaFixture(): MediaJobsModel {
       outputs: Array.from({ length: 20 }, (_, index) => ({ episodeIndex: index + 1, kind: "subtitles" as const, path: `/safe/${index}.srt` })),
     }],
     startMerge: vi.fn(), startAudioSeparation: vi.fn(), startSubtitleExtraction: vi.fn(), cancel: vi.fn(),
-    pause: vi.fn(), resume: vi.fn(), deleteJob: vi.fn(), hasMergedVideo: vi.fn(), retry: vi.fn(),
+    pause: vi.fn(), resume: vi.fn(), deleteJob: vi.fn(), hasMergedVideo: vi.fn(), findMergedVideo: vi.fn(), retry: vi.fn(),
     markNotified: vi.fn().mockResolvedValue(undefined),
   };
 }

@@ -246,6 +246,7 @@ export const previewMediaCommands: MediaCommands = {
   resume: async () => previewMediaJobs[0],
   deleteJob: async () => undefined,
   hasMergedVideo: async () => previewMediaJobs.some((job) => job.kind === "merge" && job.status === "completed"),
+  findMergedVideo: async () => previewMediaJobs.find((job) => job.kind === "merge" && job.status === "completed")?.outputPath ?? null,
   retry: async () => previewMediaJobs[3] ?? previewMediaJobs[0],
   subscribeProgress: async () => () => undefined,
 };

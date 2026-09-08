@@ -36,6 +36,15 @@ export function isCompletedBatch(batch: DownloadBatch): boolean {
   return batch.items.length > 0 && batch.items.every((item) => item.status === "done" && Boolean(item.path));
 }
 
+function stripUnixPrivatePrefix(path: string): string {
+  for (const prefix of ["/private/tmp", "/private/var", "/private/etc"]) {
+    if (path === prefix || path.startsWith(`${prefix}/`)) {
+      return path.slice("/private".length);
+    }
+  }
+  return path;
+}
+
 export function normalizeFsPath(path: string): string {
   if (!path) return "";
   let normalized = path.replace(/\\/g, "/");
@@ -48,7 +57,7 @@ export function normalizeFsPath(path: string): string {
   if (/^[a-zA-Z]:/.test(normalized)) {
     normalized = `${normalized[0].toUpperCase()}${normalized.slice(1)}`;
   }
-  return normalized;
+  return stripUnixPrivatePrefix(normalized);
 }
 
 function isWindowsLikePath(path: string): boolean {
@@ -61,4 +70,15 @@ export function sameFsPath(left?: string | null, right?: string | null): boolean
   const second = normalizeFsPath(right);
   if (first === second) return true;
   return (isWindowsLikePath(first) || isWindowsLikePath(second)) && first.toLowerCase() === second.toLowerCase();
+}
+
+export function pathIsWithin(root?: string | null, candidate?: string | null): boolean {
+  if (!root || !candidate) return false;
+  const parent = normalizeFsPath(root).replace(/\/+$/, "");
+  const child = normalizeFsPath(candidate);
+  if (!parent || !child) return false;
+  const [left, right] = isWindowsLikePath(parent) || isWindowsLikePath(child)
+    ? [parent.toLowerCase(), child.toLowerCase()]
+    : [parent, child];
+  return right === left || right.startsWith(`${left}/`);
 }

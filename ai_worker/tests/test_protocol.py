@@ -5,9 +5,9 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
-from ai_worker.main import entrypoint, run_self_test
+from ai_worker.main import configure_utf8_stdio, entrypoint, run_self_test
 from ai_worker.protocol import WorkerError, emit_event, parse_request, safe_error
 
 
@@ -73,6 +73,17 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(lines), 1)
         self.assertEqual(json.loads(lines[0]), {"type": "progress", "stage": "ready", "percent": 1})
 
+    def test_emit_event_encodes_chinese_paths_as_ascii_json(self):
+        # Production mutation caught: ensure_ascii=False emitting GBK/UTF-8
+        # Chinese bytes that Windows pipes cannot read as UTF-8 lines.
+        stream = io.StringIO()
+        path = r"D:\红果下载\001_htdemucs_人声.wav"
+        emit_event({"type": "result", "outputs": {"vocalsPath": path}}, stream=stream)
+        line = stream.getvalue()
+        self.assertTrue(line.isascii(), line)
+        self.assertIn("\\u", line)
+        self.assertEqual(json.loads(line)["outputs"]["vocalsPath"], path)
+
     def test_self_test_uses_injected_importer_without_network_and_emits_json(self):
         # Production mutation caught: self-test downloading weights or omitting protocol proof.
         imported = []
@@ -96,10 +107,28 @@ class ProtocolTests(unittest.TestCase):
     def test_entrypoint_initializes_frozen_multiprocessing_before_main(self):
         calls = []
         freeze_support = Mock(side_effect=lambda: calls.append("freeze"))
+        configure_stdio = Mock(side_effect=lambda: calls.append("stdio"))
         worker_main = Mock(side_effect=lambda: calls.append("main") or 0)
 
-        self.assertEqual(entrypoint(freeze_support=freeze_support, worker_main=worker_main), 0)
-        self.assertEqual(calls, ["freeze", "main"])
+        self.assertEqual(
+            entrypoint(
+                freeze_support=freeze_support,
+                worker_main=worker_main,
+                configure_stdio=configure_stdio,
+            ),
+            0,
+        )
+        self.assertEqual(calls, ["freeze", "stdio", "main"])
+
+    def test_configure_utf8_stdio_reconfigures_stdin_and_stdout(self):
+        stdout = Mock()
+        stdin = Mock()
+        with patch("ai_worker.main.sys.stdout", stdout), patch(
+            "ai_worker.main.sys.stdin", stdin
+        ):
+            configure_utf8_stdio()
+        stdout.reconfigure.assert_called_with(encoding="utf-8", errors="replace")
+        stdin.reconfigure.assert_called_with(encoding="utf-8", errors="replace")
 
 
 if __name__ == "__main__":

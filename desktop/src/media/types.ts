@@ -100,6 +100,7 @@ export type MediaCommands = {
   resume(jobId: string): Promise<MediaJob>;
   deleteJob(jobId: string): Promise<void>;
   hasMergedVideo(seriesRoot: string): Promise<boolean>;
+  findMergedVideo(seriesRoot: string): Promise<string | null>;
   retry(jobId: string): Promise<MediaJob>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<MediaJob>;
   subscribeProgress(listener: (job: MediaJob) => void): Promise<() => void>;
@@ -117,6 +118,7 @@ export type MediaJobsModel = {
   resume(jobId: string): Promise<void>;
   deleteJob(jobId: string): Promise<void>;
   hasMergedVideo(seriesRoot: string): Promise<boolean>;
+  findMergedVideo(seriesRoot: string): Promise<string | null>;
   retry(jobId: string): Promise<void>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<void>;
 };

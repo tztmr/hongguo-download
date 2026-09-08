@@ -85,7 +85,7 @@ pub fn validate_merge_request(
         if !metadata.is_file() {
             return Err(input_changed("input is not a regular file"));
         }
-        if !canonical_path.starts_with(&canonical_root) {
+        if !path_is_within(&canonical_root, &canonical_path) {
             return Err(AppError::new(
                 "MEDIA_INPUT_OUTSIDE_ROOT",
                 "合并输入必须位于已选剧目目录内",
@@ -180,7 +180,7 @@ pub fn validate_ai_request(
         }
         let path = fs::canonicalize(&input.path).map_err(input_changed)?;
         let metadata = fs::metadata(&path).map_err(input_changed)?;
-        if !metadata.is_file() || !path.starts_with(&canonical_root) {
+        if !metadata.is_file() || !path_is_within(&canonical_root, &path) {
             return Err(AppError::new(
                 "MEDIA_INPUT_OUTSIDE_ROOT",
                 "AI 处理输入必须位于已选剧目目录内",
@@ -282,7 +282,7 @@ fn revalidate_merge_request(
         {
             return Err(input_changed("input snapshot mismatch"));
         }
-        if !canonical_path.starts_with(&canonical_root) {
+        if !path_is_within(&canonical_root, &canonical_path) {
             return Err(AppError::new(
                 "MEDIA_INPUT_OUTSIDE_ROOT",
                 "合并输入必须位于已选剧目目录内",
@@ -391,7 +391,7 @@ fn validate_destination(root: &Path, output_file_name: &str) -> Result<(), AppEr
         Ok(_) => {
             let canonical_output_directory =
                 fs::canonicalize(&output_directory).map_err(output_invalid)?;
-            if !canonical_output_directory.starts_with(root) {
+            if !path_is_within(root, &canonical_output_directory) {
                 return Err(output_invalid("merge output directory escaped series root"));
             }
         }
@@ -399,7 +399,7 @@ fn validate_destination(root: &Path, output_file_name: &str) -> Result<(), AppEr
         Err(error) => return Err(output_invalid(error)),
     }
     let destination = output_directory.join(output_file_name);
-    if !destination.starts_with(root) {
+    if !path_is_within(root, &destination) {
         return Err(output_invalid("merge destination escaped series root"));
     }
     if let Ok(metadata) = fs::symlink_metadata(&destination) {
@@ -470,6 +470,31 @@ fn output_invalid(cause: impl std::fmt::Display) -> AppError {
         "合并输出必须位于已选剧目目录内",
         cause.to_string(),
     )
+}
+
+fn path_is_within(root: &Path, candidate: &Path) -> bool {
+    if candidate.starts_with(root) {
+        return true;
+    }
+    let stripped_root = strip_unix_private_prefix(root);
+    let stripped_candidate = strip_unix_private_prefix(candidate);
+    stripped_candidate.starts_with(&stripped_root)
+}
+
+fn strip_unix_private_prefix(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    for prefix in ["/private/tmp", "/private/var", "/private/etc"] {
+        if text == prefix {
+            return PathBuf::from(&prefix["/private".len()..]);
+        }
+        let nested = format!("{prefix}/");
+        if let Some(rest) = text.strip_prefix(&nested) {
+            return PathBuf::from(format!("{}/{rest}", &prefix["/private".len()..]));
+        }
+    }
+    path.to_path_buf()
 }
 
 pub trait MergeExecutor: Send + Sync + 'static {
@@ -823,6 +848,10 @@ impl MediaJobService {
         has_merged_video_in_series(series_root)
     }
 
+    pub fn find_merged_video(&self, series_root: &Path) -> Result<Option<PathBuf>, AppError> {
+        find_merged_video_in_series(series_root)
+    }
+
     pub fn retry(&self, job_id: &str) -> Result<MediaJob, AppError> {
         let original_job = self.manager.job(job_id)?;
         let job = if original_job.kind == MediaJobKind::Merge {
@@ -1051,38 +1080,62 @@ fn worker_loop(context: MediaWorkerContext, wake_receiver: mpsc::Receiver<()>) {
 }
 
 fn has_merged_video_in_series(series_root: &Path) -> Result<bool, AppError> {
-    let canonical_root = fs::canonicalize(series_root).map_err(output_invalid)?;
-    if !fs::metadata(&canonical_root)
-        .map_err(output_invalid)?
-        .is_dir()
-    {
-        return Err(output_invalid("series root is not a directory"));
+    Ok(find_merged_video_in_series(series_root)?.is_some())
+}
+
+fn find_merged_video_in_series(series_root: &Path) -> Result<Option<PathBuf>, AppError> {
+    let Ok(canonical_root) = fs::canonicalize(series_root) else {
+        return Ok(None);
+    };
+    let Ok(root_metadata) = fs::metadata(&canonical_root) else {
+        return Ok(None);
+    };
+    if !root_metadata.is_dir() {
+        return Ok(None);
     }
     let merged_dir = canonical_root.join("合并视频");
     let metadata = match fs::symlink_metadata(&merged_dir) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(output_invalid(error)),
+        Err(_) => return Ok(None),
     };
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(output_invalid("merge output directory is unsafe"));
+        return Ok(None);
     }
-    for entry in fs::read_dir(&merged_dir).map_err(output_invalid)? {
-        let entry = entry.map_err(output_invalid)?;
-        let metadata = fs::symlink_metadata(entry.path()).map_err(output_invalid)?;
+    let Ok(entries) = fs::read_dir(&merged_dir) else {
+        return Ok(None);
+    };
+    let mut found: Option<PathBuf> = None;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             continue;
         }
-        if entry
-            .path()
+        if !path
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
         {
-            return Ok(true);
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(&path) else {
+            continue;
+        };
+        if !path_is_within(&canonical_root, &canonical) {
+            continue;
+        }
+        match &found {
+            Some(existing) if canonical < *existing => found = Some(canonical),
+            None => found = Some(canonical),
+            _ => {}
         }
     }
-    Ok(false)
+    Ok(found)
 }
 
 fn clear_running(running: &Mutex<Option<(String, CancellationToken)>>, completed_job_id: &str) {
@@ -2522,5 +2575,85 @@ mod tests {
             service.start_merge(request).unwrap().status,
             MediaJobStatus::Queued
         );
+    }
+
+    #[test]
+    fn has_merged_video_returns_false_when_series_root_is_missing() {
+        let missing = std::env::temp_dir().join(format!(
+            "hongguo-missing-series-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        assert!(!has_merged_video_in_series(&missing).unwrap());
+        assert_eq!(find_merged_video_in_series(&missing).unwrap(), None);
+    }
+
+    #[test]
+    fn has_merged_video_returns_false_when_merge_directory_is_unsafe() {
+        let fixture = MergeFixture::new();
+        fs::write(fixture.series.join("合并视频"), b"not-a-directory").unwrap();
+        assert!(!has_merged_video_in_series(&fixture.series).unwrap());
+        assert_eq!(find_merged_video_in_series(&fixture.series).unwrap(), None);
+    }
+
+    #[test]
+    fn find_merged_video_returns_canonical_mp4_inside_series() {
+        let fixture = MergeFixture::new();
+        let merged_dir = fixture.series.join("合并视频");
+        fs::create_dir(&merged_dir).unwrap();
+        let existing = merged_dir.join("成片.mp4");
+        fs::write(&existing, b"merged").unwrap();
+        let found = find_merged_video_in_series(&fixture.series)
+            .unwrap()
+            .expect("merged mp4");
+        assert_eq!(found, fs::canonicalize(&existing).unwrap());
+        assert!(has_merged_video_in_series(&fixture.series).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_ai_accepts_lexical_tmp_series_with_canonical_merged_file() {
+        if !Path::new("/tmp").exists() {
+            return;
+        }
+        let unique = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let lexical_series = PathBuf::from("/tmp").join(format!(
+            "hongguo-ai-tmp-{}-{}-{unique}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&lexical_series).expect("tmp series");
+        let merged_dir = lexical_series.join("合并视频");
+        fs::create_dir(&merged_dir).unwrap();
+        let merged = merged_dir.join("merged.mp4");
+        fs::write(&merged, b"merged").unwrap();
+        let canonical_merged = fs::canonicalize(&merged).unwrap();
+        let request = StartAIJobRequest {
+            book_id: "book-tmp".into(),
+            title: "tmp剧".into(),
+            series_root: lexical_series.clone(),
+            scope: MediaJobScope::Merged,
+            inputs: vec![StartMergeInput {
+                episode_index: 1,
+                path: canonical_merged.clone(),
+            }],
+            model: "htdemucs".into(),
+            device: "auto".into(),
+        };
+        validate_ai_request(&request, MediaJobKind::SeparateBackgroundMusic)
+            .expect("lexical tmp series should accept canonical merged input");
+        assert_eq!(
+            find_merged_video_in_series(&lexical_series)
+                .unwrap()
+                .as_deref(),
+            Some(canonical_merged.as_path())
+        );
+        let _ = fs::remove_dir_all(&lexical_series);
     }
 }

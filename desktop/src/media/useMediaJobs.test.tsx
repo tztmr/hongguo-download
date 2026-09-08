@@ -51,6 +51,7 @@ function createCommands() {
     resume: vi.fn().mockResolvedValue(runningJob),
     deleteJob: vi.fn().mockResolvedValue(undefined),
     hasMergedVideo: vi.fn().mockResolvedValue(true),
+    findMergedVideo: vi.fn().mockResolvedValue("/Downloads/合并视频/output.mp4"),
     retry: vi.fn().mockResolvedValue(queuedJob),
     subscribeProgress: vi.fn(async (next: (job: MediaJob) => void) => {
       listener = next;
@@ -262,5 +263,23 @@ describe("useMediaJobs", () => {
     expect(commands.startSubtitleExtraction).toHaveBeenCalledTimes(1);
     expect(commands.startAudioSeparation.mock.calls[0][0]).toMatchObject({ scope: "episodes", model: "htdemucs" });
     expect(commands.startSubtitleExtraction.mock.calls[0][0]).toMatchObject({ scope: "episodes", model: "small" });
+  });
+
+  it("does not surface merged-video probe failures as a toast", async () => {
+    const commands = createCommands();
+    commands.hasMergedVideo.mockRejectedValue({
+      code: "MEDIA_OUTPUT_INVALID",
+      message: "合并输出必须位于已选剧目目录内",
+    });
+    commands.findMergedVideo.mockRejectedValue({
+      code: "MEDIA_OUTPUT_INVALID",
+      message: "合并输出必须位于已选剧目目录内",
+    });
+    const { result } = renderHook(() => useMediaJobs({ commands }));
+    await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+
+    await expect(result.current.hasMergedVideo("/missing/series")).resolves.toBe(false);
+    await expect(result.current.findMergedVideo("/missing/series")).resolves.toBeNull();
+    expect(result.current.error).toBeUndefined();
   });
 });

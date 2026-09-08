@@ -157,10 +157,16 @@ export function useMediaJobs({
   const hasMergedVideo = useCallback(async (seriesRoot: string) => {
     try {
       return await commandsRef.current.hasMergedVideo(seriesRoot);
-    } catch (nextError) {
-      const normalized = asMediaError(nextError);
-      setError(normalized);
-      throw normalized;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const findMergedVideo = useCallback(async (seriesRoot: string) => {
+    try {
+      return await commandsRef.current.findMergedVideo(seriesRoot);
+    } catch {
+      return null;
     }
   }, []);
 
@@ -235,7 +241,7 @@ export function useMediaJobs({
   }, []);
 
   return useMemo(
-    () => ({ jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, retry, markNotified }),
-    [jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, retry, markNotified],
+    () => ({ jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, findMergedVideo, retry, markNotified }),
+    [jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, findMergedVideo, retry, markNotified],
   );
 }

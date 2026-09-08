@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { deriveBatchStatus, type DownloadBatch, type DownloadItem } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
 import { missingAiComponentIds } from "../media/aiRuntime";
-import { completedMergeInputs, isCompletedBatch, sameFsPath, seriesRootFromInputs } from "../media/paths";
+import { completedMergeInputs, isCompletedBatch, pathIsWithin, sameFsPath, seriesRootFromInputs } from "../media/paths";
 import type { MediaCommandError, MediaJob, MediaJobsModel, MergeSubmitOptions } from "../media/types";
 import type { MediaJobScope } from "../media/types";
 import type { AIComponentStatus, DemucsModel, WhisperModel } from "../types";
@@ -75,10 +75,12 @@ function matchesBatchSeries(batch: DownloadBatch, bookId?: string, seriesRoot?: 
 
 function mergedPathFor(batch: DownloadBatch, jobs: MediaJob[]) {
   const completedPaths = completedPathsFor(batch);
+  const seriesRoot = batchSeriesRoot(batch);
   return jobs.slice().reverse().find((job) =>
     job.kind === "merge" && job.status === "completed" && Boolean(job.outputPath)
       && (job.inputs.some((input) => includesPath(completedPaths, input.path))
-        || matchesBatchSeries(batch, job.mergeRequest?.bookId, job.mergeRequest?.seriesRoot)))?.outputPath || undefined;
+        || matchesBatchSeries(batch, job.mergeRequest?.bookId, job.mergeRequest?.seriesRoot)
+        || (Boolean(job.mergeRequest?.bookId) && job.mergeRequest?.bookId === batch.bookId && pathIsWithin(seriesRoot, job.outputPath))))?.outputPath || undefined;
 }
 
 function noBackgroundPathFor(batch: DownloadBatch, jobs: MediaJob[], mergedPath = mergedPathFor(batch, jobs)) {
@@ -145,13 +147,14 @@ export function DownloadManagerPage({
   const [installing, setInstalling] = useState(false);
   const [uploadDraft, setUploadDraft] = useState<{ batchId: string; sourcePath: string } | null>(null);
   const [selectedHasMergedVideo, setSelectedHasMergedVideo] = useState(false);
+  const [selectedMergedVideoPath, setSelectedMergedVideoPath] = useState<string | undefined>();
   const [dismissedMediaError, setDismissedMediaError] = useState<MediaCommandError>();
   const selectedBatch = manager.state.batches.find((batch) => batch.id === selectedBatchId) || manager.state.batches[0];
   const mergingBatch = manager.state.batches.find((batch) => batch.id === mergingBatchId) || null;
   const mediaDialogBatch = manager.state.batches.find((batch) => batch.id === mediaDialog?.batchId) || null;
   const uploadBatch = manager.state.batches.find((batch) => batch.id === uploadDraft?.batchId) || null;
   const completedPaths = selectedBatch ? completedPathsFor(selectedBatch) : [];
-  const mergedPath = selectedBatch ? mergedPathFor(selectedBatch, media.jobs) : undefined;
+  const mergedPath = selectedBatch ? (mergedPathFor(selectedBatch, media.jobs) || selectedMergedVideoPath) : undefined;
   const selectedSeriesRoot = selectedBatch ? batchSeriesRoot(selectedBatch) : "";
   const noBackgroundPath = selectedBatch ? noBackgroundPathFor(selectedBatch, media.jobs, mergedPath) : undefined;
   const hasCompletedBackgroundSeparation = Boolean(selectedBatch && media.jobs.some((job) =>
@@ -170,14 +173,31 @@ export function DownloadManagerPage({
     let active = true;
     if (!selectedSeriesRoot) {
       setSelectedHasMergedVideo(false);
+      setSelectedMergedVideoPath(undefined);
       return () => { active = false; };
     }
-    void media.hasMergedVideo(selectedSeriesRoot).then(
-      (exists) => { if (active) setSelectedHasMergedVideo(exists); },
-      () => { if (active) setSelectedHasMergedVideo(false); },
-    );
+    if (media.findMergedVideo) {
+      void media.findMergedVideo(selectedSeriesRoot).then(
+        (path) => {
+          if (!active) return;
+          setSelectedMergedVideoPath(path || undefined);
+          setSelectedHasMergedVideo(Boolean(path));
+        },
+        () => {
+          if (!active) return;
+          setSelectedMergedVideoPath(undefined);
+          setSelectedHasMergedVideo(false);
+        },
+      );
+    } else {
+      setSelectedMergedVideoPath(undefined);
+      void media.hasMergedVideo(selectedSeriesRoot).then(
+        (exists) => { if (active) setSelectedHasMergedVideo(exists); },
+        () => { if (active) setSelectedHasMergedVideo(false); },
+      );
+    }
     return () => { active = false; };
-  }, [media.hasMergedVideo, media.jobs, selectedSeriesRoot]);
+  }, [media.findMergedVideo, media.hasMergedVideo, media.jobs, selectedSeriesRoot]);
   useEffect(() => {
     if (!selectedBatch && selectedBatchId) setSelectedBatchId("");
     else if (selectedBatch && selectedBatch.id !== selectedBatchId) setSelectedBatchId(selectedBatch.id);
@@ -226,7 +246,7 @@ export function DownloadManagerPage({
   async function enqueueAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
     const batch = manager.state.batches.find((item) => item.id === batchId);
     if (!batch) return;
-    const targetMergedPath = mergedPathFor(batch, media.jobs);
+    const targetMergedPath = mergedPathFor(batch, media.jobs) || (selectedBatch?.id === batch.id ? selectedMergedVideoPath : undefined);
     if (kind === "audioSeparation") {
       await media.startAudioSeparation(batch, scope, demucsModel, targetMergedPath);
     } else {
@@ -448,7 +468,7 @@ export function DownloadManagerPage({
       {mediaDialogBatch && mediaDialog ? (
         <MediaScopeDialog
           kind={mediaDialog.kind}
-          hasMergedVideo={Boolean(mergedPathFor(mediaDialogBatch, media.jobs))}
+          hasMergedVideo={Boolean(mergedPathFor(mediaDialogBatch, media.jobs) || (selectedBatch?.id === mediaDialogBatch.id ? selectedMergedVideoPath : undefined))}
           title={mediaDialogBatch.title}
           episodeCount={mediaDialogBatch.items.length}
           modelName={mediaDialog.kind === "audioSeparation" ? demucsModel : `Whisper ${whisperModel}`}

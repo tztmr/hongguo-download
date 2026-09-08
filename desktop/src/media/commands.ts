@@ -12,6 +12,7 @@ export const mediaCommands: MediaCommands = {
   resume: (jobId: string) => invoke<MediaJob>("resume_media_job", { jobId, job_id: jobId }),
   deleteJob: (jobId: string) => invoke<void>("delete_media_job", { jobId, job_id: jobId }),
   hasMergedVideo: (seriesRoot: string) => invoke<boolean>("has_merged_video", { seriesRoot, series_root: seriesRoot }),
+  findMergedVideo: (seriesRoot: string) => invoke<string | null>("find_merged_video", { seriesRoot, series_root: seriesRoot }),
   retry: (jobId: string) => invoke<MediaJob>("retry_media_job", { jobId, job_id: jobId }),
   markNotified: (jobId, outcome) => invoke<MediaJob>("mark_media_job_notified", { jobId, outcome }),
   subscribeProgress: async (listener) => {
