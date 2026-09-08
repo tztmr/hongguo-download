@@ -927,10 +927,10 @@ fn ascii_worker_request(request: &Value) -> String {
 
 fn decode_worker_stdout_line(buffer: &[u8]) -> Option<String> {
     let mut line = buffer;
-    if let Some(without_lf) = line.strip_suffix(&[b'\n']) {
+    if let Some(without_lf) = line.strip_suffix(b"\n") {
         line = without_lf;
     }
-    if let Some(without_cr) = line.strip_suffix(&[b'\r']) {
+    if let Some(without_cr) = line.strip_suffix(b"\r") {
         line = without_cr;
     }
     if line.is_empty() {
