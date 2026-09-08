@@ -12,7 +12,8 @@ type Props = {
 };
 
 export function MediaScopeDialog({ kind, hasMergedVideo, title, modelName, episodeCount, onSubmit, onClose }: Props) {
-  const [scope, setScope] = useState<MediaJobScope>("episodes");
+  const [selectedScope, setScope] = useState<MediaJobScope | null>(null);
+  const scope = hasMergedVideo ? selectedScope ?? "merged" : "episodes";
   const audio = kind === "audioSeparation";
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {

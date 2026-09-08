@@ -14,13 +14,13 @@ describe("MediaScopeDialog", () => {
     expect(onSubmit).toHaveBeenCalledWith("episodes");
   });
 
-  it("shows independent audio disclaimer and returns merged scope", () => {
+  it("shows independent audio disclaimer and defaults to merged scope", () => {
     const onSubmit = vi.fn();
     const view = render(
       <MediaScopeDialog kind="audioSeparation" hasMergedVideo onSubmit={onSubmit} onClose={vi.fn()} />,
     );
     expect(view.getByText(/不保证规避 Content ID/)).toBeTruthy();
-    fireEvent.click(view.getByRole("radio", { name: "合并视频" }));
+    expect((view.getByRole("radio", { name: "合并视频" }) as HTMLInputElement).checked).toBe(true);
     fireEvent.click(view.getByRole("button", { name: "开始分离" }));
     expect(onSubmit).toHaveBeenCalledWith("merged");
   });

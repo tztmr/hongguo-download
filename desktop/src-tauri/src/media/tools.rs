@@ -16,6 +16,17 @@ pub struct MediaTools {
     ffprobe: PathBuf,
 }
 
+pub(crate) fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+    }
+    command
+}
+
 impl MediaTools {
     #[cfg(test)]
     pub(crate) fn from_test_paths(ffmpeg: PathBuf, ffprobe: PathBuf) -> Self {
@@ -85,11 +96,11 @@ impl MediaTools {
     }
 
     pub(crate) fn ffmpeg_command(&self) -> Command {
-        Command::new(&self.ffmpeg)
+        background_command(&self.ffmpeg)
     }
 
     pub(crate) fn ffprobe_command(&self) -> Command {
-        Command::new(&self.ffprobe)
+        background_command(&self.ffprobe)
     }
 
     pub fn probe_media(&self, path: impl AsRef<Path>) -> Result<MediaProbe, AppError> {
@@ -126,6 +137,50 @@ fn tool_is_executable(metadata: &fs::Metadata) -> bool {
 #[cfg(windows)]
 fn tool_is_executable(_metadata: &fs::Metadata) -> bool {
     true
+}
+
+#[cfg(all(test, windows))]
+mod windows_console_tests {
+    use super::*;
+    use std::process::Stdio;
+
+    #[test]
+    fn console_probe() {
+        if std::env::var_os("HONGGUO_CONSOLE_PROBE").is_none() {
+            return;
+        }
+        assert!(unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null());
+        println!("hidden-console-pipe-ok");
+    }
+
+    #[test]
+    fn background_tools_and_controlled_workers_have_no_console_and_keep_pipes() {
+        let executable = std::env::current_exe().unwrap();
+        let tools = MediaTools::from_test_paths(executable.clone(), executable.clone());
+        let mut controlled_worker = Command::new(&executable);
+        crate::media::ProcessControl::new().prepare_command(&mut controlled_worker);
+        let mut controlled_ffmpeg = tools.ffmpeg_command();
+        crate::media::ProcessControl::new().prepare_command(&mut controlled_ffmpeg);
+        for mut command in [
+            background_command(&executable),
+            controlled_worker,
+            controlled_ffmpeg,
+            tools.ffprobe_command(),
+        ] {
+            let output = command
+                .args([
+                    "--exact",
+                    "media::tools::windows_console_tests::console_probe",
+                    "--nocapture",
+                ])
+                .env("HONGGUO_CONSOLE_PROBE", "1")
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            assert!(String::from_utf8_lossy(&output.stdout).contains("hidden-console-pipe-ok"));
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

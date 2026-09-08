@@ -283,7 +283,7 @@ describe("DownloadManagerPage", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "开始分离" }));
 
     await waitFor(() => expect(media.startAudioSeparation).toHaveBeenCalledWith(
-      expect.objectContaining({ id: "batch-b" }), "episodes", "htdemucs", "/Downloads/merged.mp4",
+      expect.objectContaining({ id: "batch-b" }), "merged", "htdemucs", "/Downloads/merged.mp4",
     ));
   });
 

@@ -20,7 +20,7 @@ use windows_sys::Win32::{
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         },
         Threading::{
-            OpenThread, ResumeThread, SuspendThread, CREATE_NEW_PROCESS_GROUP,
+            OpenThread, ResumeThread, SuspendThread, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
             THREAD_SUSPEND_RESUME,
         },
     },
@@ -63,7 +63,7 @@ impl ProcessControl {
     }
 
     pub fn prepare_command(&self, command: &mut Command) {
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
     }
 
     pub fn register_child(&self, child: &mut Child) -> Result<(), AppError> {

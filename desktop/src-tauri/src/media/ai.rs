@@ -714,7 +714,7 @@ fn run_worker(
         "outputDir": invocation.output,
         "options": options,
     });
-    let mut command = Command::new(invocation.runtime);
+    let mut command = super::tools::background_command(invocation.runtime);
     if invocation.ffmpeg.is_some() || invocation.operation == "transcribe" {
         // Whisper launches `ffmpeg` by name. Finder-launched applications do not
         // inherit a shell PATH; use only the verified bundle and system tools.

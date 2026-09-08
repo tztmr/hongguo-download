@@ -1,3 +1,4 @@
+use super::tools::background_command;
 use crate::app_error::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -6,7 +7,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
@@ -1109,7 +1110,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), AppError> {
     if archive_looks_like_zip(archive) {
         return extract_zip(archive, destination);
     }
-    let listing = Command::new(tar_program())
+    let listing = background_command(tar_program())
         .args(["-tf", &archive.to_string_lossy()])
         .output()
         .map_err(|error| {
@@ -1137,7 +1138,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), AppError> {
             ));
         }
     }
-    let status = Command::new(tar_program())
+    let status = background_command(tar_program())
         .args([
             "-xf",
             &archive.to_string_lossy(),
@@ -1377,7 +1378,7 @@ fn run_self_test(entrypoint: &Path) -> Result<(), AppError> {
     if !should_run_self_test(entrypoint)? {
         return Ok(());
     }
-    let output = Command::new(entrypoint)
+    let output = background_command(entrypoint)
         .arg("--self-test")
         .stdin(Stdio::null())
         .output()
