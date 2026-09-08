@@ -66,7 +66,9 @@ def verify(worker: Path, model: str, model_root: Path, root: Path) -> None:
     result = next(event for event in events if event.get("type") == "result")
     for key in ("vocalsPath", "backgroundMusicPath"):
         path = Path(result["outputs"][key]).resolve()
-        assert path.is_relative_to(output.resolve()), path
+        # The worker preserves the Windows \\?\ prefix; compare filesystem
+        # identity rather than treating its plain spelling as a different root.
+        assert path.parent.samefile(output), path
         with wave.open(str(path), "rb") as audio:
             assert abs(audio.getnframes() / audio.getframerate() - 1) < 0.05
             assert audio.getnchannels() == 2
