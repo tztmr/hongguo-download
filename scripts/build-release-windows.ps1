@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 & (Join-Path $PSScriptRoot "build-api-sidecar-windows.ps1") -Python $Python

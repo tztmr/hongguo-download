@@ -97,3 +97,13 @@ python3 scripts/build-ai-model-archives.py \
 ### Whisper 转写运行环境
 
 0.1.6 的转写任务在桌面端固定选择 CPU，并为已有 runtime 明确设置打包 FFmpeg 的搜索路径，修复 Torch 2.5.1 的 SparseMPS 不支持错误以及 Finder 启动时找不到 ffmpeg 的错误。背景音乐分离继续使用原有设备选择。无需重新下载 runtime 或模型。
+
+### 0.1.15 升级与发布
+
+AI 请求使用 ASCII JSON 转义保留中文、空格和 emoji 路径；读取结果兼容 UTF-8 和旧 Windows runtime 的 GBK，无需删除或重新下载模型。背景音乐分离与转写均优先使用应用内 FFmpeg，Windows 的 PATH 使用可搜索的目录格式。工作程序失败时保留有界 stderr 诊断，并在异常退出提示中显示退出状态。
+
+Windows 安装器按 Tauri 的实际主程序名结束运行中的进程树，再替换文件。打包 CI 在中文空格安装目录验证：从上一版运行中升级、同版本运行中重装、设置目录保留、安装文件哈希和升级后启动。手动执行这些安装测试会安装及卸载应用，只应在隔离测试机器上使用 `verify-release-windows.ps1 -InstallSmokeTest`。
+
+macOS 退出应用后，将 DMG 中的“红果下载”拖入 Applications 并选择替换；应用名称与数据目录标识保持稳定，已有设置和 AI 组件继续保留。
+
+开发及 CI 统一使用 main。Windows 通过 `windows-release.yml` 构建，传入 FFmpeg 下载地址、SHA-256 和用于升级测试的上一版本 tag。macOS 在本机加载 `dist/release.env` 后执行 `./scripts/build-release.sh`，完成检查后，将生成的当前版本 DMG 用 `gh release upload <tag> <dmg-path>` 上传到同一发布版本，无需等待云端 macOS 打包。

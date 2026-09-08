@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -696,14 +696,16 @@ fn run_worker(
         "options": options,
     });
     let mut command = Command::new(invocation.runtime);
-    if invocation.operation == "transcribe" {
+    if invocation.ffmpeg.is_some() || invocation.operation == "transcribe" {
         // Whisper launches `ffmpeg` by name. Finder-launched applications do not
         // inherit a shell PATH; use only the verified bundle and system tools.
         let ffmpeg_dir = invocation
             .ffmpeg
             .and_then(Path::parent)
             .ok_or_else(|| AppError::new("MEDIA_TOOL_MISSING", "语音转写缺少打包的 FFmpeg"))?;
-        let mut search_paths = vec![ffmpeg_dir.to_path_buf()];
+        // Windows PATH lookup does not consistently accept canonical \\?\ paths.
+        // Keep canonical paths for filesystem validation, simplify only for PATH.
+        let mut search_paths = vec![dunce::simplified(ffmpeg_dir).to_path_buf()];
         if let Some(existing) = std::env::var_os("PATH") {
             search_paths.extend(std::env::split_paths(&existing));
         }
@@ -721,10 +723,11 @@ fn run_worker(
         .args(invocation.args)
         .env("PYTHONUTF8", "1")
         .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUNBUFFERED", "1")
         .env_remove("PYTHONLEGACYWINDOWSSTDIO")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     cancellation.prepare_command(&mut command);
     let mut child = command.spawn().map_err(|error| {
         AppError::with_cause(
@@ -733,15 +736,32 @@ fn run_worker(
             error.to_string(),
         )
     })?;
-    cancellation.register_child(&mut child)?;
-    let child_id = child.id();
-    if let Some(mut stdin) = child.stdin.take() {
-        serde_json::to_writer(&mut stdin, &request)
-            .and_then(|_| stdin.write_all(b"\n").map_err(serde_json::Error::io))
-            .map_err(|error| {
-                AppError::with_cause("AI_WORKER_FAILED", "无法发送 AI 请求", error.to_string())
-            })?;
+    if let Err(error) = cancellation.register_child(&mut child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        cancellation.clear_child(child.id());
+        return Err(error);
     }
+    let child_id = child.id();
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    let stderr_tail = diagnostics.clone();
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let stderr_reader = thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stderr.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => {
+                    let mut tail = stderr_tail.lock().unwrap();
+                    tail.extend_from_slice(&buffer[..size]);
+                    let discard = tail.len().saturating_sub(8192);
+                    tail.drain(..discard);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
     // Drain stdout while the process runs. Waiting for exit first both hides
     // progress and deadlocks once the worker fills the OS pipe buffer.
     let stdout = child
@@ -749,7 +769,7 @@ fn run_worker(
         .take()
         .ok_or_else(|| AppError::new("AI_WORKER_FAILED", "AI 工作程序输出不可用"))?;
     let (sender, receiver) = mpsc::sync_channel(32);
-    thread::spawn(move || {
+    let stdout_reader = thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
         let mut buffer = Vec::new();
         loop {
@@ -763,6 +783,7 @@ fn run_worker(
                         }
                     }
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) => {
                     let _ = sender.send(Err(error));
                     break;
@@ -771,6 +792,15 @@ fn run_worker(
         }
     });
     let outcome = (|| {
+        if let Some(mut stdin) = child.stdin.take() {
+            // Frozen older workers may ignore PYTHONUTF8 and read CP936. ASCII
+            // JSON preserves every path (including emoji via surrogate pairs).
+            stdin
+                .write_all(ascii_worker_request(&request).as_bytes())
+                .map_err(|error| {
+                    AppError::with_cause("AI_WORKER_FAILED", "无法发送 AI 请求", error.to_string())
+                })?;
+        }
         let mut result = None;
         loop {
             if cancellation.is_cancelled() {
@@ -849,7 +879,10 @@ fn run_worker(
                 AppError::with_cause("AI_WORKER_FAILED", "AI 工作程序状态异常", error.to_string())
             })? {
                 if !status.success() {
-                    return Err(AppError::new("AI_WORKER_FAILED", "AI 工作程序异常退出"));
+                    return Err(AppError::new(
+                        "AI_WORKER_FAILED",
+                        format!("AI 工作程序异常退出（{status}）"),
+                    ));
                 }
                 return result
                     .ok_or_else(|| AppError::new("AI_WORKER_FAILED", "AI 工作程序未返回结果"));
@@ -858,11 +891,38 @@ fn run_worker(
         }
     })();
     if outcome.is_err() {
+        cancellation.kill();
         let _ = child.kill();
         let _ = child.wait();
     }
     cancellation.clear_child(child_id);
-    outcome
+    drop(receiver);
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+    outcome.map_err(|error| {
+        let tail = diagnostics.lock().unwrap();
+        let diagnostic = decode_worker_stdout_line(&tail)
+            .unwrap_or_else(|| String::from_utf8_lossy(&tail).into_owned());
+        AppError::with_cause(
+            &error.code,
+            &error.message,
+            format!("{error:?}\n{diagnostic}"),
+        )
+    })
+}
+
+fn ascii_worker_request(request: &Value) -> String {
+    use std::fmt::Write;
+    let mut ascii = String::new();
+    for unit in request.to_string().encode_utf16() {
+        if unit < 128 {
+            ascii.push(unit as u8 as char);
+        } else {
+            write!(&mut ascii, "\\u{unit:04x}").expect("write to string");
+        }
+    }
+    ascii.push('\n');
+    ascii
 }
 
 fn decode_worker_stdout_line(buffer: &[u8]) -> Option<String> {
@@ -876,7 +936,11 @@ fn decode_worker_stdout_line(buffer: &[u8]) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    std::str::from_utf8(line).ok().map(str::to_owned)
+    if let Ok(text) = std::str::from_utf8(line) {
+        return Some(text.trim_start_matches('\u{feff}').to_owned());
+    }
+    let (text, invalid) = encoding_rs::GBK.decode_without_bom_handling(line);
+    (!invalid).then(|| text.into_owned())
 }
 
 fn worker_output_path(value: &Value, field: &str, root: &Path) -> Result<PathBuf, AppError> {
@@ -1210,7 +1274,7 @@ echo '{"type":"result","outputs":{"ok":true}}'
         std::fs::write(
             &script,
             format!(
-                "# -*- coding: utf-8 -*-\nimport os\nimport sys\n_ = sys.stdin.read()\n{body}\n"
+                "# -*- coding: utf-8 -*-\nimport os\nimport sys\n_request_bytes = sys.stdin.buffer.read()\n{body}\n"
             ),
         )
         .unwrap();
@@ -1232,11 +1296,169 @@ echo '{"type":"result","outputs":{"ok":true}}'
                 operation,
                 input: &temp.root,
                 output: &temp.output,
+                options: serde_json::json!({"label": "红果 中文 😀"}),
+            },
+            &super::CancellationToken::default(),
+            &mut |_, _| {},
+        )
+    }
+
+    #[test]
+    fn worker_request_preserves_unicode_with_legacy_gbk_stdin() {
+        let result = run_python_worker(
+            r#"import json
+request = json.loads(_request_bytes.decode('gbk'))
+assert request['options']['label'] == '红果 中文 😀'
+print(json.dumps({'type': 'result', 'outputs': {'ok': True}}))"#,
+            "separate",
+        );
+        assert_eq!(result.unwrap(), serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn worker_round_trips_real_unicode_paths_with_legacy_stdio() {
+        let (temp, script) = python_worker_fixture(
+            r#"import json
+from pathlib import Path
+request = json.loads(_request_bytes.decode('gbk'))
+assert Path(request['inputPath']).read_text(encoding='utf8') == '中文路径'
+output = Path(request['outputDir']) / '人声.wav'
+output.write_bytes(b'wave fixture')
+event = {'type': 'result', 'outputs': {'vocalsPath': str(output.resolve())}}
+sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + '\n').encode('gbk'))"#,
+        );
+        let root = temp.root.join("中文 空格目录");
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("分离 输出");
+        std::fs::create_dir(&output).unwrap();
+        let input = root.join("合并 视频.wav");
+        std::fs::write(&input, "中文路径").unwrap();
+        let input = std::fs::canonicalize(input).unwrap();
+        let output = std::fs::canonicalize(output).unwrap();
+        let results = super::run_worker(
+            super::WorkerInvocation {
+                runtime: std::path::Path::new(python_program()),
+                args: &[script.to_str().unwrap()],
+                ffmpeg: None,
+                job_id: "unicode-paths",
+                operation: "separate",
+                input: &input,
+                output: &output,
                 options: serde_json::json!({}),
             },
             &super::CancellationToken::default(),
             &mut |_, _| {},
         )
+        .unwrap();
+        let actual = super::worker_output_path(&results, "vocalsPath", &output).unwrap();
+        assert_eq!(std::fs::read(actual).unwrap(), b"wave fixture");
+    }
+
+    #[test]
+    #[ignore = "requires an installed runtime, Demucs model and bundled FFmpeg"]
+    fn installed_runtime_separates_video_in_unicode_directory() {
+        use super::*;
+        let env_path = |name| std::path::PathBuf::from(std::env::var_os(name).expect(name));
+        let runtime = env_path("HONGGUO_TEST_AI_RUNTIME");
+        let model_root = env_path("HONGGUO_TEST_DEMUCS_MODEL");
+        let tools = MediaTools::from_test_paths(
+            env_path("HONGGUO_TEST_FFMPEG"),
+            env_path("HONGGUO_TEST_FFPROBE"),
+        );
+        let temp = JobTemp::create(&std::env::temp_dir()).unwrap();
+        let root = temp.root.join("中文 空格剧目");
+        std::fs::create_dir(&root).unwrap();
+        let input = root.join("合并 视频.mp4");
+        assert!(tools
+            .ffmpeg_command()
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=160x120:r=25",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=220:sample_rate=44100",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+            ])
+            .arg(&input)
+            .status()
+            .unwrap()
+            .success());
+        let request = super::super::validate_ai_request(
+            &super::super::StartAIJobRequest {
+                book_id: "test".into(),
+                title: "中文 空格剧目".into(),
+                series_root: root,
+                scope: super::super::MediaJobScope::Merged,
+                inputs: vec![super::super::StartMergeInput {
+                    episode_index: 1,
+                    path: input,
+                }],
+                model: "htdemucs".into(),
+                device: "cpu".into(),
+            },
+            MediaJobKind::SeparateBackgroundMusic,
+        )
+        .unwrap();
+        let cancellation = CancellationToken::default();
+        let context = AIItemContext {
+            tools: &tools,
+            runtime: &runtime,
+            model_root: &model_root,
+            request: &request,
+            cancellation: &cancellation,
+        };
+        let outputs =
+            process_separation(&context, 1, &request.inputs[0].path, &mut |_, _| {}).unwrap();
+        assert_eq!(outputs.len(), 3);
+        for output in outputs {
+            assert!(regular_nonempty(&output.path));
+            assert!(output.path.starts_with(&request.series_root));
+        }
+    }
+
+    #[test]
+    fn worker_accepts_legacy_gbk_json_paths_and_errors() {
+        let outputs = run_python_worker(
+            r#"import json
+event = {'type': 'result', 'outputs': {'path': 'D:\\红果下载\\中文 空格\\人声.wav'}}
+sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + '\n').encode('gbk'))"#,
+            "separate",
+        )
+        .unwrap();
+        assert_eq!(outputs["path"], "D:\\红果下载\\中文 空格\\人声.wav");
+        let error = run_python_worker(
+            r#"import json
+event = {'type': 'error', 'code': 'AI_MODEL_INVALID', 'message': '模型文件缺失'}
+sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + '\n').encode('gbk'))
+sys.exit(2)"#,
+            "separate",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "AI_MODEL_INVALID");
+        assert_eq!(error.message, "模型文件缺失");
+    }
+
+    #[test]
+    fn worker_reports_exit_status_and_bounded_stderr_diagnostics() {
+        let error = run_python_worker(
+            "sys.stderr.buffer.write(b'x' * 200000 + b'\\nDLL load failed: missing dependency\\n')\nsys.exit(23)",
+            "separate",
+        ).unwrap_err();
+        let cause = format!("{error:?}");
+        assert!(cause.contains("23"));
+        assert!(cause.contains("DLL load failed"));
+        assert!(cause.len() < 17000);
     }
 
     #[test]
@@ -1285,6 +1507,7 @@ echo '{"type":"result","outputs":{"ok":true}}'
         assert!(release.pointer("/bundle/windows").is_none());
         assert!(hooks.contains("NSIS_HOOK_PREINSTALL"));
         assert!(hooks.contains("NSIS_HOOK_PREUNINSTALL"));
+        assert!(hooks.contains("${MAINBINARYNAME}.exe"));
         assert!(hooks.contains("红果下载.exe"));
         assert!(hooks.contains("hongguo-api.exe"));
         assert!(hooks.contains("hongguo-ai-worker.exe"));
