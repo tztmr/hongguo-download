@@ -40,6 +40,9 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
     installLock.current = true;
     setPendingIds(items.map((item) => item.id));
     setError("");
+    await new Promise<void>((resolve) => {
+      window.setTimeout(resolve, 0);
+    });
     try {
       for (const item of items) {
         await model.installComponent(item.id);

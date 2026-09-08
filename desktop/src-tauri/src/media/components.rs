@@ -4,24 +4,33 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
     fs::{self, File, OpenOptions},
-    io::{BufWriter, Read, Write},
+    io::{self, BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use url::Url;
 
 pub const AI_COMPONENTS_MANIFEST_VERSION: u32 = 1;
+const COMPONENT_DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const COMPONENT_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(6 * 60 * 60);
 #[cfg(target_os = "macos")]
 pub const AI_COMPONENT_PLATFORM: &str = "aarch64-apple-darwin";
 #[cfg(windows)]
 pub const AI_COMPONENT_PLATFORM: &str = "x86_64-pc-windows-msvc";
 const INSTALLED_STORE: &str = "installed.json";
 const DOWNLOADS_DIR: &str = ".downloads";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComponentReleasePart {
+    pub url: String,
+    pub bytes: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -34,6 +43,8 @@ pub struct ComponentRelease {
     pub download_bytes: u64,
     pub installed_bytes: u64,
     pub entrypoint: String,
+    #[serde(default)]
+    pub parts: Vec<ComponentReleasePart>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -356,7 +367,6 @@ impl ComponentManager {
         }
         emit(progress, id, "downloading", 20.0);
         let part_path = self.root.join(DOWNLOADS_DIR).join(format!("{id}.part"));
-        let download_url = self.resolve_download_url(&release.url);
         let proxy = self
             .download_proxy
             .lock()
@@ -369,27 +379,40 @@ impl ComponentManager {
         }) && sha256_file(&part_path)
             .is_ok_and(|actual| actual == release.sha256);
         if !reuse_verified_part {
-            stream_download(
-                &download_url,
-                &part_path,
-                release.download_bytes,
-                id,
-                progress,
-                proxy.as_ref(),
-            )?;
-        }
-        emit(progress, id, "verifying", 45.0);
-        let actual = if reuse_verified_part {
-            release.sha256.clone()
+            let actual = if release.parts.is_empty() {
+                stream_download(
+                    &self.resolve_download_url(&release.url),
+                    &part_path,
+                    release.download_bytes,
+                    id,
+                    progress,
+                    proxy.as_ref(),
+                )?
+            } else {
+                let parts: Vec<(String, u64)> = release
+                    .parts
+                    .iter()
+                    .map(|part| (self.resolve_download_url(&part.url), part.bytes))
+                    .collect();
+                stream_download_parts(
+                    &parts,
+                    &part_path,
+                    release.download_bytes,
+                    id,
+                    progress,
+                    proxy.as_ref(),
+                )?
+            };
+            emit(progress, id, "verifying", 45.0);
+            if actual != release.sha256 {
+                let _ = fs::remove_file(&part_path);
+                return Err(AppError::new(
+                    "AI_COMPONENT_CHECKSUM_FAILED",
+                    "组件校验失败，已保留当前版本",
+                ));
+            }
         } else {
-            sha256_file(&part_path)?
-        };
-        if actual != release.sha256 {
-            let _ = fs::remove_file(&part_path);
-            return Err(AppError::new(
-                "AI_COMPONENT_CHECKSUM_FAILED",
-                "组件校验失败，已保留当前版本",
-            ));
+            emit(progress, id, "verifying", 45.0);
         }
         self.finish_verified_archive(id, &release, &part_path, progress)
     }
@@ -603,6 +626,40 @@ fn validate_release(release: &ComponentRelease) -> Result<(), AppError> {
         ));
     }
     validate_entrypoint(&release.entrypoint)?;
+    if !release.parts.is_empty() {
+        if release.parts.len() < 2 {
+            return Err(AppError::new(
+                "AI_COMPONENT_MANIFEST_INVALID",
+                "组件分片清单无效",
+            ));
+        }
+        let mut total = 0u64;
+        for part in &release.parts {
+            if part.bytes == 0 {
+                return Err(AppError::new(
+                    "AI_COMPONENT_MANIFEST_INVALID",
+                    "组件分片大小无效",
+                ));
+            }
+            let part_url = Url::parse(&part.url)
+                .map_err(|_| AppError::new("AI_COMPONENT_MANIFEST_INVALID", "组件下载地址无效"))?;
+            if !is_allowed_download_url(&part_url) {
+                return Err(AppError::new(
+                    "AI_COMPONENT_MANIFEST_INVALID",
+                    "组件必须通过 HTTPS 下载",
+                ));
+            }
+            total = total.checked_add(part.bytes).ok_or_else(|| {
+                AppError::new("AI_COMPONENT_MANIFEST_INVALID", "组件分片大小无效")
+            })?;
+        }
+        if total != release.download_bytes {
+            return Err(AppError::new(
+                "AI_COMPONENT_MANIFEST_INVALID",
+                "组件分片大小无效",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -634,7 +691,8 @@ fn is_allowed_mirror_url(url: &Url) -> bool {
 
 fn component_download_client(proxy: Option<&Url>) -> Result<reqwest::blocking::Client, AppError> {
     let mut builder = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
+        .connect_timeout(COMPONENT_DOWNLOAD_CONNECT_TIMEOUT)
+        .timeout(COMPONENT_DOWNLOAD_TIMEOUT)
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if is_safe_component_redirect(attempt.previous().last(), attempt.url()) {
                 attempt.follow()
@@ -673,7 +731,11 @@ fn valid_id(value: &str) -> bool {
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.chars().all(|ch| matches!(ch, '0'..='9' | 'a'..='f'))
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|ch| matches!(ch, b'0'..=b'9' | b'a'..=b'f'))
+        && value.bytes().any(|ch| ch != b'0')
 }
 
 fn validate_entrypoint(value: &str) -> Result<(), AppError> {
@@ -789,7 +851,7 @@ fn stream_download(
     id: &str,
     progress: &mut dyn FnMut(ComponentProgress),
     proxy: Option<&Url>,
-) -> Result<(), AppError> {
+) -> Result<String, AppError> {
     let parsed = Url::parse(url)
         .map_err(|_| AppError::new("AI_COMPONENT_DOWNLOAD_FAILED", "组件下载地址无效"))?;
     if !is_allowed_download_url(&parsed) {
@@ -823,6 +885,7 @@ fn stream_download(
     let total_bytes = response.content_length().unwrap_or(expected_bytes).max(1);
     let mut downloaded_bytes = 0u64;
     let mut last_percent = 20.0;
+    let mut hasher = Sha256::new();
     let mut buffer = [0u8; 256 * 1024];
     loop {
         let read = response.read(&mut buffer).map_err(|error| {
@@ -838,6 +901,7 @@ fn stream_download(
         file.write_all(&buffer[..read]).map_err(|error| {
             AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
         })?;
+        hasher.update(&buffer[..read]);
         downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
         let percent = 20.0 + (downloaded_bytes as f64 / total_bytes as f64).min(1.0) * 25.0;
         if percent - last_percent >= 1.0 || percent >= 45.0 {
@@ -851,7 +915,119 @@ fn stream_download(
     file.sync_all().map_err(|error| {
         AppError::with_cause("AI_COMPONENT_IO", "无法同步组件下载文件", error.to_string())
     })?;
-    Ok(())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn stream_download_parts(
+    parts: &[(String, u64)],
+    part_path: &Path,
+    expected_bytes: u64,
+    id: &str,
+    progress: &mut dyn FnMut(ComponentProgress),
+    proxy: Option<&Url>,
+) -> Result<String, AppError> {
+    if parts.is_empty() {
+        return Err(AppError::new(
+            "AI_COMPONENT_DOWNLOAD_FAILED",
+            "组件分片清单无效",
+        ));
+    }
+    let client = component_download_client(proxy)?;
+    if let Some(parent) = part_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            AppError::with_cause("AI_COMPONENT_IO", "无法创建组件下载目录", error.to_string())
+        })?;
+    }
+    let mut file = File::create(part_path).map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
+    })?;
+    let total_bytes = expected_bytes.max(1);
+    let mut downloaded_bytes = 0u64;
+    let mut last_percent = 20.0;
+    let mut hasher = Sha256::new();
+    for (url, part_bytes) in parts {
+        let parsed = Url::parse(url)
+            .map_err(|_| AppError::new("AI_COMPONENT_DOWNLOAD_FAILED", "组件下载地址无效"))?;
+        if !is_allowed_download_url(&parsed) {
+            return Err(AppError::new(
+                "AI_COMPONENT_DOWNLOAD_FAILED",
+                "组件必须通过 HTTPS 下载",
+            ));
+        }
+        let mut response = client.get(url).send().map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_DOWNLOAD_FAILED",
+                "无法下载媒体组件",
+                error.to_string(),
+            )
+        })?;
+        if response.status().is_redirection() || !response.status().is_success() {
+            return Err(AppError::new(
+                "AI_COMPONENT_DOWNLOAD_FAILED",
+                format!("媒体组件下载失败（HTTP {}）", response.status()),
+            ));
+        }
+        if let Some(content_length) = response.content_length() {
+            if content_length != *part_bytes {
+                return Err(AppError::new(
+                    "AI_COMPONENT_DOWNLOAD_FAILED",
+                    "媒体组件分片大小不匹配",
+                ));
+            }
+        }
+        let mut buffer = [0u8; 256 * 1024];
+        let mut received = 0u64;
+        loop {
+            let read = response.read(&mut buffer).map_err(|error| {
+                AppError::with_cause(
+                    "AI_COMPONENT_DOWNLOAD_FAILED",
+                    "无法读取媒体组件",
+                    error.to_string(),
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read]).map_err(|error| {
+                AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
+            })?;
+            hasher.update(&buffer[..read]);
+            received = received.saturating_add(read as u64);
+            downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
+            let percent = 20.0 + (downloaded_bytes as f64 / total_bytes as f64).min(1.0) * 25.0;
+            if percent - last_percent >= 1.0 || percent >= 45.0 {
+                emit(progress, id, "downloading", percent);
+                last_percent = percent;
+            }
+        }
+        if received != *part_bytes {
+            return Err(AppError::new(
+                "AI_COMPONENT_DOWNLOAD_FAILED",
+                "媒体组件分片大小不匹配",
+            ));
+        }
+    }
+    if downloaded_bytes != expected_bytes {
+        return Err(AppError::new(
+            "AI_COMPONENT_DOWNLOAD_FAILED",
+            "媒体组件分片大小不匹配",
+        ));
+    }
+    file.flush().map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法写入组件下载文件", error.to_string())
+    })?;
+    file.sync_all().map_err(|error| {
+        AppError::with_cause("AI_COMPONENT_IO", "无法同步组件下载文件", error.to_string())
+    })?;
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 fn sha256_file(path: &Path) -> Result<String, AppError> {
@@ -915,7 +1091,24 @@ fn publish_atomically(
     Ok(())
 }
 
+fn archive_looks_like_zip(archive: &Path) -> bool {
+    // Downloads are stored as `{id}.part`, so the local extension is not a
+    // reliable archive type. Detect ZIP by magic to support Windows runtimes.
+    let mut file = match File::open(archive) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut magic = [0u8; 4];
+    match file.read_exact(&mut magic) {
+        Ok(()) => matches!(&magic, b"PK\x03\x04" | b"PK\x05\x06" | b"PK\x07\x08"),
+        Err(_) => false,
+    }
+}
+
 fn extract_archive(archive: &Path, destination: &Path) -> Result<(), AppError> {
+    if archive_looks_like_zip(archive) {
+        return extract_zip(archive, destination);
+    }
     let listing = Command::new(tar_program())
         .args(["-tf", &archive.to_string_lossy()])
         .output()
@@ -937,7 +1130,7 @@ fn extract_archive(archive: &Path, destination: &Path) -> Result<(), AppError> {
         if name.is_empty() {
             continue;
         }
-        if name.starts_with('/') || name.split('/').any(|part| part == "..") {
+        if !archive_member_is_safe(name) {
             return Err(AppError::new(
                 "AI_COMPONENT_EXTRACT_FAILED",
                 "组件归档包含非法路径",
@@ -1064,15 +1257,125 @@ fn verify_entrypoint(root: &Path, entrypoint: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn run_self_test(entrypoint: &Path) -> Result<(), AppError> {
+fn archive_member_is_safe(name: &str) -> bool {
+    let normalized = name.replace('\\', "/");
+    !normalized.is_empty()
+        && !normalized.starts_with('/')
+        && !normalized.split('/').any(|part| part == "..")
+}
+
+#[cfg(windows)]
+fn is_windows_executable(entrypoint: &Path) -> bool {
+    entrypoint
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+}
+
+fn zip_entry_is_symlink(entry: &zip::read::ZipFile<'_>) -> bool {
+    entry
+        .unix_mode()
+        .is_some_and(|mode| mode & 0o170000 == 0o120000)
+}
+
+fn extract_zip(archive: &Path, destination: &Path) -> Result<(), AppError> {
+    let file = File::open(archive).map_err(|error| {
+        AppError::with_cause(
+            "AI_COMPONENT_EXTRACT_FAILED",
+            "无法读取组件归档",
+            error.to_string(),
+        )
+    })?;
+    let mut zip = zip::ZipArchive::new(file)
+        .map_err(|_| AppError::new("AI_COMPONENT_EXTRACT_FAILED", "组件归档无法读取"))?;
+    for index in 0..zip.len() {
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|_| AppError::new("AI_COMPONENT_EXTRACT_FAILED", "组件归档无法读取"))?;
+        let Some(relative) = entry.enclosed_name() else {
+            return Err(AppError::new(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "组件归档包含非法路径",
+            ));
+        };
+        if !archive_member_is_safe(&relative.to_string_lossy()) {
+            return Err(AppError::new(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "组件归档包含非法路径",
+            ));
+        }
+        let out_path = destination.join(relative);
+        if !out_path.starts_with(destination) {
+            return Err(AppError::new(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "组件归档包含非法路径",
+            ));
+        }
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path).map_err(|error| {
+                AppError::with_cause(
+                    "AI_COMPONENT_EXTRACT_FAILED",
+                    "无法解压组件归档",
+                    error.to_string(),
+                )
+            })?;
+            continue;
+        }
+        if zip_entry_is_symlink(&entry) {
+            return Err(AppError::new(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "组件归档包含非法路径",
+            ));
+        }
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| {
+                AppError::with_cause(
+                    "AI_COMPONENT_EXTRACT_FAILED",
+                    "无法解压组件归档",
+                    error.to_string(),
+                )
+            })?;
+        }
+        let mut output = File::create(&out_path).map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "无法解压组件归档",
+                error.to_string(),
+            )
+        })?;
+        io::copy(&mut entry, &mut output).map_err(|error| {
+            AppError::with_cause(
+                "AI_COMPONENT_EXTRACT_FAILED",
+                "无法解压组件归档",
+                error.to_string(),
+            )
+        })?;
+    }
+    contain_extracted_tree(destination)
+}
+
+fn should_run_self_test(entrypoint: &Path) -> Result<bool, AppError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let metadata = fs::metadata(entrypoint)
             .map_err(|_| AppError::new("AI_COMPONENT_SELF_TEST_FAILED", "无法读取组件入口"))?;
-        if metadata.permissions().mode() & 0o111 == 0 {
-            return Ok(());
-        }
+        Ok(metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(windows)]
+    {
+        Ok(is_windows_executable(entrypoint))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = entrypoint;
+        Ok(false)
+    }
+}
+
+fn run_self_test(entrypoint: &Path) -> Result<(), AppError> {
+    if !should_run_self_test(entrypoint)? {
+        return Ok(());
     }
     let output = Command::new(entrypoint)
         .arg("--self-test")
@@ -1086,6 +1389,33 @@ fn run_self_test(entrypoint: &Path) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod archive_kind_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn part_files_are_detected_by_zip_magic_not_extension() {
+        // Production mutation caught: inspecting only the `.zip` extension after
+        // the installer saved the archive as `{id}.part`.
+        let root = std::env::temp_dir().join(format!(
+            "hongguo-zip-magic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let part = root.join("runtime.part");
+        fs::write(&part, b"PK\x03\x04xxxx").unwrap();
+        assert!(archive_looks_like_zip(&part));
+        fs::write(&part, b"\x1f\x8bgzip-header").unwrap();
+        assert!(!archive_looks_like_zip(&part));
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(unix)]
@@ -1103,6 +1433,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::{
+        collections::HashMap,
         fs,
         io::{Read, Write},
         net::TcpListener,
@@ -1282,6 +1613,73 @@ mod tests {
             }
         }
 
+        fn serve_routes(routes: Vec<(String, Vec<u8>)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("loopback mock should bind");
+            listener
+                .set_nonblocking(true)
+                .expect("loopback mock should be nonblocking");
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let in_flight = Arc::new(AtomicUsize::new(0));
+            let max_in_flight = Arc::new(AtomicUsize::new(0));
+            let shutdown = Arc::new(Mutex::new(false));
+            let bodies: HashMap<String, Vec<u8>> = routes.into_iter().collect();
+            let thread = thread::spawn({
+                let requests = requests.clone();
+                let in_flight = in_flight.clone();
+                let max_in_flight = max_in_flight.clone();
+                let shutdown = shutdown.clone();
+                move || loop {
+                    if *shutdown.lock().unwrap() {
+                        break;
+                    }
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            requests.fetch_add(1, Ordering::SeqCst);
+                            let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                            max_in_flight.fetch_max(current, Ordering::SeqCst);
+                            let mut buf = [0u8; 1024];
+                            let n = stream.read(&mut buf).unwrap_or(0);
+                            let request = String::from_utf8_lossy(&buf[..n]);
+                            let path = request
+                                .lines()
+                                .next()
+                                .and_then(|line| line.split_whitespace().nth(1))
+                                .unwrap_or("/")
+                                .split('?')
+                                .next()
+                                .unwrap_or("/")
+                                .to_string();
+                            if let Some(body) = bodies.get(&path) {
+                                let header = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(header.as_bytes());
+                                let _ = stream.write_all(body);
+                            } else {
+                                let header = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                let _ = stream.write_all(header.as_bytes());
+                            }
+                            let _ = stream.flush();
+                            in_flight.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self {
+                url: format!("http://127.0.0.1:{port}"),
+                requests,
+                max_in_flight,
+                shutdown,
+                thread: Some(thread),
+            }
+        }
+
         fn request_count(&self) -> usize {
             self.requests.load(Ordering::SeqCst)
         }
@@ -1440,6 +1838,108 @@ mod tests {
         );
         assert!(manager.installed_version("runtime").is_none());
         assert!(!fixture.root.join("runtime/1").exists());
+    }
+
+    #[test]
+    fn zip_part_file_without_zip_extension_extracts() {
+        // Production mutation caught: saving downloads as `{id}.part` and then
+        // only treating files whose local extension is `.zip` as zip archives.
+        let fixture = Fixture::new();
+        let source = fixture.root.join("zip-src/hongguo-ai-worker");
+        fs::create_dir_all(&source).unwrap();
+        let entry = source.join("hongguo-ai-worker");
+        fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        let archive = fixture.root.join("runtime.zip");
+        let status = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import zipfile; z=zipfile.ZipFile(r'{path}', 'w'); z.write(r'{entry}', 'hongguo-ai-worker/hongguo-ai-worker'); z.close()",
+                    path = archive.display(),
+                    entry = entry.display(),
+                ),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let part = fixture.root.join("runtime.part");
+        fs::copy(&archive, &part).unwrap();
+        assert!(archive_looks_like_zip(&part));
+        let destination = fixture.root.join("extracted");
+        fs::create_dir_all(&destination).unwrap();
+        extract_archive(&part, &destination).unwrap();
+        assert!(destination
+            .join("hongguo-ai-worker/hongguo-ai-worker")
+            .is_file());
+    }
+
+    #[test]
+    fn zip_runtime_archive_installs_without_using_tar() {
+        // Production mutation caught: Windows runtime zips failing because extract
+        // always shells out to tar and cannot read Compress-Archive members.
+        let fixture = Fixture::new();
+        let source = fixture.root.join("zip-src/hongguo-ai-worker");
+        fs::create_dir_all(&source).unwrap();
+        let entry = source.join("hongguo-ai-worker");
+        fs::write(&entry, b"#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(&entry, fs::Permissions::from_mode(0o755)).unwrap();
+        let archive = fixture.root.join("runtime.zip");
+        let status = Command::new("python3")
+            .args([
+                "-c",
+                &format!(
+                    "import zipfile; z=zipfile.ZipFile(r'{path}', 'w'); z.write(r'{entry}', 'hongguo-ai-worker/hongguo-ai-worker'); z.close()",
+                    path = archive.display(),
+                    entry = entry.display(),
+                ),
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let bytes = fs::read(&archive).unwrap();
+        let sha = sha256_hex(&bytes);
+        let manager = fixture.manager_with(
+            &sha,
+            "https://example.invalid/runtime.zip",
+            "hongguo-ai-worker/hongguo-ai-worker",
+            bytes.len() as u64,
+        );
+        let status = manager
+            .install_bytes("runtime", &bytes, &sha, |_| {})
+            .unwrap();
+        assert!(status.installed);
+        assert!(fixture
+            .root
+            .join("runtime/1/hongguo-ai-worker/hongguo-ai-worker")
+            .is_file());
+    }
+
+    #[test]
+    fn non_executable_model_entrypoint_skips_self_test() {
+        // Production mutation caught: executing model weights/YAML with --self-test.
+        let fixture = Fixture::new();
+        let source = fixture.root.join("model-src");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("htdemucs.yaml"), b"name: htdemucs\n").unwrap();
+        let archive = fixture.root.join("model.tar");
+        assert!(Command::new("/usr/bin/tar")
+            .current_dir(&source)
+            .args(["-cf", &archive.to_string_lossy(), "htdemucs.yaml"])
+            .status()
+            .unwrap()
+            .success());
+        let bytes = fs::read(&archive).unwrap();
+        let sha = sha256_hex(&bytes);
+        let manager = fixture.manager_with(
+            &sha,
+            "https://example.invalid/model.tar",
+            "htdemucs.yaml",
+            bytes.len() as u64,
+        );
+        let status = manager
+            .install_bytes("runtime", &bytes, &sha, |_| {})
+            .unwrap();
+        assert!(status.installed);
     }
 
     #[test]
@@ -1718,6 +2218,77 @@ mod tests {
 
         assert!(status.installed);
         assert_eq!(server.request_count(), 0);
+    }
+
+    #[test]
+    fn multipart_release_installs_by_concatenating_http_parts() {
+        // Production mutation caught: downloading only release.url when GitHub
+        // requires the Windows runtime zip to be split under the 2GB asset limit.
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        assert!(good.len() > 4, "archive should be large enough to split");
+        let split_at = good.len() / 2;
+        let first = good[..split_at].to_vec();
+        let second = good[split_at..].to_vec();
+        let server = MockHttp::serve_routes(vec![
+            ("/runtime.tar.001".into(), first.clone()),
+            ("/runtime.tar.002".into(), second.clone()),
+        ]);
+        let manifest = json!({
+            "version": 1,
+            "platform": "aarch64-apple-darwin",
+            "components": [{
+                "id": "runtime",
+                "version": "1",
+                "platform": "aarch64-apple-darwin",
+                "url": format!("{}/runtime.tar", server.url),
+                "sha256": sha,
+                "downloadBytes": good.len() as u64,
+                "installedBytes": good.len() as u64,
+                "entrypoint": "hongguo-ai",
+                "parts": [
+                    {"url": format!("{}/runtime.tar.001", server.url), "bytes": first.len() as u64},
+                    {"url": format!("{}/runtime.tar.002", server.url), "bytes": second.len() as u64}
+                ]
+            }]
+        });
+        let manager =
+            ComponentManager::from_manifest_json(&fixture.root, &manifest.to_string()).unwrap();
+        let status = manager.install("runtime", |_| {}).unwrap();
+        assert!(status.installed);
+        assert_eq!(server.request_count(), 2);
+        assert_eq!(
+            fs::read(fixture.root.join("runtime/1/hongguo-ai")).unwrap()[..2],
+            b"#!"[..]
+        );
+    }
+
+    #[test]
+    fn multipart_bytes_must_sum_to_download_bytes() {
+        // Production mutation caught: accepting a split manifest whose parts
+        // do not reconstruct the advertised complete archive size.
+        let json = json!({
+            "version": 1,
+            "platform": "aarch64-apple-darwin",
+            "components": [{
+                "id": "runtime",
+                "version": "1",
+                "platform": "aarch64-apple-darwin",
+                "url": "https://example.invalid/runtime.tar",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "downloadBytes": 10,
+                "installedBytes": 10,
+                "entrypoint": "hongguo-ai",
+                "parts": [
+                    {"url": "https://example.invalid/runtime.tar.001", "bytes": 6},
+                    {"url": "https://example.invalid/runtime.tar.002", "bytes": 5}
+                ]
+            }]
+        });
+        assert_eq!(
+            parse_manifest(&json.to_string()).unwrap_err().code,
+            "AI_COMPONENT_MANIFEST_INVALID"
+        );
     }
 
     #[test]

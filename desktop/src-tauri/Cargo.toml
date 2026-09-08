@@ -1,6 +1,6 @@
 [package]
 name = "hongguo-desktop"
-version = "0.1.11"
+version = "0.1.12"
 description = "Desktop downloader for Hongguo / Fanqie short dramas"
 authors = ["edking"]
 edition = "2021"
@@ -25,6 +25,7 @@ tauri-plugin-shell = "=2.3.3"
 libc = "=0.2.175"
 sha2 = "0.10"
 url = "2"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 atomicwrites = "0.4.4"
 base64 = "0.22"
 bytes = "1"

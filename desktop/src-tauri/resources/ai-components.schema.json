@@ -22,7 +22,20 @@
           "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
           "downloadBytes": { "type": "integer", "minimum": 1 },
           "installedBytes": { "type": "integer", "minimum": 1 },
-          "entrypoint": { "type": "string", "pattern": "^[A-Za-z0-9._][A-Za-z0-9._/-]*$" }
+          "entrypoint": { "type": "string", "pattern": "^[A-Za-z0-9._][A-Za-z0-9._/-]*$" },
+          "parts": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url", "bytes"],
+              "properties": {
+                "url": { "type": "string", "pattern": "^https://" },
+                "bytes": { "type": "integer", "minimum": 1 }
+              }
+            }
+          }
         }
       }
     }

@@ -1291,7 +1291,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut bytes = [0; 4096];
-            socket.read(&mut bytes).await.unwrap();
+            assert!(socket.read(&mut bytes).await.unwrap() > 0);
             received.send(()).unwrap();
             std::future::pending::<()>().await;
             drop(socket);

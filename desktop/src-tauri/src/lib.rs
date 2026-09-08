@@ -442,6 +442,18 @@ mod tests {
     }
 
     #[test]
+    fn component_install_work_runs_off_the_calling_thread() {
+        // Production mutation caught: running download, hashing, extraction, or
+        // self-test work synchronously in the Tauri command handler.
+        let calling_thread = thread::current().id();
+        let worker_thread =
+            tauri::async_runtime::block_on(run_component_install(|| Ok(thread::current().id())))
+                .expect("component operation should complete");
+
+        assert_ne!(calling_thread, worker_thread);
+    }
+
+    #[test]
     fn final_download_name_uses_actual_definition() {
         let path = download_destination(Path::new("/tmp/剧名"), "第 1 集", "1080p");
 
@@ -775,6 +787,14 @@ where
         .map_err(|error| err(format!("后台任务失败: {error}")))?
 }
 
+async fn run_component_install<T, F>(operation: F) -> AppResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> AppResult<T> + Send + 'static,
+{
+    run_blocking(operation).await
+}
+
 #[tauri::command]
 async fn api_get(state: State<'_, AppState>, path: String) -> AppResult<Value> {
     let client = state.client.clone();
@@ -1045,20 +1065,24 @@ fn get_ai_components(state: State<AppState>) -> AppResult<Vec<ComponentStatus>> 
 }
 
 #[tauri::command]
-fn install_ai_component(
+async fn install_ai_component(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     id: String,
 ) -> AppResult<ComponentStatus> {
     let manager = ai_components(&state)?;
-    manager.install(&id, |progress| {
-        let _ = app.emit(AI_COMPONENT_PROGRESS_EVENT, progress);
+    run_component_install(move || {
+        manager.install(&id, |progress| {
+            let _ = app.emit(AI_COMPONENT_PROGRESS_EVENT, progress);
+        })
     })
+    .await
 }
 
 #[tauri::command]
-fn remove_ai_component(state: State<AppState>, id: String) -> AppResult<()> {
-    ai_components(&state)?.remove(&id)
+async fn remove_ai_component(state: State<'_, AppState>, id: String) -> AppResult<()> {
+    let manager = ai_components(&state)?;
+    run_blocking(move || manager.remove(&id)).await
 }
 
 #[tauri::command]

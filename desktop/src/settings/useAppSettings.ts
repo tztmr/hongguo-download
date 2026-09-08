@@ -179,6 +179,9 @@ export function useAppSettings(
 
   const installComponent = useCallback(async (id: string) => {
     if (!dependencies.installAiComponent) return;
+    setComponents((current) => current.map((item) => (
+      item.id === id ? { ...item, stage: "checking", percent: 5 } : item
+    )));
     try {
       const next = await dependencies.installAiComponent(id);
       setComponents((current) => {
@@ -189,6 +192,9 @@ export function useAppSettings(
         return copy;
       });
     } catch (error) {
+      setComponents((current) => current.map((item) => (
+        item.id === id ? { ...item, stage: "failed", percent: 100 } : item
+      )));
       setWarning(errorMessage(error));
       throw error;
     }

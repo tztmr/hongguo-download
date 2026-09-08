@@ -53,6 +53,45 @@ describe("useAppSettings", () => {
     expect(result.current.components[0]).toMatchObject({ stage: "downloading", percent: 42 });
   });
 
+  it("marks a component as checking before the native install resolves", async () => {
+    const component: AIComponentStatus = {
+      id: "runtime",
+      version: "1",
+      installed: false,
+      installedVersion: null,
+      installedPath: null,
+      downloadBytes: 1024,
+      installedBytes: 2048,
+      inUse: false,
+    };
+    const installed: AIComponentStatus = {
+      ...component,
+      installed: true,
+      installedVersion: "1",
+      installedPath: "/AppData/components/runtime/1",
+    };
+    let release: ((value: AIComponentStatus) => void) | undefined;
+    const pending = new Promise<AIComponentStatus>((resolve) => {
+      release = resolve;
+    });
+    const deps = dependencies({
+      getAiComponents: vi.fn(async () => [component]),
+      installAiComponent: vi.fn(() => pending),
+    });
+    const { result } = renderHook(() => useAppSettings(deps));
+    await waitFor(() => expect(result.current.components).toHaveLength(1));
+
+    act(() => {
+      void result.current.installComponent("runtime");
+    });
+    await waitFor(() => expect(result.current.components[0]?.stage).toBe("checking"));
+
+    await act(async () => {
+      release?.(installed);
+    });
+    await waitFor(() => expect(result.current.components[0]?.installed).toBe(true));
+  });
+
   it("installs and removes components while preserving the returned path", async () => {
     const installed: AIComponentStatus = {
       id: "runtime",

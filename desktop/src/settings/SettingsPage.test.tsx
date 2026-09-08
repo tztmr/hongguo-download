@@ -126,6 +126,36 @@ describe("SettingsPage", () => {
     confirm.mockRestore();
   });
 
+  it("keeps settings interactive after confirming a selected component download", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    let finish: (() => void) | undefined;
+    const installComponent = vi.fn(() => new Promise<void>((resolve) => {
+      finish = resolve;
+    }));
+    const settings = model({
+      components: [{
+        id: "runtime",
+        version: "1",
+        installed: false,
+        installedVersion: null,
+        installedPath: null,
+        downloadBytes: 1024,
+        installedBytes: 2048,
+        inUse: false,
+      }],
+      installComponent,
+    });
+    const view = render(<SettingsPage model={settings} />);
+    fireEvent.click(view.getByRole("checkbox", { name: "选择 runtime 下载" }));
+    fireEvent.click(view.getByRole("button", { name: /下载选中组件/ }));
+    await waitFor(() => expect(view.getByText("下载中…")).toBeTruthy());
+    expect((view.getByRole("button", { name: "下载中…" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((view.getByRole("radio", { name: /自动最高/ }) as HTMLInputElement).disabled).toBe(false);
+    finish?.();
+    await waitFor(() => expect(installComponent).toHaveBeenCalledWith("runtime"));
+    confirm.mockRestore();
+  });
+
   it("downloads only the components selected in settings", async () => {
     const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
     const installComponent = vi.fn(async (_id: string): Promise<void> => undefined);
