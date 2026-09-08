@@ -693,6 +693,11 @@ impl MediaJobService {
         }
         let mut validated = validate_merge_request(&request)?;
         validated.conflict_policy = MergeConflictPolicy::FailIfExists;
+        // An already-awake worker may claim this job before wake_worker(). Hold
+        // its claim lock until the persisted queued snapshot has been emitted.
+        let _publication = self.running.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
         let job = self.manager.enqueue_merge(validated)?;
         safe_emit(&self.event_sink, job.clone());
         self.wake_worker();
@@ -705,6 +710,9 @@ impl MediaJobService {
         kind: MediaJobKind,
     ) -> Result<MediaJob, AppError> {
         let validated = validate_ai_request(&request, kind)?;
+        let _publication = self.running.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
         let job = self.manager.enqueue_ai(validated)?;
         safe_emit(&self.event_sink, job.clone());
         self.wake_worker();
@@ -853,11 +861,15 @@ impl MediaJobService {
     }
 
     pub fn retry(&self, job_id: &str) -> Result<MediaJob, AppError> {
+        // Keep the same lock order as start_merge: request validation, then claim.
+        let _request_guard = self.merge_request_lock.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
+        let _publication = self.running.lock().map_err(|_| {
+            AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
+        })?;
         let original_job = self.manager.job(job_id)?;
         let job = if original_job.kind == MediaJobKind::Merge {
-            let _guard = self.merge_request_lock.lock().map_err(|_| {
-                AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
-            })?;
             let original = self.manager.merge_request(job_id)?;
             if self.has_merged_video(&original.series_root)? {
                 return Err(AppError::new(
@@ -2232,6 +2244,9 @@ mod tests {
             .unwrap();
         wait_for_job(&service, &second.id, MediaJobStatus::Completed);
 
+        // Completion is persisted before its event is delivered. Join the worker
+        // before inspecting the final callback instead of racing that callback.
+        drop(service);
         let events = sink.jobs.lock().unwrap().clone();
         assert_eq!(sink.violations.load(Ordering::SeqCst), 0);
         for event in &events {
