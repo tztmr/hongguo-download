@@ -5,6 +5,7 @@ import inspect
 import os
 import stat
 import wave
+from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
@@ -47,11 +48,18 @@ def _demucs_separator(
     from demucs.apply import apply_model
     from demucs.audio import convert_audio
     from demucs.pretrained import get_model
+    from demucs.htdemucs import HTDemucs
 
     # Load once in-process: re-executing a frozen worker would re-enter its CLI.
     # Only library prose is redirected; our progress must reach the JSON pipe.
     with open(os.devnull, "w", encoding="utf-8") as sink:
-        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+        # Torch >= 2.6 defaults to restricted checkpoint loading. These are the
+        # exact additional types in the shipped htdemucs / htdemucs_ft weights;
+        # keep the restriction and scope the allowlist to this model load.
+        model_types = [HTDemucs, Fraction, np.dtype, np.core.multiarray.scalar,
+                       type(np.dtype(np.float64))]
+        with (contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink),
+              torch.serialization.safe_globals(model_types)):
             network = get_model(model, repo=model_root)
     network.cpu()
     network.eval()

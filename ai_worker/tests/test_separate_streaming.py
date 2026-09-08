@@ -1,5 +1,6 @@
 """Streaming regressions; run with requirements-ai.txt installed."""
 import importlib.util
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,30 @@ from ai_worker.separate import _demucs_separator
 
 @unittest.skipUnless(importlib.util.find_spec("demucs"), "requires AI dependencies")
 class StreamingSeparationTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("HONGGUO_TEST_DEMUCS_MODEL"), "requires packaged Demucs weights")
+    def test_real_model_with_restricted_torch_loading(self):
+        import torch
+        import soundfile as sf
+        import numpy as np
+
+        original_load = torch.load
+
+        def restricted_load(*args, **kwargs):
+            # Reproduce the Torch >= 2.6 default even with the macOS 2.5 runtime.
+            self.assertNotEqual(kwargs.get("weights_only"), False)
+            kwargs["weights_only"] = True
+            return original_load(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory(prefix="中文 分离测试 ") as directory:
+            root = Path(directory)
+            source = root / "输入.wav"
+            sf.write(source, np.sin(np.arange(16000) * 0.08) * 0.2, 16000)
+            with patch("torch.load", side_effect=restricted_load):
+                outputs = _demucs_separator(source, root, "htdemucs", "cpu",
+                                            Path(os.environ["HONGGUO_TEST_DEMUCS_MODEL"]))
+            for output in outputs:
+                self.assertAlmostEqual(sf.info(output).duration, 1.0, places=2)
+
     def setUp(self):
         import numpy as np
         import soundfile as sf

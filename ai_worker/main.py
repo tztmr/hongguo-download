@@ -67,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_event(safe_error(WorkerError("AI_REQUEST_INVALID", "AI 请求不是有效 JSON")))
         return 2
     except BaseException as error:
+        logging.exception("AI worker execution failed")
         emit_event(safe_error(error))
         return 2
 

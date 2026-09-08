@@ -22,16 +22,20 @@ try {
     if (-not (Test-Path $Worker -PathType Leaf)) { throw "PyInstaller did not produce the AI worker" }
     & $Worker --self-test | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "AI worker self test failed" }
+    & $VenvPython (Join-Path $ProjectRoot "scripts/verify-ai-runtime.py") --worker $Worker
+    if ($LASTEXITCODE -ne 0) { throw "Frozen AI worker separation smoke test failed" }
     New-Item -ItemType Directory -Force $OutputDirectory | Out-Null
     $Archive = Join-Path $OutputDirectory "hongguo-ai-runtime-windows-$Flavor.zip"
     Compress-Archive -Path (Join-Path $Temporary "dist/hongguo-ai-worker") -DestinationPath $Archive -Force
-    [pscustomobject]@{
+    $Metadata = [pscustomobject]@{
         Flavor = $Flavor
         Archive = (Resolve-Path $Archive).Path
         Sha256 = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
         DownloadBytes = (Get-Item $Archive).Length
         InstalledBytes = (Get-ChildItem (Join-Path $Temporary "dist/hongguo-ai-worker") -File -Recurse | Measure-Object Length -Sum).Sum
     } | ConvertTo-Json
+    $Metadata | Set-Content -Encoding utf8 (Join-Path $OutputDirectory "hongguo-ai-runtime-windows-$Flavor.json")
+    $Metadata
 }
 finally {
     Remove-Item -Recurse -Force $Temporary -ErrorAction SilentlyContinue

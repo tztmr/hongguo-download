@@ -29,6 +29,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: hongguo-ai-runtime-windows-${{ matrix.flavor }}
-          path: dist/ai-components/hongguo-ai-runtime-windows-${{ matrix.flavor }}.zip
+          path: dist/ai-components/hongguo-ai-runtime-windows-${{ matrix.flavor }}.*
+          compression-level: 0
           if-no-files-found: error
           retention-days: 14
