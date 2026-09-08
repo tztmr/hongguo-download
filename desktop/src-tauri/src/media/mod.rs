@@ -656,11 +656,6 @@ impl MediaJobService {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn manager(&self) -> Arc<MediaJobManager> {
-        self.manager.clone()
-    }
-
     pub fn start_merge(&self, request: StartMergeRequest) -> Result<MediaJob, AppError> {
         let _guard = self.merge_request_lock.lock().map_err(|_| {
             AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
@@ -1962,33 +1957,42 @@ mod tests {
         // Production mutation caught: retrying stale files or bypassing active dedupe protection.
         let fixture = MergeFixture::new();
         let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let input = fixture.write_input("retry-dedupe.mp4", b"retry-dedupe");
+        let request = fixture.request("book-retry-dedupe", vec![input.clone()]);
+        let validated = validate_merge_request(&request).unwrap();
+        let failed = manager.enqueue_merge(validated.clone()).unwrap();
+        manager
+            .update(&failed.id, MediaJobTransition::Start)
+            .unwrap();
+        manager
+            .update(
+                &failed.id,
+                MediaJobTransition::Fail {
+                    code: "TEST".into(),
+                    message: "test".into(),
+                },
+            )
+            .unwrap();
+        let active = manager.enqueue_merge(validated).unwrap();
+        manager.pause_queued(&active.id).unwrap();
+
         let service = MediaJobService::new(
-            manager,
+            manager.clone(),
             Arc::new(ErrorExecutor),
             Arc::new(RecordingSink::default()),
         );
-        let input = fixture.write_input("retry-dedupe.mp4", b"retry-dedupe");
-        let request = fixture.request("book-retry-dedupe", vec![input.clone()]);
-        let failed = service.start_merge(request.clone()).unwrap();
-        wait_for_job(&service, &failed.id, MediaJobStatus::Failed);
-
-        let active_manager = service.manager();
-        let active = validate_merge_request(&request).unwrap();
-        active_manager.enqueue_merge(active).unwrap();
         assert_eq!(
             service.retry(&failed.id).unwrap_err().code,
             "MEDIA_JOB_ALREADY_ACTIVE"
         );
 
-        active_manager
-            .update(
-                &active_manager.snapshot().jobs[1].id,
-                MediaJobTransition::Start,
-            )
+        manager.resume_queued(&active.id).unwrap();
+        manager
+            .update(&active.id, MediaJobTransition::Start)
             .unwrap();
-        active_manager
+        manager
             .update(
-                &active_manager.snapshot().jobs[1].id,
+                &active.id,
                 MediaJobTransition::Fail {
                     code: "TEST".into(),
                     message: "test".into(),
