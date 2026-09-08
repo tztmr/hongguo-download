@@ -4,52 +4,52 @@
   "components": [
     {
       "id": "runtime-modern",
-      "version": "2",
+      "version": "3",
       "platform": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v2/hongguo-ai-runtime-windows-modern.zip",
-      "sha256": "2228c62de502ca55adf85f95692bcaedca618cb45a209aa39a3dbca4228235c9",
-      "downloadBytes": 3409589766,
-      "installedBytes": 6028991566,
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v3/hongguo-ai-runtime-windows-modern.zip",
+      "sha256": "080a3c1f2ed188487420a3c0d905888a02aa7cce4dd3d9c726dc893c5bf1b433",
+      "downloadBytes": 3409590456,
+      "installedBytes": 6028992229,
       "entrypoint": "hongguo-ai-worker/hongguo-ai-worker.exe",
       "parts": [
         {
-          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v2/hongguo-ai-runtime-windows-modern.zip.001",
+          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v3/hongguo-ai-runtime-windows-modern.zip.001",
           "bytes": 2000000000
         },
         {
-          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v2/hongguo-ai-runtime-windows-modern.zip.002",
-          "bytes": 1409589766
+          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v3/hongguo-ai-runtime-windows-modern.zip.002",
+          "bytes": 1409590456
         }
       ]
     },
     {
       "id": "runtime-legacy",
-      "version": "2",
+      "version": "3",
       "platform": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v2/hongguo-ai-runtime-windows-legacy.zip",
-      "sha256": "573e1b319e97fed3436d28a31a41557651a72a0a8e887c73069f48b11a26aab2",
-      "downloadBytes": 2579900000,
-      "installedBytes": 4790607575,
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v3/hongguo-ai-runtime-windows-legacy.zip",
+      "sha256": "620431ec9877ecd279c8a66fa0ebfa0e971c2213ea7ac76a31dce37cbfe751c9",
+      "downloadBytes": 2579901675,
+      "installedBytes": 4790608238,
       "entrypoint": "hongguo-ai-worker/hongguo-ai-worker.exe",
       "parts": [
         {
-          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v2/hongguo-ai-runtime-windows-legacy.zip.001",
+          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v3/hongguo-ai-runtime-windows-legacy.zip.001",
           "bytes": 2000000000
         },
         {
-          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v2/hongguo-ai-runtime-windows-legacy.zip.002",
-          "bytes": 579900000
+          "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v3/hongguo-ai-runtime-windows-legacy.zip.002",
+          "bytes": 579901675
         }
       ]
     },
     {
       "id": "runtime-cpu",
-      "version": "2",
+      "version": "3",
       "platform": "x86_64-pc-windows-msvc",
-      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v2/hongguo-ai-runtime-windows-cpu.zip",
-      "sha256": "a213f0600042d8e004c951ce8869467f2173dae6219088596b8ce8b3acc6ebf7",
-      "downloadBytes": 326295898,
-      "installedBytes": 1451665434,
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v3/hongguo-ai-runtime-windows-cpu.zip",
+      "sha256": "791331421ccd07bc66b4aad33916d69cbb51096aedf59536664be4268fa85e81",
+      "downloadBytes": 326296279,
+      "installedBytes": 1451666097,
       "entrypoint": "hongguo-ai-worker/hongguo-ai-worker.exe"
     },
     {

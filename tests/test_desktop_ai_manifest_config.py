@@ -46,9 +46,9 @@ class DesktopAIManifestConfigTest(unittest.TestCase):
                 self.assertNotEqual(item["sha256"], "0" * 64)
                 self.assertGreater(item["downloadBytes"], 1024 * 1024)
                 self.assertGreater(item["installedBytes"], item["downloadBytes"])
-                self.assertEqual(item["version"], "2")
+                self.assertEqual(item["version"], "3")
                 self.assertIn(
-                    "/releases/download/windows-components-v2/", item["url"]
+                    "/releases/download/windows-components-v3/", item["url"]
                 )
                 parts = item.get("parts") or []
                 github_file_limit = 2_000_000_000
@@ -61,7 +61,7 @@ class DesktopAIManifestConfigTest(unittest.TestCase):
                         self.assertGreater(part["bytes"], 0)
                         self.assertLessEqual(part["bytes"], github_file_limit)
                         self.assertIn(
-                            "/releases/download/windows-components-v2/",
+                            "/releases/download/windows-components-v3/",
                             part["url"],
                         )
                         self.assertTrue(
@@ -80,4 +80,3 @@ class DesktopAIManifestConfigTest(unittest.TestCase):
         self.assertIn("async fn install_ai_component(", source)
         self.assertIn("run_component_install(move ||", source)
         self.assertIn("async fn remove_ai_component(", source)
-
