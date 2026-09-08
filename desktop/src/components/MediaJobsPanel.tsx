@@ -59,7 +59,7 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
   return (
     <section className="media-workspace" aria-label="媒体处理">
       <div className="media-overview">
-        <div><h2>媒体处理</h2><p>合并剧集、分离音轨与提取字幕，进度和结果集中查看。</p></div>
+        <div><h2>媒体处理</h2><p>背景音乐分离按 CPU / GPU 资源自动调度，最多同时处理 5 个任务。</p></div>
         <button type="button" className="secondary-button" onClick={onShowDownloads}><QueueIcon />从下载任务创建</button>
       </div>
       <div className="media-toolbar">
@@ -72,7 +72,9 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
       <div className="media-job-list media-task-cards">
         {!visible.length ? <div className="download-empty"><div className="empty-download-icon"><QueueIcon size={26} /></div><h3>{media.jobs.length ? "没有匹配的媒体任务" : "还没有媒体任务"}</h3><p>{media.jobs.length ? "试试其他状态或搜索关键词" : "先完成剧集下载，再选择合并视频、分离背景音乐或提取字幕。"}</p>{media.jobs.length ? <button type="button" className="secondary-button" onClick={() => { setFilter("all"); setQuery(""); }}>清除筛选</button> : <button type="button" className="primary-button" onClick={onShowDownloads}>查看下载任务</button>}</div> : visible.map((job) => {
           const percent = job.status === "completed" ? 100 : Math.round(Number.isFinite(job.percent) ? Math.max(0, Math.min(100, job.percent)) : 0);
-          const stage = job.stage.replace(/\b[a-zA-Z]+\b/g, (word) => stages[word] || word);
+          const stage = job.kind === "separateBackgroundMusic" && job.status === "queued"
+            ? "等待队列与可用计算资源"
+            : job.stage.replace(/\b[a-zA-Z]+\b/g, (word) => stages[word] || word);
           const uploadSource = job.kind === "separateBackgroundMusic" && job.status === "completed" && job.aiRequest?.scope === "merged"
             ? job.outputs?.find((output) => output.kind === "noBackgroundMusicVideo")?.path
             : undefined;

@@ -1,6 +1,6 @@
 [package]
 name = "hongguo-desktop"
-version = "0.1.17"
+version = "0.1.18"
 description = "Desktop downloader for Hongguo / Fanqie short dramas"
 authors = ["edking"]
 edition = "2021"
@@ -38,6 +38,7 @@ keyring = { version = "3.6.3", default-features = false }
 subtle = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time", "sync"] }
 tauri-plugin-opener = "2"
+sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }

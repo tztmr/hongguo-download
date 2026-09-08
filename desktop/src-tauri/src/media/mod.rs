@@ -12,6 +12,7 @@ pub mod process_control;
 #[cfg(windows)]
 #[path = "process_control_windows.rs"]
 pub mod process_control;
+pub mod scheduling;
 pub mod storage;
 pub mod tools;
 
@@ -37,7 +38,7 @@ pub use tools::MediaTools;
 
 use crate::AppError;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Component, Path, PathBuf},
@@ -46,7 +47,7 @@ use std::{
         mpsc, Arc, Mutex,
     },
     thread::{self, JoinHandle},
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 
 pub fn validate_merge_request(
@@ -513,6 +514,20 @@ pub struct AIExecutionResult {
 }
 
 pub trait AIExecutor: Send + Sync + 'static {
+    fn scheduling_device(&self, request: &ValidatedAIJobRequest) -> String {
+        request.device.clone()
+    }
+
+    fn execute_with_budget(
+        &self,
+        request: ValidatedAIJobRequest,
+        cancellation: &CancellationToken,
+        progress: &mut dyn FnMut(MergeProgress),
+        _budget: scheduling::ExecutionBudget,
+    ) -> Result<AIExecutionResult, AppError> {
+        self.execute(request, cancellation, progress)
+    }
+
     fn execute(
         &self,
         request: ValidatedAIJobRequest,
@@ -577,11 +592,19 @@ impl MergeExecutor for NativeMergeExecutor {
     }
 }
 
+struct RunningJob {
+    token: CancellationToken,
+    kind: MediaJobKind,
+    budget: scheduling::ExecutionBudget,
+}
+
+type RunningJobs = Arc<Mutex<HashMap<String, RunningJob>>>;
+
 pub struct MediaJobService {
     manager: Arc<MediaJobManager>,
     event_sink: Arc<dyn MediaJobEventSink>,
     wake_sender: Option<mpsc::Sender<()>>,
-    running: Arc<Mutex<Option<(String, CancellationToken)>>>,
+    running: RunningJobs,
     pending_removals: Arc<Mutex<HashSet<String>>>,
     merge_request_lock: Mutex<()>,
     shutting_down: Arc<AtomicBool>,
@@ -608,13 +631,29 @@ impl MediaJobService {
         ai_executor: Arc<dyn AIExecutor>,
         event_sink: Arc<dyn MediaJobEventSink>,
     ) -> Self {
+        Self::with_resource_probe(
+            manager,
+            executor,
+            ai_executor,
+            event_sink,
+            scheduling::native_probe(),
+        )
+    }
+
+    fn with_resource_probe(
+        manager: Arc<MediaJobManager>,
+        executor: Arc<dyn MergeExecutor>,
+        ai_executor: Arc<dyn AIExecutor>,
+        event_sink: Arc<dyn MediaJobEventSink>,
+        probe: scheduling::ResourceProbe,
+    ) -> Self {
         let resume_queued = manager
             .snapshot()
             .jobs
             .iter()
             .any(|job| job.status == MediaJobStatus::Queued);
         let (wake_sender, wake_receiver) = mpsc::channel();
-        let running = Arc::new(Mutex::new(None));
+        let running = Arc::new(Mutex::new(HashMap::new()));
         let pending_removals = Arc::new(Mutex::new(HashSet::new()));
         let shutting_down = Arc::new(AtomicBool::new(false));
         let worker_context = MediaWorkerContext {
@@ -626,9 +665,10 @@ impl MediaJobService {
             pending_removals: pending_removals.clone(),
             shutting_down: shutting_down.clone(),
         };
+        let completion_sender = wake_sender.clone();
         let worker = thread::Builder::new()
-            .name("media-job-worker".into())
-            .spawn(move || worker_loop(worker_context, wake_receiver))
+            .name("media-job-scheduler".into())
+            .spawn(move || worker_loop(worker_context, wake_receiver, completion_sender, probe))
             .expect("media worker thread should start");
         let service = Self {
             manager,
@@ -724,9 +764,8 @@ impl MediaJobService {
             .running
             .lock()
             .map_err(|_| AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用"))?
-            .as_ref()
-            .filter(|(running_id, _)| running_id == job_id)
-            .map(|(_, token)| token.clone())
+            .get(job_id)
+            .map(|job| job.token.clone())
             .ok_or_else(|| {
                 AppError::new("MEDIA_JOB_INVALID_TRANSITION", "只能取消正在运行的媒体任务")
             })?;
@@ -742,16 +781,12 @@ impl MediaJobService {
         let job = match current.status {
             MediaJobStatus::Queued => self.manager.pause_queued(job_id)?,
             MediaJobStatus::Running => {
-                let token = running
-                    .as_ref()
-                    .filter(|(running_id, _)| running_id == job_id)
-                    .map(|(_, token)| token)
-                    .ok_or_else(|| {
-                        AppError::new(
-                            "MEDIA_JOB_INVALID_TRANSITION",
-                            "媒体任务当前状态不允许该操作",
-                        )
-                    })?;
+                let token = running.get(job_id).map(|job| &job.token).ok_or_else(|| {
+                    AppError::new(
+                        "MEDIA_JOB_INVALID_TRANSITION",
+                        "媒体任务当前状态不允许该操作",
+                    )
+                })?;
                 token.pause()?;
                 match self.manager.pause_running(job_id) {
                     Ok(job) => job,
@@ -783,16 +818,12 @@ impl MediaJobService {
                 (self.manager.resume_queued(job_id)?, true)
             }
             (MediaJobStatus::Paused, Some(MediaJobPauseOrigin::Running)) => {
-                let token = running
-                    .as_ref()
-                    .filter(|(running_id, _)| running_id == job_id)
-                    .map(|(_, token)| token)
-                    .ok_or_else(|| {
-                        AppError::new(
-                            "MEDIA_JOB_INVALID_TRANSITION",
-                            "媒体任务当前状态不允许该操作",
-                        )
-                    })?;
+                let token = running.get(job_id).map(|job| &job.token).ok_or_else(|| {
+                    AppError::new(
+                        "MEDIA_JOB_INVALID_TRANSITION",
+                        "媒体任务当前状态不允许该操作",
+                    )
+                })?;
                 token.resume()?;
                 match self.manager.resume_running(job_id) {
                     Ok(job) => (job, false),
@@ -826,16 +857,12 @@ impl MediaJobService {
             || (current.status == MediaJobStatus::Paused
                 && current.pause_origin == Some(MediaJobPauseOrigin::Running));
         if is_active_process {
-            let token = running
-                .as_ref()
-                .filter(|(running_id, _)| running_id == job_id)
-                .map(|(_, token)| token)
-                .ok_or_else(|| {
-                    AppError::new(
-                        "MEDIA_JOB_INVALID_TRANSITION",
-                        "媒体任务当前状态不允许该操作",
-                    )
-                })?;
+            let token = running.get(job_id).map(|job| &job.token).ok_or_else(|| {
+                AppError::new(
+                    "MEDIA_JOB_INVALID_TRANSITION",
+                    "媒体任务当前状态不允许该操作",
+                )
+            })?;
             if token.is_paused() {
                 token.resume()?;
             }
@@ -900,10 +927,11 @@ impl Drop for MediaJobService {
     fn drop(&mut self) {
         self.shutting_down.store(true, AtomicOrdering::Release);
         if let Ok(running) = self.running.lock() {
-            if let Some((_, token)) = running.as_ref() {
-                token.cancel();
+            for job in running.values() {
+                job.token.cancel();
             }
         }
+        self.wake_worker();
         self.wake_sender.take();
         if let Ok(worker) = self.worker.get_mut() {
             if let Some(worker) = worker.take() {
@@ -913,181 +941,284 @@ impl Drop for MediaJobService {
     }
 }
 
+#[derive(Clone)]
 struct MediaWorkerContext {
     manager: Arc<MediaJobManager>,
     executor: Arc<dyn MergeExecutor>,
     ai_executor: Arc<dyn AIExecutor>,
     event_sink: Arc<dyn MediaJobEventSink>,
-    running: Arc<Mutex<Option<(String, CancellationToken)>>>,
+    running: RunningJobs,
     pending_removals: Arc<Mutex<HashSet<String>>>,
     shutting_down: Arc<AtomicBool>,
 }
 
-fn worker_loop(context: MediaWorkerContext, wake_receiver: mpsc::Receiver<()>) {
+fn worker_loop(
+    context: MediaWorkerContext,
+    wake_receiver: mpsc::Receiver<()>,
+    completion_sender: mpsc::Sender<()>,
+    mut probe: scheduling::ResourceProbe,
+) {
+    let mut workers: HashMap<String, JoinHandle<()>> = HashMap::new();
+    loop {
+        // Reap before admission: paused tasks still occupy their slots, and a
+        // terminal event is fully published before that slot can be reused.
+        let finished: Vec<_> = workers
+            .iter()
+            .filter(|(_, worker)| worker.is_finished())
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in finished {
+            if let Some(worker) = workers.remove(&id) {
+                let _ = worker.join();
+            }
+            context
+                .running
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+        }
+        if context.shutting_down.load(AtomicOrdering::Acquire) {
+            break;
+        }
+        if !context
+            .manager
+            .snapshot()
+            .jobs
+            .iter()
+            .any(|job| job.status == MediaJobStatus::Queued)
+        {
+            if wake_receiver.recv_timeout(Duration::from_secs(2))
+                == Err(mpsc::RecvTimeoutError::Disconnected)
+            {
+                break;
+            }
+            continue;
+        }
+        let resources = probe();
+        loop {
+            let claimed = {
+                let mut running = context.running.lock().unwrap_or_else(|e| e.into_inner());
+                if context.shutting_down.load(AtomicOrdering::Acquire) {
+                    break;
+                }
+                let candidate = context
+                    .manager
+                    .snapshot()
+                    .jobs
+                    .into_iter()
+                    .find(|job| job.status == MediaJobStatus::Queued);
+                let Some(mut candidate) = candidate else {
+                    break;
+                };
+                // Merge/subtitle tasks retain exclusive execution and FIFO order.
+                if running
+                    .values()
+                    .any(|job| job.kind != MediaJobKind::SeparateBackgroundMusic)
+                {
+                    break;
+                }
+                if let Some(request) = candidate.ai_request.as_mut() {
+                    request.device = context.ai_executor.scheduling_device(request);
+                }
+                let active: Vec<_> = running.values().map(|job| job.budget).collect();
+                let Some(budget) = scheduling::admit(&candidate, &active, resources) else {
+                    break;
+                };
+                match context.manager.claim_oldest_queued() {
+                    Ok(Some(job)) if context.shutting_down.load(AtomicOrdering::Acquire) => {
+                        let _ = context.manager.restore_claimed_to_queued(&job.id);
+                        break;
+                    }
+                    Ok(Some(job)) => {
+                        let token = CancellationToken::new();
+                        running.insert(
+                            job.id.clone(),
+                            RunningJob {
+                                token: token.clone(),
+                                kind: job.kind,
+                                budget,
+                            },
+                        );
+                        (job, token, budget)
+                    }
+                    _ => break,
+                }
+            };
+            let (job, token, budget) = claimed;
+            let id = job.id.clone();
+            let worker_context = context.clone();
+            let notify = completion_sender.clone();
+            // Publish Running in FIFO order before the worker can emit progress.
+            safe_emit(&context.event_sink, job.clone());
+            match thread::Builder::new()
+                .name(format!("media-job-{id}"))
+                .spawn(move || {
+                    execute_job(worker_context, job, token, budget);
+                    let _ = notify.send(());
+                }) {
+                Ok(worker) => {
+                    workers.insert(id, worker);
+                }
+                Err(_) => {
+                    if let Ok(failed) = context.manager.update(
+                        &id,
+                        MediaJobTransition::Fail {
+                            code: "MEDIA_WORKER_FAILED".into(),
+                            message: "无法启动媒体任务工作线程，可重试".into(),
+                        },
+                    ) {
+                        safe_emit(&context.event_sink, failed);
+                    }
+                    context
+                        .running
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id);
+                }
+            }
+        }
+        if wake_receiver.recv_timeout(Duration::from_secs(2))
+            == Err(mpsc::RecvTimeoutError::Disconnected)
+        {
+            break;
+        }
+    }
+    // Drop waits for every child to stop; queued jobs remain queued for next launch.
+    for (_, worker) in workers {
+        let _ = worker.join();
+    }
+    context
+        .running
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+fn execute_job(
+    context: MediaWorkerContext,
+    job: MediaJob,
+    cancellation: CancellationToken,
+    budget: scheduling::ExecutionBudget,
+) {
     let MediaWorkerContext {
         manager,
         executor,
         ai_executor,
         event_sink,
-        running,
         pending_removals,
-        shutting_down,
+        ..
     } = context;
-    while wake_receiver.recv().is_ok() {
-        loop {
-            if shutting_down.load(AtomicOrdering::Acquire) {
-                break;
-            }
-            let claimed = {
-                let mut running_guard = match running.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                if shutting_down.load(AtomicOrdering::Acquire) {
-                    None
-                } else {
-                    match manager.claim_oldest_queued() {
-                        Ok(Some(job)) if shutting_down.load(AtomicOrdering::Acquire) => {
-                            let _ = manager.restore_claimed_to_queued(&job.id);
-                            None
-                        }
-                        Ok(Some(job)) => {
-                            let token = CancellationToken::new();
-                            *running_guard = Some((job.id.clone(), token.clone()));
-                            Some((job, token))
-                        }
-                        Ok(None) | Err(_) => None,
-                    }
-                }
-            };
-            let Some((job, cancellation)) = claimed else {
-                break;
-            };
-            safe_emit(&event_sink, job.clone());
-            if job.merge_request.is_none() && job.ai_request.is_none() {
-                if let Ok(failed) = manager.update(
-                    &job.id,
-                    MediaJobTransition::Fail {
-                        code: "MEDIA_JOB_RETRY_UNAVAILABLE".into(),
-                        message: "媒体任务缺少已验证的原始请求".into(),
-                    },
-                ) {
-                    clear_running(&running, &job.id);
-                    safe_emit(&event_sink, failed);
-                    continue;
-                }
-                clear_running(&running, &job.id);
-                break;
-            }
-            let progress_failure = Arc::new(Mutex::new(None::<AppError>));
-            let progress_manager = manager.clone();
-            let progress_sink = event_sink.clone();
-            let progress_job_id = job.id.clone();
-            let progress_cancellation = cancellation.clone();
-            let progress_failure_slot = progress_failure.clone();
-            let result = catch_unwind(AssertUnwindSafe(|| {
-                let mut update_progress = |progress: MergeProgress| {
-                    if progress.terminal {
-                        return;
-                    }
-                    if pending_removals
-                        .lock()
-                        .map(|pending| pending.contains(&progress_job_id))
-                        .unwrap_or(true)
-                    {
-                        return;
-                    }
-                    match progress_manager.update_progress(
-                        &progress_job_id,
-                        progress.stage,
-                        progress.percent,
-                    ) {
-                        Ok(updated) => safe_emit(&progress_sink, updated),
-                        Err(error) => {
-                            if let Ok(mut slot) = progress_failure_slot.lock() {
-                                if slot.is_none() {
-                                    *slot = Some(error);
-                                }
-                            }
-                            progress_cancellation.cancel();
-                        }
-                    }
-                };
-                if let Some(request) = job.merge_request.clone() {
-                    executor
-                        .execute(
-                            request.execution_request(),
-                            &cancellation,
-                            &mut update_progress,
-                        )
-                        .map(|result| AIExecutionResult {
-                            output_path: result.output_path,
-                            outputs: Vec::new(),
-                        })
-                } else if let Some(request) = job.ai_request.clone() {
-                    ai_executor.execute(request, &cancellation, &mut update_progress)
-                } else {
-                    Err(AppError::new(
-                        "MEDIA_JOB_RETRY_UNAVAILABLE",
-                        "媒体任务缺少已验证的原始请求",
-                    ))
-                }
-            }));
-
-            let remove_after_stop = pending_removals
-                .lock()
-                .map(|pending| pending.contains(&job.id))
-                .unwrap_or(false);
-            if remove_after_stop {
-                let _ = manager.remove(&job.id);
-                if let Ok(mut pending) = pending_removals.lock() {
-                    pending.remove(&job.id);
-                }
-                clear_running(&running, &job.id);
-                continue;
-            }
-
-            let progress_error = progress_failure
-                .lock()
-                .ok()
-                .and_then(|mut failure| failure.take());
-            let transition = if let Some(error) = progress_error {
-                MediaJobTransition::Fail {
-                    code: error.code,
-                    message: error.message,
-                }
-            } else {
-                match result {
-                    Ok(Ok(result)) => MediaJobTransition::Complete {
-                        output_path: result.output_path,
-                        outputs: result.outputs,
-                    },
-                    Ok(Err(error))
-                        if matches!(error.code.as_str(), "MERGE_CANCELLED" | "AI_CANCELLED") =>
-                    {
-                        MediaJobTransition::Cancel
-                    }
-                    Ok(Err(error)) => MediaJobTransition::Fail {
-                        code: error.code,
-                        message: error.message,
-                    },
-                    Err(_) => MediaJobTransition::Fail {
-                        code: "MEDIA_WORKER_FAILED".into(),
-                        message: "媒体任务工作线程异常，可重试该任务".into(),
-                    },
-                }
-            };
-            match manager.update(&job.id, transition) {
-                Ok(terminal) => {
-                    clear_running(&running, &job.id);
-                    safe_emit(&event_sink, terminal);
-                }
-                Err(_) => {
-                    clear_running(&running, &job.id);
-                    break;
-                }
-            }
+    if job.merge_request.is_none() && job.ai_request.is_none() {
+        if let Ok(failed) = manager.update(
+            &job.id,
+            MediaJobTransition::Fail {
+                code: "MEDIA_JOB_RETRY_UNAVAILABLE".into(),
+                message: "媒体任务缺少已验证的原始请求".into(),
+            },
+        ) {
+            safe_emit(&event_sink, failed);
+            return;
         }
+        return;
+    }
+    let progress_failure = Arc::new(Mutex::new(None::<AppError>));
+    let progress_manager = manager.clone();
+    let progress_sink = event_sink.clone();
+    let progress_job_id = job.id.clone();
+    let progress_cancellation = cancellation.clone();
+    let progress_failure_slot = progress_failure.clone();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let mut update_progress = |progress: MergeProgress| {
+            if progress.terminal {
+                return;
+            }
+            if pending_removals
+                .lock()
+                .map(|pending| pending.contains(&progress_job_id))
+                .unwrap_or(true)
+            {
+                return;
+            }
+            match progress_manager.update_progress(
+                &progress_job_id,
+                progress.stage,
+                progress.percent,
+            ) {
+                Ok(updated) => safe_emit(&progress_sink, updated),
+                Err(error) => {
+                    if let Ok(mut slot) = progress_failure_slot.lock() {
+                        if slot.is_none() {
+                            *slot = Some(error);
+                        }
+                    }
+                    progress_cancellation.cancel();
+                }
+            }
+        };
+        if let Some(request) = job.merge_request.clone() {
+            executor
+                .execute(
+                    request.execution_request(),
+                    &cancellation,
+                    &mut update_progress,
+                )
+                .map(|result| AIExecutionResult {
+                    output_path: result.output_path,
+                    outputs: Vec::new(),
+                })
+        } else if let Some(request) = job.ai_request.clone() {
+            ai_executor.execute_with_budget(request, &cancellation, &mut update_progress, budget)
+        } else {
+            Err(AppError::new(
+                "MEDIA_JOB_RETRY_UNAVAILABLE",
+                "媒体任务缺少已验证的原始请求",
+            ))
+        }
+    }));
+
+    let _completion = context.running.lock().unwrap_or_else(|e| e.into_inner());
+    let remove_after_stop = pending_removals
+        .lock()
+        .map(|pending| pending.contains(&job.id))
+        .unwrap_or(false);
+    if remove_after_stop {
+        let _ = manager.remove(&job.id);
+        if let Ok(mut pending) = pending_removals.lock() {
+            pending.remove(&job.id);
+        }
+        return;
+    }
+
+    let progress_error = progress_failure
+        .lock()
+        .ok()
+        .and_then(|mut failure| failure.take());
+    let transition = if let Some(error) = progress_error {
+        MediaJobTransition::Fail {
+            code: error.code,
+            message: error.message,
+        }
+    } else {
+        match result {
+            Ok(Ok(result)) => MediaJobTransition::Complete {
+                output_path: result.output_path,
+                outputs: result.outputs,
+            },
+            Ok(Err(error)) if matches!(error.code.as_str(), "MERGE_CANCELLED" | "AI_CANCELLED") => {
+                MediaJobTransition::Cancel
+            }
+            Ok(Err(error)) => MediaJobTransition::Fail {
+                code: error.code,
+                message: error.message,
+            },
+            Err(_) => MediaJobTransition::Fail {
+                code: "MEDIA_WORKER_FAILED".into(),
+                message: "媒体任务工作线程异常，可重试该任务".into(),
+            },
+        }
+    };
+    if let Ok(terminal) = manager.update(&job.id, transition) {
+        safe_emit(&event_sink, terminal);
     }
 }
 
@@ -1148,19 +1279,6 @@ fn find_merged_video_in_series(series_root: &Path) -> Result<Option<PathBuf>, Ap
         }
     }
     Ok(found)
-}
-
-fn clear_running(running: &Mutex<Option<(String, CancellationToken)>>, completed_job_id: &str) {
-    let mut guard = match running.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if guard
-        .as_ref()
-        .is_some_and(|(running_job_id, _)| running_job_id == completed_job_id)
-    {
-        *guard = None;
-    }
 }
 
 fn safe_emit(event_sink: &Arc<dyn MediaJobEventSink>, job: MediaJob) {
@@ -2173,6 +2291,128 @@ mod tests {
         assert!(starts.is_empty(), "queued backlog was executed: {starts:?}");
         assert_eq!(running_after_drop.status, MediaJobStatus::Cancelled);
         assert_eq!(queued_after_drop.status, MediaJobStatus::Queued);
+    }
+
+    struct HoldingAIExecutor {
+        started: mpsc::Sender<String>,
+    }
+
+    impl AIExecutor for HoldingAIExecutor {
+        fn execute(
+            &self,
+            request: ValidatedAIJobRequest,
+            cancellation: &CancellationToken,
+            _progress: &mut dyn FnMut(MergeProgress),
+        ) -> Result<AIExecutionResult, AppError> {
+            self.started.send(request.book_id).unwrap();
+            while !cancellation.is_cancelled() {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(AppError::new("AI_CANCELLED", "cancelled"))
+        }
+    }
+
+    #[test]
+    fn separation_queue_runs_five_and_cancel_only_releases_matching_slot() {
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let (started_tx, started_rx) = mpsc::channel();
+        let resources = Arc::new(Mutex::new(scheduling::Resources {
+            cores: 64,
+            cpu_usage: Some(0.0),
+            available_memory: Some(128 * scheduling::GIB),
+            gpu: None,
+        }));
+        let probe = resources.clone();
+        let service = MediaJobService::with_resource_probe(
+            manager,
+            Arc::new(ImmediateExecutor),
+            Arc::new(HoldingAIExecutor {
+                started: started_tx,
+            }),
+            Arc::new(RecordingSink::default()),
+            Box::new(move || *probe.lock().unwrap()),
+        );
+        let jobs: Vec<_> = (0..6)
+            .map(|index| {
+                service
+                    .start_ai(
+                        StartAIJobRequest {
+                            book_id: format!("parallel-{index}"),
+                            title: "并发测试".into(),
+                            series_root: fixture.series.clone(),
+                            scope: MediaJobScope::Episodes,
+                            inputs: vec![
+                                fixture.write_input(&format!("parallel-{index}.mp4"), b"input")
+                            ],
+                            model: "htdemucs".into(),
+                            device: "cpu".into(),
+                        },
+                        MediaJobKind::SeparateBackgroundMusic,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let mut started: Vec<_> = (0..5)
+            .map(|_| started_rx.recv_timeout(Duration::from_secs(3)).unwrap())
+            .collect();
+        started.sort();
+        assert_eq!(
+            started,
+            (0..5)
+                .map(|index| format!("parallel-{index}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(started_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(
+            service
+                .snapshot()
+                .jobs
+                .iter()
+                .filter(|j| j.status == MediaJobStatus::Running)
+                .count(),
+            5
+        );
+        service.pause(&jobs[1].id).unwrap();
+        assert!(
+            started_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "paused processes still hold resources"
+        );
+        service.resume(&jobs[1].id).unwrap();
+        // Low memory must prevent replacement of a completed task, even with an empty slot.
+        resources.lock().unwrap().available_memory = Some(scheduling::GIB);
+        service.cancel(&jobs[2].id).unwrap();
+        wait_for_job(&service, &jobs[2].id, MediaJobStatus::Cancelled);
+        assert!(started_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        for index in [0, 1, 3, 4] {
+            assert_eq!(
+                service.manager.job(&jobs[index].id).unwrap().status,
+                MediaJobStatus::Running
+            );
+        }
+        resources.lock().unwrap().available_memory = Some(128 * scheduling::GIB);
+        service.wake_worker();
+        assert_eq!(
+            started_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            "parallel-5"
+        );
+        service.delete(&jobs[1].id).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while service.manager.job(&jobs[1].id).is_ok() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            service.manager.job(&jobs[5].id).unwrap().status,
+            MediaJobStatus::Running
+        );
+        let retained = service.manager.clone();
+        drop(service);
+        assert!(retained
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.status == MediaJobStatus::Cancelled));
     }
 
     #[test]

@@ -105,11 +105,46 @@ impl Drop for ComponentUseGuard {
 }
 
 impl AIExecutor for NativeAIExecutor {
+    fn scheduling_device(&self, request: &ValidatedAIJobRequest) -> String {
+        let selected = runtime_candidates_for(std::env::consts::OS, &request.device)
+            .into_iter()
+            .find(|id| self.components.resolve_installed(id).is_ok());
+        if request.device == "auto" && selected == Some("runtime-cpu") {
+            "cpu".into()
+        } else {
+            request.device.clone()
+        }
+    }
+
     fn execute(
         &self,
         request: ValidatedAIJobRequest,
         cancellation: &CancellationToken,
         progress: &mut dyn FnMut(MergeProgress),
+    ) -> Result<AIExecutionResult, AppError> {
+        self.execute_with_threads(request, cancellation, progress, None)
+    }
+
+    fn execute_with_budget(
+        &self,
+        request: ValidatedAIJobRequest,
+        cancellation: &CancellationToken,
+        progress: &mut dyn FnMut(MergeProgress),
+        budget: super::scheduling::ExecutionBudget,
+    ) -> Result<AIExecutionResult, AppError> {
+        let threads =
+            (request.kind == MediaJobKind::SeparateBackgroundMusic).then_some(budget.cpu_threads);
+        self.execute_with_threads(request, cancellation, progress, threads)
+    }
+}
+
+impl NativeAIExecutor {
+    fn execute_with_threads(
+        &self,
+        request: ValidatedAIJobRequest,
+        cancellation: &CancellationToken,
+        progress: &mut dyn FnMut(MergeProgress),
+        cpu_threads: Option<usize>,
     ) -> Result<AIExecutionResult, AppError> {
         let tools = self.tools.as_ref().map_err(Clone::clone)?;
         let model_id = match request.kind {
@@ -144,6 +179,7 @@ impl AIExecutor for NativeAIExecutor {
             model_root: &model.root,
             request: &request,
             cancellation,
+            cpu_threads,
         };
         for (position, input) in request.inputs.iter().enumerate() {
             if cancellation.is_cancelled() {
@@ -187,6 +223,7 @@ struct AIItemContext<'a> {
     model_root: &'a Path,
     request: &'a ValidatedAIJobRequest,
     cancellation: &'a CancellationToken,
+    cpu_threads: Option<usize>,
 }
 
 fn process_separation(
@@ -224,7 +261,7 @@ fn process_separation(
             operation: "separate",
             input: &wav,
             output: &temp.output,
-            options: json!({"model": request.model, "device": request.device, "modelRoot": context.model_root}),
+            options: json!({"model": request.model, "device": request.device, "modelRoot": context.model_root, "cpuThreads": context.cpu_threads}),
         },
         context.cancellation,
         &mut |stage, percent| progress(stage, 10.0 + percent.clamp(0.0, 100.0) * 0.7),
@@ -697,6 +734,11 @@ fn run_worker(
     progress: &mut dyn FnMut(String, f64),
 ) -> Result<Value, AppError> {
     let mut options = invocation.options;
+    let cpu_threads = options
+        .as_object_mut()
+        .and_then(|options| options.remove("cpuThreads"))
+        .and_then(|value| value.as_u64())
+        .map(|threads| threads.clamp(1, 4));
     if invocation.operation == "transcribe" && cfg!(target_os = "macos") {
         // The installed Torch 2.5.1 runtime cannot move Whisper's sparse alignment
         // buffers to MPS. This also fixes older installed workers without downloading
@@ -715,6 +757,19 @@ fn run_worker(
         "options": options,
     });
     let mut command = super::tools::background_command(invocation.runtime);
+    if let Some(threads) = cpu_threads {
+        // Torch and BLAS read these before initialization. This works with the
+        // existing frozen v3 worker and also bounds accelerator-to-CPU fallback.
+        for name in [
+            "OMP_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+        ] {
+            command.env(name, threads.to_string());
+        }
+    }
     if invocation.ffmpeg.is_some() || invocation.operation == "transcribe" {
         // Whisper launches `ffmpeg` by name. Finder-launched applications do not
         // inherit a shell PATH; use only the verified bundle and system tools.
@@ -1056,6 +1111,7 @@ mod tests {
             model_root: &temp.root,
             request: &request,
             cancellation: &cancellation,
+            cpu_threads: None,
         };
         assert!(process_separation(
             &context,
@@ -1091,6 +1147,35 @@ mod tests {
         std::fs::write(&runtime, format!("#!/bin/sh\ncat >/dev/null\n{script}\n")).unwrap();
         std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
         (temp, runtime)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn separation_worker_receives_its_thread_budget() {
+        let (temp, runtime) = worker_fixture(
+            r#"
+[ "$OMP_NUM_THREADS" = 2 ] || exit 21
+[ "$MKL_NUM_THREADS" = 2 ] || exit 22
+[ "$OPENBLAS_NUM_THREADS" = 2 ] || exit 23
+echo '{"type":"result","outputs":{"ok":true}}'
+"#,
+        );
+        let result = super::run_worker(
+            super::WorkerInvocation {
+                runtime: &runtime,
+                args: &[],
+                ffmpeg: None,
+                job_id: "budget-test",
+                operation: "separate",
+                input: &runtime,
+                output: &temp.output,
+                options: serde_json::json!({"device":"cpu", "cpuThreads":2}),
+            },
+            &super::CancellationToken::default(),
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(result, serde_json::json!({"ok": true}));
     }
 
     #[cfg(unix)]
@@ -1482,6 +1567,7 @@ sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + '\n').encode('g
             model_root: &model_root,
             request: &request,
             cancellation: &cancellation,
+            cpu_threads: None,
         };
         // Simulate an older job interrupted after only its first file was saved.
         let legacy = safe_output_directory(&request.series_root, "音频分离").unwrap();

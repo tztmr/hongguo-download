@@ -3,7 +3,7 @@ use crate::app_error::AppError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{self, BufWriter, Read, Write},
     path::{Component, Path, PathBuf},
@@ -101,7 +101,7 @@ pub struct ComponentManager {
     root: PathBuf,
     manifest: ComponentManifest,
     installing: AtomicBool,
-    in_use: Mutex<HashSet<String>>,
+    in_use: Mutex<HashMap<String, usize>>,
     min_free_bytes: Mutex<Option<u64>>,
     download_proxy: Mutex<Option<Url>>,
     download_mirror: Mutex<Option<Url>>,
@@ -118,7 +118,7 @@ impl ComponentManager {
             root,
             manifest,
             installing: AtomicBool::new(false),
-            in_use: Mutex::new(HashSet::new()),
+            in_use: Mutex::new(HashMap::new()),
             min_free_bytes: Mutex::new(None),
             download_proxy: Mutex::new(None),
             download_mirror: Mutex::new(None),
@@ -154,7 +154,7 @@ impl ComponentManager {
                     installed_version: current,
                     download_bytes: release.download_bytes,
                     installed_bytes: release.installed_bytes,
-                    in_use: in_use.contains(&release.id),
+                    in_use: in_use.contains_key(&release.id),
                     installed_path: if installed_now {
                         Some(
                             self.root
@@ -174,9 +174,12 @@ impl ComponentManager {
     pub fn mark_in_use(&self, id: &str, used: bool) {
         if let Ok(mut guard) = self.in_use.lock() {
             if used {
-                guard.insert(id.to_string());
-            } else {
-                guard.remove(id);
+                *guard.entry(id.to_string()).or_default() += 1;
+            } else if let Some(count) = guard.get_mut(id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    guard.remove(id);
+                }
             }
         }
     }
@@ -281,7 +284,7 @@ impl ComponentManager {
 
     pub fn remove(&self, id: &str) -> Result<(), AppError> {
         match self.in_use.lock() {
-            Ok(guard) if guard.contains(id) => {
+            Ok(guard) if guard.contains_key(id) => {
                 return Err(AppError::new(
                     "AI_COMPONENT_IN_USE",
                     "运行中的媒体任务正在使用该组件",
@@ -1735,6 +1738,33 @@ mod tests {
             "AI_COMPONENT_IN_USE"
         );
         assert_eq!(manager.installed_version("runtime").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn shared_component_stays_in_use_until_last_task_finishes() {
+        let fixture = Fixture::new();
+        let (good, sha) = archive_with_entrypoint(&fixture.root, "exit 0");
+        let manager = fixture.manager(&sha);
+        manager
+            .install_bytes("runtime", &good, &sha, |_| {})
+            .unwrap();
+        manager.mark_in_use("runtime", true);
+        manager.mark_in_use("runtime", true);
+        manager.mark_in_use("runtime", false);
+        assert!(
+            manager
+                .status()
+                .iter()
+                .find(|item| item.id == "runtime")
+                .unwrap()
+                .in_use
+        );
+        assert_eq!(
+            manager.remove("runtime").unwrap_err().code,
+            "AI_COMPONENT_IN_USE"
+        );
+        manager.mark_in_use("runtime", false);
+        manager.remove("runtime").unwrap();
     }
 
     #[test]
