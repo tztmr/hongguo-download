@@ -1,0 +1,83 @@
+name: Publish verified Windows installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+      run_id:
+        description: Successful Build Windows installer run ID
+        required: true
+        type: string
+      sha256:
+        description: Verified installer SHA-256
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify source run and upload to the matching draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+          INSTALLER_SHA256: ${{ inputs.sha256 }}
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, re, shutil, subprocess, tempfile
+
+          repo = os.environ['GH_REPO']
+          tag = os.environ['RELEASE_TAG']
+          run_id = os.environ['SOURCE_RUN_ID']
+          expected = os.environ['INSTALLER_SHA256']
+          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag), 'Invalid tag'
+          assert re.fullmatch(r'[0-9]+', run_id), 'Invalid run ID'
+          assert re.fullmatch(r'[0-9a-f]{64}', expected), 'Invalid checksum'
+
+          def api(path):
+              return json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/{path}'], text=True))
+
+          run = api(f'actions/runs/{run_id}')
+          assert run['status'] == 'completed' and run['conclusion'] == 'success', 'Build has not passed'
+          assert run['path'] == '.github/workflows/windows-release.yml', 'Unexpected source workflow'
+          assert run['head_repository']['full_name'] == repo, 'Unexpected source repository'
+          release = api(f'releases/tags/{tag}')
+          assert release['draft'], 'Only draft releases may be uploaded'
+          assert release['target_commitish'] == run['head_sha'], 'Release/build commit mismatch'
+
+          with tempfile.TemporaryDirectory() as directory:
+              root = pathlib.Path(directory)
+              subprocess.run(['gh', 'run', 'download', run_id, '--name', 'hongguo-windows-unsigned',
+                              '--dir', str(root / 'artifact')], check=True)
+              installers = list((root / 'artifact').glob(f'*{tag[1:]}_x64-setup.exe'))
+              assert len(installers) == 1, 'Expected one matching installer'
+              source = installers[0]
+              with source.open('rb') as stream:
+                  actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+              assert actual == expected, 'Installer checksum mismatch'
+              destination = root / f'hongguo-download_{tag[1:]}_x64-setup.exe'
+              shutil.copyfile(source, destination)
+              # Recheck just before mutation. Never replace a different asset or
+              # upload into a release that was published while downloading.
+              release = api(f'releases/tags/{tag}')
+              assert release['draft'] and release['target_commitish'] == run['head_sha']
+              existing = [asset for asset in release['assets'] if asset['name'] == destination.name]
+              if existing:
+                  assert len(existing) == 1
+                  assert existing[0]['state'] == 'uploaded'
+                  assert existing[0]['digest'] == f'sha256:{expected}'
+                  assert existing[0]['size'] == source.stat().st_size
+                  print('Matching installer already uploaded')
+              else:
+                  subprocess.run(['gh', 'release', 'upload', tag, str(destination)], check=True)
+                  print(f'Uploaded verified installer: {destination.name} SHA256={actual}')
