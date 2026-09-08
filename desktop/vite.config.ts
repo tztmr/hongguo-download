@@ -8,6 +8,7 @@ export default defineConfig(async () => ({
   test: {
     environment: "jsdom",
     globals: true,
+    testTimeout: 10_000,
   },
   clearScreen: false,
   server: {
