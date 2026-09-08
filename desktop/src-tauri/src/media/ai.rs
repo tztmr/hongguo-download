@@ -387,13 +387,14 @@ fn process_subtitles(
 fn safe_output_directory(root: &Path, name: &str) -> Result<PathBuf, AppError> {
     let canonical_root = fs::canonicalize(root).map_err(ai_io)?;
     let path = canonical_root.join(name);
-    if path.exists() {
-        let metadata = fs::symlink_metadata(&path).map_err(ai_io)?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(AppError::new("AI_OUTPUT_INVALID", "AI 输出目录不安全"));
-        }
-    } else {
-        fs::create_dir(&path).map_err(ai_io)?;
+    match fs::create_dir(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(ai_io(error)),
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(ai_io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AppError::new("AI_OUTPUT_INVALID", "AI 输出目录不安全"));
     }
     let canonical = fs::canonicalize(&path).map_err(ai_io)?;
     if !canonical.starts_with(canonical_root) {
@@ -992,6 +993,34 @@ mod tests {
     use super::{
         decode_worker_stdout_line, runtime_candidates_for, select_subtitle_source, SubtitleSource,
     };
+
+    #[test]
+    fn concurrent_jobs_can_initialize_a_fresh_work_directory() {
+        let fixture = super::JobTemp::create(&std::env::temp_dir()).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let workers = (0..12)
+            .map(|_| {
+                let root = fixture.output.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    super::JobTemp::create(&root)
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            results.iter().all(Result::is_ok),
+            "{:?}",
+            results
+                .iter()
+                .filter_map(|result| result.as_ref().err())
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn merged_request_does_not_reuse_unidentified_episode_one_outputs() {
