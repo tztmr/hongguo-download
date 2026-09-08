@@ -20,6 +20,10 @@ use std::{
 
 static AI_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[path = "ai_results.rs"]
+mod results;
+use results::{ResultStore, MUSIC, SUBTITLES, VIDEO, VOCALS};
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum SubtitleSource {
@@ -192,20 +196,19 @@ fn process_separation(
     progress: &mut dyn FnMut(String, f64),
 ) -> Result<Vec<MediaJobOutput>, AppError> {
     let request = context.request;
-    let destination = safe_output_directory(&request.series_root, "音频分离")?;
-    let prefix = format!("{episode_index:03}_{}", request.model);
-    let vocals_destination = destination.join(format!("{prefix}_人声.wav"));
-    let music_destination = destination.join(format!("{prefix}_背景音乐.wav"));
-    let video_destination = destination.join(format!("{prefix}_去背景音乐.mp4"));
-    if [&vocals_destination, &music_destination, &video_destination]
-        .iter()
-        .all(|path| regular_nonempty(path))
-    {
+    let store = ResultStore::new(
+        request,
+        episode_index,
+        input,
+        context.runtime,
+        context.model_root,
+    )?;
+    if let Some(result) = store.lookup() {
         return Ok(separation_outputs(
             episode_index,
-            vocals_destination,
-            music_destination,
-            video_destination,
+            result.path(VOCALS),
+            result.path(MUSIC),
+            result.path(VIDEO),
         ));
     }
     let temp = JobTemp::create(&request.series_root)?;
@@ -241,14 +244,17 @@ fn process_separation(
     )?;
     context.tools.probe_media(&remuxed)?;
     progress("正在保存分离结果".into(), 95.0);
-    publish_file(&vocals, &vocals_destination)?;
-    publish_file(&music, &music_destination)?;
-    publish_file(&remuxed, &video_destination)?;
+    let result = store.publish(
+        &temp,
+        &[(VOCALS, &vocals), (MUSIC, &music), (VIDEO, &remuxed)],
+        None,
+        context.cancellation,
+    )?;
     Ok(separation_outputs(
         episode_index,
-        vocals_destination,
-        music_destination,
-        video_destination,
+        result.path(VOCALS),
+        result.path(MUSIC),
+        result.path(VIDEO),
     ))
 }
 
@@ -287,20 +293,24 @@ fn process_subtitles(
     progress: &mut dyn FnMut(String, f64),
 ) -> Result<Vec<MediaJobOutput>, AppError> {
     let request = context.request;
-    let destination = safe_output_directory(&request.series_root, "字幕")?;
-    let final_path = destination.join(format!("{episode_index:03}_{}.srt", request.model));
-    if regular_nonempty(&final_path) {
-        validate_srt(&final_path)?;
+    let store = ResultStore::new(
+        request,
+        episode_index,
+        input,
+        context.runtime,
+        context.model_root,
+    )?;
+    if let Some(result) = store.lookup() {
         return Ok(vec![MediaJobOutput {
             episode_index,
             kind: MediaJobOutputKind::Subtitles,
-            path: final_path,
-            source: None,
+            path: result.path(SUBTITLES),
+            source: result.subtitle_source,
         }]);
     }
     let temp = JobTemp::create(&request.series_root)?;
     let tracks = subtitle_tracks(context.tools, input)?;
-    let vocals = find_vocals(&request.series_root, episode_index);
+    let vocals = store.find_vocals();
     let source = select_subtitle_source(
         &tracks
             .iter()
@@ -353,12 +363,10 @@ fn process_subtitles(
         }
     }
     validate_srt(&temporary_srt)?;
-    publish_file(&temporary_srt, &final_path)?;
-    Ok(vec![MediaJobOutput {
-        episode_index,
-        kind: MediaJobOutputKind::Subtitles,
-        path: final_path,
-        source: Some(
+    let result = store.publish(
+        &temp,
+        &[(SUBTITLES, &temporary_srt)],
+        Some(
             match source {
                 SubtitleSource::EmbeddedText => "embeddedText",
                 SubtitleSource::WhisperOriginalAudio => "whisperOriginalAudio",
@@ -366,6 +374,13 @@ fn process_subtitles(
             }
             .into(),
         ),
+        context.cancellation,
+    )?;
+    Ok(vec![MediaJobOutput {
+        episode_index,
+        kind: MediaJobOutputKind::Subtitles,
+        path: result.path(SUBTITLES),
+        source: result.subtitle_source,
     }])
 }
 
@@ -394,10 +409,13 @@ struct JobTemp {
 
 impl JobTemp {
     fn create(series_root: &Path) -> Result<Self, AppError> {
-        let parent = series_root.join(".hongguo-ai-work");
-        fs::create_dir_all(&parent).map_err(ai_io)?;
+        let parent = safe_output_directory(series_root, ".hongguo-ai-work")?;
         let sequence = AI_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let root = parent.join(format!("{}-{sequence}", std::process::id()));
+        let root = parent.join(format!(
+            "{}-{sequence}-{}",
+            std::process::id(),
+            results::nonce()?
+        ));
         fs::create_dir(&root).map_err(ai_io)?;
         let output = root.join("output");
         fs::create_dir(&output).map_err(ai_io)?;
@@ -959,36 +977,10 @@ fn worker_output_path(value: &Value, field: &str, root: &Path) -> Result<PathBuf
     Ok(path)
 }
 
-fn publish_file(source: &Path, destination: &Path) -> Result<(), AppError> {
-    if destination.exists() {
-        return Err(AppError::new(
-            "AI_OUTPUT_EXISTS",
-            "AI 输出文件已存在，未覆盖原文件",
-        ));
-    }
-    fs::rename(source, destination)
-        .or_else(|_| fs::copy(source, destination).map(|_| ()))
-        .map_err(ai_io)
-}
-
 fn regular_nonempty(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| {
         metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0
     })
-}
-
-fn find_vocals(root: &Path, episode_index: u32) -> Option<PathBuf> {
-    let prefix = format!("{episode_index:03}_");
-    fs::read_dir(root.join("音频分离"))
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with("_人声.wav"))
-                && regular_nonempty(path)
-        })
 }
 
 fn ai_io(error: impl std::fmt::Display) -> AppError {
@@ -1000,6 +992,50 @@ mod tests {
     use super::{
         decode_worker_stdout_line, runtime_candidates_for, select_subtitle_source, SubtitleSource,
     };
+
+    #[test]
+    fn merged_request_does_not_reuse_unidentified_episode_one_outputs() {
+        use super::*;
+        let temp = JobTemp::create(&std::env::temp_dir()).unwrap();
+        let destination = safe_output_directory(&temp.root, "音频分离").unwrap();
+        for name in [
+            "001_htdemucs_人声.wav",
+            "001_htdemucs_背景音乐.wav",
+            "001_htdemucs_去背景音乐.mp4",
+        ] {
+            fs::write(destination.join(name), b"old episode one").unwrap();
+        }
+        let request = ValidatedAIJobRequest {
+            book_id: "test".into(),
+            title: "test".into(),
+            kind: MediaJobKind::SeparateBackgroundMusic,
+            scope: super::super::MediaJobScope::Merged,
+            series_root: temp.root.clone(),
+            inputs: vec![],
+            model: "htdemucs".into(),
+            device: "cpu".into(),
+            dedupe_key: "new-source".into(),
+        };
+        let tools = MediaTools::from_test_paths(
+            PathBuf::from("missing-ffmpeg"),
+            PathBuf::from("missing-ffprobe"),
+        );
+        let cancellation = CancellationToken::default();
+        let context = AIItemContext {
+            tools: &tools,
+            runtime: Path::new("missing-worker"),
+            model_root: &temp.root,
+            request: &request,
+            cancellation: &cancellation,
+        };
+        assert!(process_separation(
+            &context,
+            1,
+            &temp.root.join("new-merged.mp4"),
+            &mut |_, _| {}
+        )
+        .is_err());
+    }
 
     #[test]
     fn windows_runtime_candidates_preserve_modern_legacy_and_cpu_fallbacks() {
@@ -1418,13 +1454,35 @@ sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + '\n').encode('g
             request: &request,
             cancellation: &cancellation,
         };
+        // Simulate an older job interrupted after only its first file was saved.
+        let legacy = safe_output_directory(&request.series_root, "音频分离").unwrap();
+        let partial = legacy.join("001_htdemucs_人声.wav");
+        std::fs::write(&partial, b"old incomplete job").unwrap();
         let outputs =
             process_separation(&context, 1, &request.inputs[0].path, &mut |_, _| {}).unwrap();
         assert_eq!(outputs.len(), 3);
-        for output in outputs {
+        assert_eq!(std::fs::read(&partial).unwrap(), b"old incomplete job");
+        let cached =
+            process_separation(&context, 1, &request.inputs[0].path, &mut |_, _| {}).unwrap();
+        assert_eq!(cached, outputs);
+        for output in &outputs {
             assert!(regular_nonempty(&output.path));
             assert!(output.path.starts_with(&request.series_root));
         }
+        let mut episode_request = request.clone();
+        episode_request.scope = super::super::MediaJobScope::Episodes;
+        let episode_context = AIItemContext {
+            request: &episode_request,
+            ..context
+        };
+        let episode_outputs = process_separation(
+            &episode_context,
+            1,
+            &episode_request.inputs[0].path,
+            &mut |_, _| {},
+        )
+        .unwrap();
+        assert_ne!(outputs[2].path, episode_outputs[2].path);
     }
 
     #[test]
