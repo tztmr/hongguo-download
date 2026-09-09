@@ -1,4 +1,5 @@
 import { Cover } from "../components/Cover";
+import { VideoOrientationBadge } from "../components/VideoOrientationBadge";
 import type { NewReleaseType } from "../types";
 import type { NewReleaseMonitor } from "./useNewReleaseMonitor";
 
@@ -26,7 +27,7 @@ function onlineTime(value: number | undefined) {
   return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(value * 1000));
 }
 
-export function NewReleasesPage({ model, onSelect }: { model: NewReleaseMonitor; onSelect: (item: NewReleaseMonitor["items"][number]) => void }) {
+export function NewReleasesPage({ model, onSelect, detectOrientation = true }: { model: NewReleaseMonitor; onSelect: (item: NewReleaseMonitor["items"][number]) => void; detectOrientation?: boolean }) {
   const emptyForCategory = model.items.length > 0 && model.filteredItems.length === 0;
   const isDailyFeed = model.type === "playlet";
   return (
@@ -54,7 +55,7 @@ export function NewReleasesPage({ model, onSelect }: { model: NewReleaseMonitor;
       <section className="monitor-grid">
         {model.filteredItems.map((item) => (
           <button type="button" className="monitor-card" key={`${item.contentTypeCode}-${item.seriesId}`} onClick={() => onSelect(item)}>
-            <div className="monitor-cover"><Cover src={item.cover} title={item.title} /><span>上线 {onlineTime(item.onlineTime)}</span></div>
+            <div className="monitor-cover"><Cover src={item.cover} title={item.title} /><span>上线 {onlineTime(item.onlineTime)}</span><VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={detectOrientation} /></div>
             <h2>{item.title}</h2>
             <p>{typeLabels[model.type]} · {item.episodeCount || "--"} 集 · {item.category || "其他"}</p>
             <div className="monitor-metrics"><span>播放 {count(item.playCount)}</span><span>热度 {count(item.hotCount)}</span><span>收藏 {count(item.collectCount)}</span><span>点赞 {count(item.likeCount)}</span></div>

@@ -102,9 +102,13 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .poster-image img, .poster-image .cover-fallback { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .25s ease; }
 .poster-card:hover .poster-image img { transform: scale(1.02); }
 .cover-fallback { background: linear-gradient(145deg, #4d2c31, #20191d 54%, #131418); }
-.rank-label { position: absolute; top: 9px; left: 9px; max-width: calc(100% - 18px); padding: 5px 8px; overflow: hidden; border-radius: 6px; color: white; background: rgba(204, 46, 56, .94); font-size: 10px; font-weight: 650; white-space: nowrap; text-overflow: ellipsis; }
+.rank-label { position: absolute; bottom: 9px; left: 9px; max-width: calc(100% - 18px); padding: 5px 8px; overflow: hidden; border-radius: 6px; color: white; background: rgba(204, 46, 56, .94); font-size: 10px; font-weight: 650; white-space: nowrap; text-overflow: ellipsis; }
 .rank-index { position: absolute; top: 9px; left: 9px; z-index: 1; padding: 6px 9px; border-radius: 7px; color: #fff; background: linear-gradient(135deg, #ed5a62, #c92f39); box-shadow: 0 5px 15px rgba(0, 0, 0, .24); font-size: 11px; font-weight: 800; letter-spacing: .02em; }
-.rank-index + .rank-label { top: auto; bottom: 9px; }
+.poster-badges { position: absolute; top: 9px; right: 9px; left: 9px; z-index: 1; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
+.poster-badges .rank-index { position: static; }
+.poster-image .video-orientation-badge, .monitor-cover .video-orientation-badge { position: absolute; top: 9px; right: 9px; bottom: auto; left: auto; z-index: 1; padding: 6px 8px; border-radius: 7px; color: #d5d8df; background: rgba(23, 27, 35, .9); box-shadow: 0 5px 15px rgba(0, 0, 0, .24); font-size: 11px; font-weight: 700; line-height: normal; white-space: nowrap; }
+.poster-image .poster-badges .video-orientation-badge { position: static; margin-left: auto; }
+.poster-image .video-orientation-badge.detected, .monitor-cover .video-orientation-badge.detected { color: #fff; background: rgba(30, 76, 107, .94); }
 .poster-copy { padding: 12px 12px 13px; }
 .poster-copy h2 { margin: 0; overflow: hidden; color: var(--text); font-size: 14px; line-height: 1.4; font-weight: 620; white-space: nowrap; text-overflow: ellipsis; }
 .poster-copy p { margin: 6px 0 0; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

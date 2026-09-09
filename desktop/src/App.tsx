@@ -19,6 +19,7 @@ import {
 import { AppRail } from "./components/AppRail";
 import { CategoryFilter } from "./components/CategoryFilter";
 import { Cover } from "./components/Cover";
+import { VideoOrientationBadge } from "./components/VideoOrientationBadge";
 import { DownloadManagerPage } from "./components/DownloadManagerPage";
 import { CheckIcon, CloseIcon, SearchIcon } from "./components/icons";
 import { SeriesInspector } from "./components/SeriesInspector";
@@ -549,7 +550,7 @@ export default function App() {
         />
       ) : null}
       {nav === "queue" ? null : nav === "monitor" ? (
-        <NewReleasesPage model={monitor} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
+        <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
       ) : nav === "settings" ? (
         <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />
       ) : (
@@ -607,7 +608,14 @@ export default function App() {
               <div className="poster-grid">
                 {items.map((item, index) => (
                   <button type="button" className={`poster-card ${selected?.bookId === item.bookId ? "selected" : ""}`} key={item.bookId} onClick={() => void selectSeries(item)}>
-                    <div className="poster-image"><Cover src={item.cover} title={item.title} />{nav === "rank" ? <span className="rank-index">NO.{index + 1}</span> : null}{item.rankTags[0]?.label ? <span className="rank-label">{item.rankTags[0].label}</span> : null}</div>
+                    <div className="poster-image">
+                      <Cover src={item.cover} title={item.title} />
+                      <div className="poster-badges">
+                        {nav === "rank" ? <span className="rank-index">NO.{index + 1}</span> : null}
+                        <VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={!isPreview} />
+                      </div>
+                      {item.rankTags[0]?.label ? <span className="rank-label">{item.rankTags[0].label}</span> : null}
+                    </div>
                     <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || (nav === "rank" ? rankTypeLabel(rankType) : item.contentTypeCode === 2 ? "漫剧" : "真人剧")}{item.score ? ` · ${item.score}分` : ""}</p></div>
                   </button>
                 ))}
