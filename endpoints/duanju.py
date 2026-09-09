@@ -4,13 +4,14 @@ import base64
 import copy
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from core.cache import TTLCache, make_cache_key
 from core.duanju_feeds import (
@@ -25,8 +26,9 @@ from core.duanju_feeds import (
     parse_rank_page as parse_captured_rank_page,
     parse_subscribe_page,
 )
-from core.playback import prepare_compatible_video
+from core.playback import prepare_compatible_video, prepare_streaming_video, while_connected
 from core.mp4_decrypt import decrypt_mp4, derive_key_from_spade_a
+from core.video_download import create_video_client, download_video
 from core.new_releases import (
     SHANGHAI,
     CursorStore,
@@ -43,8 +45,6 @@ VIDEO_URL = 'https://reading.snssdk.com/novel/player/multi_video_model/v1/'
 VIDEO_QUERY = 'aid=8662&device_platform=android&update_version_code=70132'
 DRAMA_TAB_TYPE = '11'
 MANJU_TAB_TYPE = '19'
-VIDEO_UA = ('com.dragon.read/58332 (Linux; U; Android 9; zh_CN; HD1900; '
-            'Build/PQ3A.190705.06091305;tt-ok/3.12.13.1)')
 # 剧场栏 bookmall 发现页: 番茄畅读 7.2.3.32 (aid=8662 novelread)
 BOOKMALL_API = 'https://api5-normal-sinfonlinec.fqnovel.com'
 DRAMA_BOOKMALL_TAB = '38'   # BookstoreTabType.real_person_series
@@ -67,8 +67,6 @@ RANK_CONTENT_TYPE_CODES = {
 }
 AI_VIDEO_CATEGORY_TYPE = 'ai_video'
 RANK_BOARDS = dict(CAPTURED_RANK_BOARDS)
-DOWNLOAD_TIMEOUT = 120.0
-MIN_VIDEO_BYTES = 1024
 
 _duanju_search_cache = TTLCache(default_ttl=300)
 _duanju_detail_cache = TTLCache(default_ttl=3600)
@@ -1017,23 +1015,11 @@ async def duanju_key(
     })
 
 
-async def _download_encrypted(urls: list[str]) -> bytes:
-    """按主/备 CDN 顺序下载加密 MP4,无需签名。"""
-    errors = []
-    async with httpx.AsyncClient(timeout=DOWNLOAD_TIMEOUT, verify=False, follow_redirects=True) as client:
-        for url in urls:
-            try:
-                response = await client.get(url, headers={'User-Agent': VIDEO_UA})
-                if response.status_code != 200:
-                    errors.append(f'{url.split("?")[0]}: HTTP {response.status_code}')
-                    continue
-                if len(response.content) < MIN_VIDEO_BYTES:
-                    errors.append(f'{url.split("?")[0]}: 内容过小 {len(response.content)} 字节')
-                    continue
-                return response.content
-            except httpx.HTTPError as exc:
-                errors.append(f'{url.split("?")[0]}: {exc}')
-    raise RuntimeError(f'所有 CDN 下载失败: {"; ".join(errors)}')
+async def _download_encrypted(urls: list[str], client=None) -> bytes:
+    if client is not None:
+        return await download_video(urls, client)
+    async with create_video_client() as temporary_client:
+        return await download_video(urls, temporary_client)
 
 
 @router.get('/duanju/download')
@@ -1042,28 +1028,42 @@ async def duanju_download(
     item_id: str = Query(..., min_length=1, description='剧集 item_id / vid'),
     definition: str = Query('720p', description='目标清晰度,命中不到时自动降/升档'),
     playback_compat: bool = Query(False, description='仅在线观看: 转为 H.264/AAC 兼容 MP4'),
+    playback_stream: bool = Query(False, description='仅兼容播放: 边转换边播放'),
 ):
     """下载并解密剧集,直接返回可播放 MP4。
 
     流程: multi_video_model → spade_a 派生 AES key → 下载加密 MP4 → CENC AES-CTR 解密 → 返回明文 MP4。
     """
+    started = time.perf_counter()
     try:
-        data = await _fetch_video_model(request, item_id)
+        model = _fetch_video_model(request, item_id)
+        data = await while_connected(model, request.is_disconnected) if playback_compat else await model
+        model_done = time.perf_counter()
         source = _pick_source(data['sources'], definition, prefer_h264=playback_compat)
         key_hex = derive_key_from_spade_a(source['spade_a'])
-        encrypted = await _download_encrypted(source['urls'])
+        download = _download_encrypted(source['urls'], getattr(request.app.state, 'video_client', None))
+        encrypted = await while_connected(download, request.is_disconnected) if playback_compat else await download
+        download_done = time.perf_counter()
     except (RuntimeError, ValueError) as exc:
         logger.warning('短剧下载失败: %s', exc)
         return error(str(exc), code=-8, status_code=502)
 
     try:
-        decrypted = decrypt_mp4(encrypted, key_hex)
+        decrypted = await asyncio.to_thread(decrypt_mp4, encrypted, key_hex)
     except ValueError as exc:
         logger.error('短剧解密失败: %s', exc)
         return error(f'视频解密失败: {exc}', code=-9, status_code=502)
 
+    logger.info('视频准备耗时: %s %s, 地址 %.3fs, CDN %.3fs, 解密 %.3fs', item_id, source['definition'], model_done-started, download_done-model_done, time.perf_counter()-download_done)
     if playback_compat:
         try:
+            if playback_stream:
+                stream, metadata = await prepare_streaming_video(decrypted, request.is_disconnected)
+                return StreamingResponse(stream, media_type='video/mp4', headers={
+                    'Cache-Control': 'no-store', 'X-Duanju-Playback': 'h264-aac-stream',
+                    'X-Playback-Mime': metadata['mime'], 'X-Playback-Duration': metadata['duration'],
+                    'X-Duanju-Definition': str(source['definition']),
+                })
             decrypted = await prepare_compatible_video(decrypted, request.is_disconnected)
         except RuntimeError as exc:
             logger.warning('播放兼容处理失败: %s', exc)

@@ -15,6 +15,9 @@ pub mod process_control;
 pub mod scheduling;
 pub mod storage;
 pub mod tools;
+#[cfg(all(test, unix))]
+#[path = "merge_windows.rs"]
+mod windows_merge_tests;
 
 pub use ai::{select_subtitle_source, NativeAIExecutor, SubtitleSource};
 

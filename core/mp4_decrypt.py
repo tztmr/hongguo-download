@@ -120,15 +120,11 @@ def aes_ctr_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
     raise ValueError('AES IV 必须为 16 字节')
   if not data:
     return data
-  cipher = AES.new(key, AES.MODE_ECB)
-  high, low = struct.unpack('>QQ', iv)
-  output = bytearray(len(data))
-  for block_index, start in enumerate(range(0, len(data), 16)):
-    counter = struct.pack('>QQ', high, (low + block_index) & 0xFFFFFFFFFFFFFFFF)
-    stream = cipher.encrypt(counter)
-    block = data[start:start + 16]
-    output[start:start + len(block)] = bytes(a ^ b for a, b in zip(block, stream))
-  return bytes(output)
+  # Keep the high 64 bits fixed, including when the low counter wraps. Using
+  # a 128-bit initial counter instead would silently change that behaviour.
+  return AES.new(
+    key, AES.MODE_CTR, nonce=iv[:8], initial_value=int.from_bytes(iv[8:], 'big'),
+  ).decrypt(data)
 
 
 def _find_box(data: bytes | bytearray, box_type: str, start: int, end: int) -> Box | None:

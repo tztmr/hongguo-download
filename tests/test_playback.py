@@ -78,6 +78,24 @@ class PlaybackProcessTests(unittest.IsolatedAsyncioTestCase):
         process.kill.assert_called_once()
         self.assertEqual(process.returncode, -9)
 
+    async def test_close_during_preparation_cancels_network_task(self):
+        closed = asyncio.Event()
+        async def pending():
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+        started = asyncio.Event()
+        async def disconnected():
+            await started.wait()
+            return True
+        task = asyncio.create_task(playback.while_connected(pending(), disconnected))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        started.set()
+        with self.assertRaises(asyncio.CancelledError): await task
+        self.assertTrue(closed.is_set())
+
     async def test_missing_tools_fail_before_any_processing(self):
         with patch.dict(os.environ, {'HONGGUO_PLAYBACK_TOOLS_DIR': '/nonexistent/hongguo-tools'}):
             with self.assertRaisesRegex(RuntimeError, '缺少内置播放组件'):
@@ -92,6 +110,35 @@ class PlaybackProcessTests(unittest.IsolatedAsyncioTestCase):
             encoded = args(codec, pixel)
             self.assertEqual(encoded[encoded.index('-c:v')+1], 'libx264')
             self.assertIn('yuv420p', encoded)
+
+    @unittest.skipUnless(os.environ.get('HONGGUO_TEST_PLAYBACK_TOOLS'), 'requires bundled FFmpeg/FFprobe')
+    async def test_stream_is_fragmented_decodable_and_disconnect_releases_slot(self):
+        tools = Path(os.environ['HONGGUO_TEST_PLAYBACK_TOOLS']).resolve()
+        suffix = '.exe' if os.name == 'nt' else ''
+        ffmpeg = tools / ('ffmpeg'+suffix)
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HONGGUO_PLAYBACK_TOOLS_DIR':str(tools)}):
+            source = (Path(__file__).parent / 'fixtures' / 'playback-hevc.mp4').read_bytes()
+            for data in [source, await playback.prepare_compatible_video(source)]:
+                stream, metadata = await playback.prepare_streaming_video(data)
+                self.assertIn('avc1.', metadata['mime'])
+                self.assertGreater(float(metadata['duration']), 0)
+                output = Path(directory) / 'stream.mp4'
+                output.write_bytes(b''.join([part async for part in stream]))
+                self.assertIn(b'moof', output.read_bytes())
+                decoded = await playback._run([str(ffmpeg), '-v', 'error', '-i', str(output), '-an', '-frames:v', '2', '-f', 'framemd5', '-'])
+                self.assertEqual(len([line for line in decoded.splitlines() if not line.startswith(b'#')]), 2)
+            processes = []
+            original_spawn = asyncio.create_subprocess_exec
+            async def spawn(*args, **kwargs):
+                p = await original_spawn(*args, **kwargs)
+                processes.append(p)
+                return p
+            with patch('core.playback.asyncio.create_subprocess_exec', spawn):
+                stream, _ = await playback.prepare_streaming_video(source)
+                self.assertTrue(playback._slots.locked())
+                await stream.aclose()
+            self.assertFalse(playback._slots.locked())
+            self.assertTrue(all(p.returncode is not None for p in processes))
 
     @unittest.skipUnless(os.environ.get('HONGGUO_TEST_PLAYBACK_TOOLS'), 'requires bundled FFmpeg/FFprobe')
     async def test_real_hevc_and_ten_bit_avc_are_compatible_and_decodable(self):

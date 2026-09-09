@@ -9,14 +9,20 @@ use serde::Deserialize;
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
-    os::windows::fs::MetadataExt,
     path::{Component, Path, PathBuf},
     process::{Child, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+#[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +89,20 @@ pub fn can_stream_copy(probes: &[MediaProbe]) -> bool {
 }
 
 pub fn probe_media(tools: &MediaTools, path: &Path) -> Result<MediaProbe, AppError> {
+    Ok(probe_details(tools, path)?.media)
+}
+
+struct ProbeDetails {
+    media: MediaProbe,
+    video_config: Vec<serde_json::Value>,
+    audio_config: Option<Vec<serde_json::Value>>,
+    video_frames: Option<u64>,
+    video_start: f64,
+    video_duration: f64,
+    audio_start: f64,
+}
+
+fn probe_details(tools: &MediaTools, path: &Path) -> Result<ProbeDetails, AppError> {
     let output = tools
         .ffprobe_command()
         .args([
@@ -92,6 +112,8 @@ pub fn probe_media(tools: &MediaTools, path: &Path) -> Result<MediaProbe, AppErr
             "json",
             "-show_streams",
             "-show_format",
+            "-show_data_hash",
+            "sha256",
         ])
         .arg(path)
         .stdin(Stdio::null())
@@ -106,7 +128,73 @@ pub fn probe_media(tools: &MediaTools, path: &Path) -> Result<MediaProbe, AppErr
     if !output.status.success() {
         return Err(AppError::new("FFPROBE_FAILED", "媒体文件无法读取"));
     }
-    parse_probe_json(&output.stdout)
+    let media = parse_probe_json(&output.stdout)?;
+    let raw: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| invalid_probe())?;
+    let streams = raw["streams"].as_array().ok_or_else(invalid_probe)?;
+    let video = streams
+        .iter()
+        .find(|s| s["codec_type"] == "video")
+        .ok_or_else(invalid_probe)?;
+    let number = |value: &serde_json::Value, fallback: f64| {
+        value
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(fallback)
+    };
+    let audio = streams.iter().find(|s| s["codec_type"] == "audio");
+    Ok(ProbeDetails {
+        video_config: [
+            "extradata_hash",
+            "profile",
+            "level",
+            "pix_fmt",
+            "sample_aspect_ratio",
+            "color_range",
+            "color_space",
+            "color_transfer",
+            "color_primaries",
+        ]
+        .iter()
+        .map(|key| video[key].clone())
+        .collect(),
+        audio_config: audio.map(|a| {
+            ["extradata_hash", "profile", "channel_layout"]
+                .iter()
+                .map(|key| a[key].clone())
+                .collect()
+        }),
+        video_frames: video["nb_frames"]
+            .as_str()
+            .and_then(|value| value.parse().ok()),
+        video_start: number(&video["start_time"], f64::NAN),
+        video_duration: number(&video["duration"], f64::NAN),
+        audio_start: audio.map(|a| number(&a["start_time"], 0.0)).unwrap_or(0.0),
+        media,
+    })
+}
+
+fn can_copy_video(probes: &[ProbeDetails]) -> bool {
+    let Some(first) = probes.first() else {
+        return false;
+    };
+    // Audio normalisation is safe only when each episode shares decoder config
+    // and starts on the same zero-based video timeline.
+    matches!(first.media.video.codec_name.as_str(), "h264" | "hevc")
+        && first
+            .video_config
+            .first()
+            .is_some_and(|v| v.as_str().is_some())
+        && probes.iter().all(|p| {
+            let mut video = p.media.video.clone();
+            video.time_base = first.media.video.time_base.clone();
+            video == first.media.video
+                && p.video_config == first.video_config
+                && p.video_start.abs() <= 0.002
+                && p.video_duration.is_finite()
+                && p.video_duration > 0.0
+        })
 }
 
 pub fn run_merge<F>(
@@ -167,14 +255,36 @@ fn run_merge_inner(
 
     let temp = TempDirectory::create(&root)?;
     let concat = temp.path.join("concat.txt");
-    write_concat_file(&concat, &inputs)?;
-    let mut probes = Vec::with_capacity(inputs.len());
-    for input in &inputs {
+    let mut details = Vec::with_capacity(inputs.len());
+    // Probes only read a small amount of metadata. Bound parallelism so hundreds
+    // of episodes don't pay one Windows process-start delay at a time.
+    for batch in inputs.chunks(4) {
         check_cancelled(cancellation)?;
-        probes.push(probe_media(tools, &input.path)?);
+        let probed = thread::scope(|scope| {
+            let readers = batch
+                .iter()
+                .map(|input| scope.spawn(move || probe_details(tools, &input.path)))
+                .collect::<Vec<_>>();
+            readers
+                .into_iter()
+                .map(|reader| reader.join().map_err(|_| invalid_probe())?)
+                .collect::<Result<Vec<_>, AppError>>()
+        })?;
+        details.extend(probed);
+        progress(event(
+            &format!("正在检测媒体参数 {}/{}", details.len(), inputs.len()),
+            0.0,
+            false,
+        ));
     }
     validate_inputs(&root, &inputs)?;
-    let compatible = can_stream_copy(&probes);
+    let probes = details.iter().map(|p| p.media.clone()).collect::<Vec<_>>();
+    let compatible = can_stream_copy(&probes)
+        && details.iter().all(|p| {
+            p.video_config == details[0].video_config && p.audio_config == details[0].audio_config
+        });
+    let audio_only =
+        request.mode == Some(MergeMode::Auto) && !compatible && can_copy_video(&details);
     let needs_transcode = match request.mode {
         Some(MergeMode::Copy) => {
             if !compatible {
@@ -186,10 +296,10 @@ fn run_merge_inner(
             false
         }
         Some(MergeMode::Transcode) => true,
-        Some(MergeMode::Auto) => !compatible,
+        Some(MergeMode::Auto) => !compatible && !audio_only,
         None => request.transcode_h264,
     };
-    if !needs_transcode && !compatible {
+    if !needs_transcode && !compatible && !audio_only {
         return Err(AppError::new(
             "MERGE_TRANSCODE_REQUIRED",
             "输入媒体参数不一致，需要开启 H.264 转码",
@@ -197,52 +307,103 @@ fn run_merge_inner(
     }
 
     let temp_output = temp.path.join("merged.mp4");
-    let expected_duration = probes
-        .iter()
-        .map(|probe| probe.duration_seconds)
-        .sum::<f64>();
-    let encoder = if needs_transcode {
-        let hardware = probe_video_hardware(tools);
-        select_video_encoder(true, hardware.nvenc_available)
+    let normalize = audio_only || needs_transcode;
+    let has_audio = probes.iter().any(|p| p.audio.is_some());
+    let expected_duration = if normalize {
+        let encoder = if needs_transcode {
+            let hardware = probe_video_hardware(tools);
+            select_video_encoder(true, hardware.nvenc_available)
+        } else {
+            VideoEncoder::Copy
+        };
+        let spec = NormalizeSpec::new(&details, encoder, request.quality)?;
+        match normalize_inputs(
+            tools,
+            &inputs,
+            &details,
+            &temp.path,
+            &spec,
+            cancellation,
+            progress,
+        ) {
+            Ok(duration) => duration,
+            Err(error) if error.code == "MERGE_NVENC_RETRY" => {
+                progress(event("NVENC 不可用，改用 CPU 重新编码", 0.0, false));
+                let spec = NormalizeSpec {
+                    encoder: VideoEncoder::Libx264,
+                    ..spec
+                };
+                normalize_inputs(
+                    tools,
+                    &inputs,
+                    &details,
+                    &temp.path,
+                    &spec,
+                    cancellation,
+                    progress,
+                )?
+            }
+            Err(error) => return Err(error),
+        }
     } else {
-        VideoEncoder::Copy
+        write_concat_file(&concat, &inputs)?;
+        probes.iter().map(|p| p.duration_seconds).sum::<f64>()
     };
-    progress(event(encoder_stage(encoder), 0.0, false));
+    let mut final_progress = |mut update: MergeProgress| {
+        if normalize {
+            update.stage = if has_audio {
+                "正在无损合并画面并编码音频"
+            } else {
+                "正在无损合并画面"
+            }
+            .into();
+            update.percent = 85.0 + update.percent * 0.14;
+        }
+        progress(update);
+    };
+    final_progress(event(encoder_stage(VideoEncoder::Copy), 0.0, false));
     let outcome = run_ffmpeg(
         tools,
         &concat,
         &temp_output,
-        encoder,
-        request.quality,
+        normalize && has_audio,
         expected_duration,
         cancellation,
-        progress,
+        &mut final_progress,
     )?;
-    if !outcome.success && encoder == VideoEncoder::Nvenc && nvenc_runtime_failure(&outcome.stderr)
-    {
-        let _ = fs::remove_file(&temp_output);
-        progress(event("NVENC 不可用，改用 CPU 重新编码", 0.0, false));
-        let fallback = run_ffmpeg(
-            tools,
-            &concat,
-            &temp_output,
-            VideoEncoder::Libx264,
-            request.quality,
-            expected_duration,
-            cancellation,
-            progress,
-        )?;
-        if !fallback.success {
-            return Err(ffmpeg_error(fallback.stderr));
-        }
-    } else if !outcome.success {
+    if !outcome.success {
         return Err(ffmpeg_error(outcome.stderr));
     }
 
-    let merged = probe_media(tools, &temp_output)?;
+    let checked_output = probe_details(tools, &temp_output)?;
+    let merged = &checked_output.media;
+    if !needs_transcode {
+        let expected_frames = details
+            .iter()
+            .map(|p| p.video_frames)
+            .collect::<Option<Vec<_>>>();
+        if let (Some(frames), Some(actual)) = (expected_frames, checked_output.video_frames) {
+            let expected = frames.iter().sum::<u64>();
+            if expected != actual {
+                return Err(AppError::new(
+                    "MERGE_VALIDATION_FAILED",
+                    format!("合并输出验证失败：预期 {expected} 帧，实际 {actual} 帧"),
+                ));
+            }
+        }
+    }
     let tolerance = (inputs.len() as f64 * 0.01).clamp(0.25, 2.0);
     if (merged.duration_seconds - expected_duration).abs() > tolerance {
-        return Err(AppError::new("MERGE_VALIDATION_FAILED", "合并输出验证失败"));
+        return Err(AppError::new(
+            "MERGE_VALIDATION_FAILED",
+            format!(
+                "合并输出验证失败：预期 {:.3} 秒，实际 {:.3} 秒，差 {:.3} 秒（{} 集）",
+                expected_duration,
+                merged.duration_seconds,
+                (merged.duration_seconds - expected_duration).abs(),
+                inputs.len()
+            ),
+        ));
     }
     check_cancelled(cancellation)?;
     if request.conflict_policy == MergeConflictPolicy::Overwrite && output_path.exists() {
@@ -341,7 +502,7 @@ fn validate_inputs(root: &Path, inputs: &[MergeInput]) -> Result<(), AppError> {
         if !path.starts_with(root)
             || !metadata.is_file()
             || is_reparse_point(&metadata)
-            || metadata.file_size() != input.size
+            || metadata.len() != input.size
             || modified != input.modified_unix_nanos
         {
             return Err(input_changed("input snapshot mismatch"));
@@ -359,7 +520,14 @@ fn ensure_real_directory(path: &Path) -> Result<(), AppError> {
 }
 
 fn is_reparse_point(metadata: &fs::Metadata) -> bool {
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    #[cfg(windows)]
+    {
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
 }
 
 fn validate_output_name(name: &str) -> Result<(), AppError> {
@@ -396,12 +564,177 @@ fn write_concat_file(path: &Path, inputs: &[MergeInput]) -> Result<(), AppError>
     file.sync_all().map_err(output_invalid)
 }
 
+struct NormalizeSpec {
+    encoder: VideoEncoder,
+    quality: MergeQuality,
+    audio: bool,
+    width: u32,
+    height: u32,
+    rate: String,
+    fps: f64,
+}
+
+impl NormalizeSpec {
+    fn new(
+        probes: &[ProbeDetails],
+        encoder: VideoEncoder,
+        quality: MergeQuality,
+    ) -> Result<Self, AppError> {
+        let video = &probes[0].media.video;
+        let rate = video.frame_rate.clone().ok_or_else(invalid_probe)?;
+        let (a, b) = rate.split_once('/').ok_or_else(invalid_probe)?;
+        let fps = a.parse::<f64>().map_err(|_| invalid_probe())?
+            / b.parse::<f64>().map_err(|_| invalid_probe())?;
+        if !fps.is_finite() || !(1.0..=120.0).contains(&fps) {
+            return Err(invalid_probe());
+        }
+        Ok(Self {
+            encoder,
+            quality,
+            audio: probes.iter().any(|p| p.media.audio.is_some()),
+            width: video
+                .width
+                .filter(|v| (2..=8192).contains(v))
+                .ok_or_else(invalid_probe)?
+                & !1,
+            height: video
+                .height
+                .filter(|v| (2..=8192).contains(v))
+                .ok_or_else(invalid_probe)?
+                & !1,
+            rate,
+            fps,
+        })
+    }
+    fn duration(&self, probe: &ProbeDetails) -> f64 {
+        let duration = if probe.video_duration.is_finite() && probe.video_duration > 0.0 {
+            probe.video_duration
+        } else {
+            probe.media.duration_seconds
+        };
+        if self.encoder == VideoEncoder::Copy {
+            duration
+        } else {
+            (duration * self.fps).round().max(1.0) / self.fps
+        }
+    }
+}
+
+fn normalize_inputs(
+    tools: &MediaTools,
+    inputs: &[MergeInput],
+    probes: &[ProbeDetails],
+    directory: &Path,
+    spec: &NormalizeSpec,
+    cancellation: &CancellationToken,
+    progress: &mut dyn FnMut(MergeProgress),
+) -> Result<f64, AppError> {
+    let durations = probes.iter().map(|p| spec.duration(p)).collect::<Vec<_>>();
+    let total = durations.iter().sum::<f64>();
+    let mut completed = 0.0;
+    let mut normalized = Vec::new();
+    for (index, (input, probe)) in inputs.iter().zip(probes).enumerate() {
+        check_cancelled(cancellation)?;
+        let path = directory.join(format!("segment-{index:05}.mov"));
+        let mut command = tools.ffmpeg_command();
+        command.args(["-hide_banner", "-y", "-i"]).arg(&input.path);
+        let audio = probe.media.audio.is_some();
+        if spec.audio && !audio {
+            command.args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
+        }
+        command.args(["-map", "0:v:0"]);
+        let duration = durations[index];
+        if spec.audio {
+            let start = if probe.video_start.is_finite() {
+                probe.video_start
+            } else {
+                0.0
+            };
+            let offset = if audio {
+                probe.audio_start - start
+            } else {
+                0.0
+            };
+            command.args(["-map", if audio { "0:a:0" } else { "1:a:0" }, "-af"])
+                .arg(format!("asetpts=PTS-STARTPTS+{offset:.9}/TB,aresample=48000:async=1:first_pts=0,apad,atrim=duration={duration:.9}"));
+        }
+        match spec.encoder {
+            VideoEncoder::Copy => {
+                command.args(["-c:v", "copy"]);
+            }
+            encoder => {
+                command.arg("-vf").arg(format!("setpts=PTS-STARTPTS,fps={},scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1", spec.rate, spec.width, spec.height, spec.width, spec.height));
+                match encoder {
+                    VideoEncoder::Nvenc => {
+                        command.args(nvenc_args(spec.quality));
+                    }
+                    VideoEncoder::VideoToolbox => {
+                        command.args(["-c:v", "h264_videotoolbox"]);
+                    }
+                    _ => {
+                        command.args(libx264_args(spec.quality));
+                    }
+                }
+                command.args(["-pix_fmt", "yuv420p"]);
+            }
+        }
+        // PCM intermediates avoid accumulating AAC priming at each episode join.
+        if spec.audio {
+            command.args(["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]);
+        } else {
+            command.arg("-an");
+        }
+        command
+            .args([
+                "-t",
+                &format!("{duration:.9}"),
+                "-video_track_timescale",
+                "90000",
+                "-progress",
+                "pipe:1",
+                "-nostats",
+            ])
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let stage = format!(
+            "{} {}/{}",
+            if spec.encoder == VideoEncoder::Copy {
+                "保留原画面，统一音频与时间轴"
+            } else {
+                encoder_stage(spec.encoder)
+            },
+            index + 1,
+            inputs.len()
+        );
+        let mut update = |mut event: MergeProgress| {
+            event.percent = (completed + duration * event.percent / 100.0) / total * 85.0;
+            progress(event);
+        };
+        update(event(&stage, 0.0, false));
+        let result = run_command(command, duration, &stage, cancellation, &mut update)?;
+        if !result.success {
+            if spec.encoder == VideoEncoder::Nvenc && nvenc_runtime_failure(&result.stderr) {
+                return Err(AppError::new("MERGE_NVENC_RETRY", "NVENC 不可用"));
+            }
+            return Err(ffmpeg_error(result.stderr));
+        }
+        completed += duration;
+        normalized.push(MergeInput {
+            path,
+            ..input.clone()
+        });
+    }
+    write_concat_file(&directory.join("concat.txt"), &normalized)?;
+    Ok(total)
+}
+
 fn run_ffmpeg(
     tools: &MediaTools,
     concat: &Path,
     output: &Path,
-    encoder: VideoEncoder,
-    quality: MergeQuality,
+    audio_only: bool,
     duration: f64,
     cancellation: &CancellationToken,
     progress: &mut dyn FnMut(MergeProgress),
@@ -411,19 +744,9 @@ fn run_ffmpeg(
     command
         .arg(concat)
         .args(["-map", "0:v:0", "-map", "0:a:0?"]);
-    match encoder {
-        VideoEncoder::Copy => {
-            command.args(["-c", "copy"]);
-        }
-        VideoEncoder::Nvenc => {
-            command.args(nvenc_args(quality));
-        }
-        VideoEncoder::Libx264 => {
-            command.args(libx264_args(quality));
-        }
-        VideoEncoder::VideoToolbox => {
-            command.args(["-c:v", "h264_videotoolbox", "-c:a", "aac"]);
-        }
+    command.args(["-c", "copy"]);
+    if audio_only {
+        command.args(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]);
     }
     command
         .args(["-movflags", "+faststart", "-progress", "pipe:1", "-nostats"])
@@ -431,17 +754,39 @@ fn run_ffmpeg(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    run_command(
+        command,
+        duration,
+        encoder_stage(VideoEncoder::Copy),
+        cancellation,
+        progress,
+    )
+}
+
+fn run_command(
+    mut command: std::process::Command,
+    duration: f64,
+    stage: &str,
+    cancellation: &CancellationToken,
+    progress: &mut dyn FnMut(MergeProgress),
+) -> Result<ProcessOutcome, AppError> {
     cancellation.prepare_command(&mut command);
     let mut child = command.spawn().map_err(|error| {
         AppError::with_cause("FFMPEG_FAILED", "无法运行打包的合并工具", error.to_string())
     })?;
-    cancellation.register_child(&mut child)?;
-    collect_process(child, duration, cancellation, progress)
+    if let Err(error) = cancellation.register_child(&mut child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        cancellation.clear_child(child.id());
+        return Err(error);
+    }
+    collect_process(child, duration, stage, cancellation, progress)
 }
 
 fn collect_process(
     mut child: Child,
     duration: f64,
+    stage: &str,
     cancellation: &CancellationToken,
     progress: &mut dyn FnMut(MergeProgress),
 ) -> Result<ProcessOutcome, AppError> {
@@ -477,7 +822,7 @@ fn collect_process(
                 } else {
                     0.0
                 };
-                progress(event("merging", percent, false));
+                progress(event(stage, percent, false));
             }
         }
         if cancellation.is_cancelled() {
@@ -571,6 +916,8 @@ struct ProcessOutcome {
     stderr: String,
 }
 
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
 struct TempDirectory {
     path: PathBuf,
 }
@@ -582,8 +929,9 @@ impl TempDirectory {
             .unwrap_or_default()
             .as_nanos();
         let path = root.join(format!(
-            ".hongguo-merge-{}-{random:032x}",
-            std::process::id()
+            ".hongguo-merge-{}-{random:032x}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).map_err(output_invalid)?;
         ensure_real_directory(&path)?;
@@ -635,4 +983,301 @@ fn output_invalid(cause: impl std::fmt::Display) -> AppError {
 }
 fn ffmpeg_error(cause: impl std::fmt::Display) -> AppError {
     AppError::with_cause("FFMPEG_FAILED", "视频合并失败", cause.to_string())
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+
+    fn tools() -> Option<MediaTools> {
+        let directory = std::env::var_os("HONGGUO_TEST_PLAYBACK_TOOLS")?;
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        let root = PathBuf::from(directory);
+        Some(MediaTools::from_test_paths(
+            root.join(format!("ffmpeg{suffix}")),
+            root.join(format!("ffprobe{suffix}")),
+        ))
+    }
+
+    fn snapshot(path: PathBuf, episode_index: u32) -> MergeInput {
+        let meta = fs::metadata(&path).unwrap();
+        MergeInput {
+            path,
+            episode_index,
+            size: meta.len(),
+            modified_unix_nanos: meta
+                .modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        }
+    }
+
+    fn frame_hashes(tools: &MediaTools, path: &Path) -> Vec<String> {
+        let out = tools
+            .ffmpeg_command()
+            .args(["-v", "error", "-i"])
+            .arg(path)
+            .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| l.rsplit(',').next().unwrap().trim().into())
+            .collect()
+    }
+
+    #[test]
+    fn differing_time_bases_do_not_stretch_video_or_trigger_gpu_transcoding() {
+        let Some(tools) = tools() else {
+            return;
+        };
+        let temp = TempDirectory::create(&std::env::temp_dir()).unwrap();
+        let source = temp.path.join("base.mp4");
+        let second = temp.path.join("different-timebase.mp4");
+        assert!(tools
+            .ffmpeg_command()
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=128x192:rate=12",
+                "-t",
+                "1",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p"
+            ])
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success());
+        assert!(tools
+            .ffmpeg_command()
+            .args(["-v", "error", "-i"])
+            .arg(&source)
+            .args(["-c", "copy", "-video_track_timescale", "90000"])
+            .arg(&second)
+            .status()
+            .unwrap()
+            .success());
+        let request = MergeRequest {
+            series_root: temp.path.clone(),
+            output_file_name: "时长验证.mp4".into(),
+            inputs: vec![snapshot(source.clone(), 1), snapshot(second, 2)],
+            transcode_h264: false,
+            mode: Some(MergeMode::Auto),
+            quality: MergeQuality::High,
+            conflict_policy: MergeConflictPolicy::FailIfExists,
+        };
+        let mut stages = Vec::new();
+        let result = run_merge(&tools, request, &CancellationToken::default(), |p| {
+            stages.push(p.stage)
+        })
+        .unwrap();
+        assert!(!stages
+            .iter()
+            .any(|s| s.contains("GPU") || s.contains("CPU")));
+        assert!(
+            (probe_media(&tools, &result.output_path)
+                .unwrap()
+                .duration_seconds
+                - 2.0)
+                .abs()
+                < 0.03
+        );
+        assert_eq!(
+            frame_hashes(&tools, &result.output_path),
+            (0..2)
+                .flat_map(|_| frame_hashes(&tools, &source))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn incompatible_video_normalises_each_episode_before_concat() {
+        let Some(tools) = tools() else {
+            return;
+        };
+        let temp = TempDirectory::create(&std::env::temp_dir()).unwrap();
+        let mut inputs = Vec::new();
+        for (i, filter) in [
+            (1, "testsrc2=size=128x192:rate=12"),
+            (2, "testsrc2=size=192x128:rate=24"),
+        ] {
+            let path = temp.path.join(format!("{i}.mp4"));
+            assert!(tools
+                .ffmpeg_command()
+                .args([
+                    "-v", "error", "-f", "lavfi", "-i", filter, "-t", "1", "-an", "-c:v",
+                    "libx264", "-pix_fmt", "yuv420p"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success());
+            inputs.push(snapshot(path, i));
+        }
+        let request = MergeRequest {
+            series_root: temp.path.clone(),
+            output_file_name: "不同参数.mp4".into(),
+            inputs,
+            transcode_h264: false,
+            mode: Some(MergeMode::Auto),
+            quality: MergeQuality::Balanced,
+            conflict_policy: MergeConflictPolicy::FailIfExists,
+        };
+        let result = run_merge(&tools, request, &CancellationToken::default(), |_| {}).unwrap();
+        let probe = probe_media(&tools, &result.output_path).unwrap();
+        assert_eq!(
+            (probe.video.width, probe.video.height),
+            (Some(128), Some(192))
+        );
+        assert!((probe.duration_seconds - 2.0).abs() < 0.03);
+        assert_eq!(frame_hashes(&tools, &result.output_path).len(), 24);
+    }
+
+    #[test]
+    fn audio_mismatch_and_silent_episode_keep_all_video_frames_lossless() {
+        let Some(tools) = tools() else {
+            return;
+        };
+        let temp = TempDirectory::create(&std::env::temp_dir()).unwrap();
+        let source = temp.path.join("video.mp4");
+        let status = tools
+            .ffmpeg_command()
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=128x192:rate=12",
+                "-t",
+                "1",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut inputs = Vec::new();
+        for (i, rate, channels) in [(1, "44100", "1"), (2, "48000", "2")] {
+            let path = temp.path.join(format!("第 {i} 集.mp4"));
+            let out = tools
+                .ffmpeg_command()
+                .args(["-v", "error", "-i"])
+                .arg(&source)
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("sine=frequency=440:sample_rate={rate}"),
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-c:v",
+                    "copy",
+                    "-c:a",
+                    "aac",
+                    "-ac",
+                    channels,
+                    "-t",
+                    "1",
+                ])
+                .arg(&path)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            inputs.push(snapshot(path, i));
+        }
+        inputs.push(snapshot(source.clone(), 3));
+        let mut details = inputs
+            .iter()
+            .map(|i| probe_details(&tools, &i.path).unwrap())
+            .collect::<Vec<_>>();
+        assert!(can_copy_video(&details));
+        details[1].video_config[0] = serde_json::json!("different decoder configuration");
+        assert!(!can_copy_video(&details));
+        let mut request = MergeRequest {
+            series_root: temp.path.clone(),
+            output_file_name: "合并.mp4".into(),
+            inputs,
+            transcode_h264: false,
+            mode: Some(MergeMode::Copy),
+            quality: MergeQuality::High,
+            conflict_policy: MergeConflictPolicy::FailIfExists,
+        };
+        let error = run_merge(
+            &tools,
+            request.clone(),
+            &CancellationToken::default(),
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "MERGE_TRANSCODE_REQUIRED");
+        request.mode = Some(MergeMode::Auto);
+        let mut stages = Vec::new();
+        let result = run_merge(&tools, request, &CancellationToken::default(), |p| {
+            stages.push(p.stage)
+        })
+        .unwrap();
+        assert!(stages.iter().any(|s| s.contains("统一音频")));
+        assert!(!stages.iter().any(|s| s.contains("GPU")));
+        assert_eq!(
+            frame_hashes(&tools, &result.output_path),
+            (0..3)
+                .flat_map(|_| frame_hashes(&tools, &source))
+                .collect::<Vec<_>>()
+        );
+        let probe = probe_media(&tools, &result.output_path).unwrap();
+        assert!((probe.duration_seconds - 3.0).abs() < 0.03);
+        assert_eq!(probe.audio.unwrap().sample_rate, Some(48000));
+        // Identical streams retain the single-pass copy path.
+        let input = snapshot(source, 1);
+        let request = MergeRequest {
+            series_root: temp.path.clone(),
+            output_file_name: "无损.mp4".into(),
+            inputs: vec![
+                input.clone(),
+                MergeInput {
+                    episode_index: 2,
+                    ..input
+                },
+            ],
+            transcode_h264: false,
+            mode: Some(MergeMode::Auto),
+            quality: MergeQuality::High,
+            conflict_policy: MergeConflictPolicy::FailIfExists,
+        };
+        let mut stages = Vec::new();
+        run_merge(&tools, request, &CancellationToken::default(), |p| {
+            stages.push(p.stage)
+        })
+        .unwrap();
+        assert!(stages.iter().any(|s| s == "正在复制视频流"));
+        assert!(!stages
+            .iter()
+            .any(|s| s.contains("统一音频") || s.contains("GPU")));
+    }
 }

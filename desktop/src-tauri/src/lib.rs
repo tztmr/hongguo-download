@@ -6,7 +6,7 @@ use serde_json::Value;
 #[cfg(debug_assertions)]
 use std::process::{Child, Stdio};
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     fs,
     io::{BufWriter, Read, Write},
     net::TcpListener,
@@ -63,7 +63,7 @@ struct AppState {
     media_jobs: std::sync::Arc<MediaJobService>,
     ai_components: Option<std::sync::Arc<ComponentManager>>,
     youtube: std::sync::Arc<YouTubeService>,
-    prepared_series_assets: Arc<Mutex<HashSet<PathBuf>>>,
+    prepared_series_assets: Arc<PreparedSeriesAssets>,
 }
 
 #[derive(Clone)]
@@ -521,6 +521,66 @@ mod tests {
     }
 
     #[test]
+    fn stalled_cover_does_not_block_other_series() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let cover_url = format!("http://{}/cover", listener.local_addr().unwrap());
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = connection.read(&mut request);
+            arrived_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            connection.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n\xff\xd8\xff\xe0").unwrap();
+        });
+        let root = std::env::temp_dir().join(format!(
+            "hongguo-independent-cover-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let slow = root.join("slow");
+        let fast = root.join("fast");
+        fs::create_dir_all(&slow).unwrap();
+        fs::create_dir_all(&fast).unwrap();
+        let prepared = Arc::new(PreparedSeriesAssets::default());
+        let slow_prepared = prepared.clone();
+        let slow_job = thread::spawn(move || {
+            prepare_series_assets(
+                &Client::builder().no_proxy().build().unwrap(),
+                &slow,
+                "slow",
+                &DownloadSeriesMetadata {
+                    cover_url,
+                    ..Default::default()
+                },
+                &slow_prepared,
+            )
+        });
+        arrived_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let fast_job = thread::spawn(move || {
+            let result = prepare_series_assets(
+                &Client::builder().no_proxy().build().unwrap(),
+                &fast,
+                "fast",
+                &DownloadSeriesMetadata::default(),
+                &prepared,
+            );
+            done_tx.send(result.is_ok()).unwrap();
+        });
+        let completed_before_cover = done_rx.recv_timeout(Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        fast_job.join().unwrap();
+        slow_job.join().unwrap().unwrap();
+        server.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(completed_before_cover.unwrap());
+    }
+
+    #[test]
     fn preparing_a_download_publishes_both_intros_and_the_named_cover_once() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let cover_url = format!("http://{}/cover", listener.local_addr().unwrap());
@@ -552,7 +612,7 @@ mod tests {
             duration_seconds: 61,
             online_time: None,
         };
-        let prepared = Mutex::new(HashSet::new());
+        let prepared = PreparedSeriesAssets::default();
         let client = Client::builder().no_proxy().build().unwrap();
 
         prepare_series_assets(&client, &root, "测试/剧", &metadata, &prepared).unwrap();
@@ -603,7 +663,7 @@ struct DownloadArgs {
     series: DownloadSeriesMetadata,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadSeriesMetadata {
     #[serde(default, rename = "cover")]
@@ -710,15 +770,29 @@ fn atomic_write(path: &Path, bytes: &[u8], label: &str) -> AppResult<()> {
         .map_err(|error| err(format!("保存{label}失败: {error}")))
 }
 
+#[derive(Default)]
+struct PreparedSeriesAssets {
+    directories: Mutex<HashMap<PathBuf, Arc<Mutex<bool>>>>,
+}
+
 fn prepare_series_assets(
     client: &Client,
     series_dir: &Path,
     title: &str,
     metadata: &DownloadSeriesMetadata,
-    prepared: &Mutex<HashSet<PathBuf>>,
+    prepared: &PreparedSeriesAssets,
 ) -> AppResult<()> {
-    let mut prepared = prepared.lock().unwrap();
-    if prepared.contains(series_dir) {
+    let state = {
+        let mut directories = prepared.directories.lock().unwrap();
+        directories
+            .entry(series_dir.to_path_buf())
+            .or_default()
+            .clone()
+    };
+    // Only episodes of the same series wait for its cover. A slow cover must
+    // never hold a global lock in front of unrelated video downloads.
+    let mut ready = state.lock().unwrap();
+    if *ready {
         return Ok(());
     }
 
@@ -742,6 +816,7 @@ fn prepare_series_assets(
         if !existing_cover {
             let response = client
                 .get(metadata.cover_url.trim())
+                .timeout(Duration::from_secs(15))
                 .send()
                 .map_err(|error| err(format!("下载封面失败: {error}")))?;
             if !response.status().is_success() {
@@ -764,7 +839,7 @@ fn prepare_series_assets(
             )?;
         }
     }
-    prepared.insert(series_dir.to_path_buf());
+    *ready = true;
     Ok(())
 }
 
@@ -1280,7 +1355,7 @@ fn perform_download_episode(
     api_base: String,
     save_dir: PathBuf,
     args: DownloadArgs,
-    prepared_series_assets: Arc<Mutex<HashSet<PathBuf>>>,
+    prepared_series_assets: Arc<PreparedSeriesAssets>,
 ) -> AppResult<DownloadResult> {
     let definition = args.definition.unwrap_or_else(|| "auto".into());
     let series_dir = save_dir.join(sanitize_name(&args.title));
@@ -1514,7 +1589,7 @@ pub fn run() {
                 media_jobs,
                 ai_components,
                 youtube,
-                prepared_series_assets: Arc::new(Mutex::new(HashSet::new())),
+                prepared_series_assets: Arc::new(PreparedSeriesAssets::default()),
             });
             Ok(())
         })

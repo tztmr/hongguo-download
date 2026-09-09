@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from core.http_client import PureSignedClient
+from core.video_download import create_video_client
 from core.scheduler import scheduler
 from endpoints import device, duanju, pseries, web_catalog
 
@@ -27,6 +28,7 @@ from endpoints import device, duanju, pseries, web_catalog
 async def lifespan(app: FastAPI):
 
     app.state.client = PureSignedClient(timeout=15.0)
+    app.state.video_client = create_video_client()
 
     await scheduler.start()
     print("=" * 60)
@@ -39,10 +41,12 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     print("\n设备池空时调用加密短剧接口会自动注册, 无需先调注册接口")
     print("API 文档: http://localhost:8000/docs\n")
-    yield
-
-    await scheduler.stop()
-    await app.state.client.close()
+    try:
+        yield
+    finally:
+        await scheduler.stop()
+        await app.state.client.close()
+        await app.state.video_client.aclose()
 
 app = FastAPI(
     title="番茄短剧纯算 API",
@@ -57,7 +61,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "X-Duanju-Definition", "X-Duanju-Playback", "Content-Length"],
+    expose_headers=["Content-Disposition", "X-Duanju-Definition", "X-Duanju-Playback", "Content-Length", "X-Playback-Mime", "X-Playback-Duration"],
 )
 
 app.include_router(device.router, prefix="/api", tags=["设备管理"])

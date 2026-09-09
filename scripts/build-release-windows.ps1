@@ -11,9 +11,9 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 & (Join-Path $PSScriptRoot "build-api-sidecar-windows.ps1") -Python $Python
 & (Join-Path $PSScriptRoot "stage-media-tools-windows.ps1") `
     -Archive $FfmpegArchive -ArchiveSha256 $FfmpegArchiveSha256
+npm ci --prefix (Join-Path $ProjectRoot "desktop")
 & (Join-Path $PSScriptRoot "verify-playback-windows.ps1") -Python $Python
 & $Python -m unittest discover -s (Join-Path $ProjectRoot "ai_worker/tests") -v
-npm ci --prefix (Join-Path $ProjectRoot "desktop")
 npm test --prefix (Join-Path $ProjectRoot "desktop") -- --run
 cargo test --manifest-path (Join-Path $ProjectRoot "desktop/src-tauri/Cargo.toml") --lib
 Push-Location (Join-Path $ProjectRoot "desktop")

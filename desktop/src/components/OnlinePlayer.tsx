@@ -12,6 +12,8 @@ type OnlinePlayerProps = {
 
 export function OnlinePlayer({ title, episodes, initialItemId, definition, onClose }: OnlinePlayerProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const stopPlayback = useRef<() => void>(() => {});
   const [itemId, setItemId] = useState(initialItemId);
   const [attempt, setAttempt] = useState(0);
   const [source, setSource] = useState("");
@@ -32,6 +34,7 @@ export function OnlinePlayer({ title, episodes, initialItemId, definition, onClo
 
   useEffect(() => {
     const controller = new AbortController();
+    stopPlayback.current = () => controller.abort();
     let objectUrl = "";
     setSource("");
     setError("");
@@ -43,8 +46,15 @@ export function OnlinePlayer({ title, episodes, initialItemId, definition, onClo
     void loadEpisodeVideo(itemId, definition, controller.signal).then((blob) => {
       if (controller.signal.aborted) return;
       window.clearTimeout(loadingTimeout);
-      objectUrl = URL.createObjectURL(blob);
+      if ("mediaSource" in blob) blob.currentTime = () => videoRef.current?.currentTime ?? 0;
+      objectUrl = URL.createObjectURL("mediaSource" in blob ? blob.mediaSource : blob);
       setSource(objectUrl);
+      if ("mediaSource" in blob) void blob.finished.catch((reason) => {
+        if (!controller.signal.aborted) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+          controller.abort();
+        }
+      });
     }).catch((reason) => {
       window.clearTimeout(loadingTimeout);
       if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason));
@@ -58,7 +68,7 @@ export function OnlinePlayer({ title, episodes, initialItemId, definition, onClo
 
   useEffect(() => {
     if (!source || ready || error) return;
-    const timeout = window.setTimeout(() => setError("视频画面未能加载，请重试播放"), 30_000);
+    const timeout = window.setTimeout(() => { setError("视频画面未能加载，请重试播放"); stopPlayback.current(); }, 30_000);
     return () => window.clearTimeout(timeout);
   }, [source, ready, error]);
 
@@ -71,11 +81,11 @@ export function OnlinePlayer({ title, episodes, initialItemId, definition, onClo
       <div className="online-player-screen">
         {error ? <div className="online-player-state"><p role="alert">{error}</p><button type="button" className="secondary-button" onClick={() => setAttempt((value) => value + 1)}>重试播放</button></div>
           : source ? <>
-            <video key={source} src={source} controls autoPlay playsInline aria-label={episodes[index]?.title}
+            <video ref={videoRef} key={source} src={source} preload="auto" controls autoPlay playsInline aria-label={episodes[index]?.title}
               onLoadedData={() => setReady(true)} onPlaying={() => setReady(true)}
-              onError={(event) => { const code = event.currentTarget.error?.code; setError(code === 3 || code === 4 ? "视频画面解码失败，请重试或切换剧集" : "当前视频无法播放，请重试或切换剧集"); }} />
+              onError={(event) => { stopPlayback.current(); const code = event.currentTarget.error?.code; setError(code === 3 || code === 4 ? "视频画面解码失败，请重试或切换剧集" : "当前视频无法播放，请重试或切换剧集"); }} />
             {!ready ? <p className="online-player-state online-player-loading" role="status">正在加载视频画面…</p> : null}
-            </> : <p className="online-player-state" role="status">正在缓冲并准备播放，首次播放可能需要稍等…</p>}
+            </> : <p className="online-player-state" role="status">正在获取视频…</p>}
       </div>
       <footer className="online-player-controls">
         <button type="button" className="secondary-button" disabled={index <= 0} onClick={() => setItemId(episodes[index - 1].itemId)}>上一集</button>
