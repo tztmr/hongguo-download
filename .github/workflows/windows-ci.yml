@@ -36,6 +36,8 @@ jobs:
           npm ci --prefix desktop
       - name: Python worker tests
         run: python -m unittest discover -s ai_worker/tests -v
+      - name: Release upload regression
+        run: python -m unittest tests.test_windows_release_workflow -v
       - name: Frontend tests
         run: npm test --prefix desktop -- --run
       - name: Frontend build

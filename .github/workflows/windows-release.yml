@@ -91,7 +91,7 @@ jobs:
           with source.open('rb') as stream:
               sha256 = hashlib.file_digest(stream, 'sha256').hexdigest()
           pages = json.loads(subprocess.check_output(
-              ['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/releases?per_page=100'], text=True))
+              ['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/releases?per_page=100']))
           matches = [release for page in pages for release in page if release['tag_name'] == tag]
           assert len(matches) == 1, 'Expected one existing release draft'
           release = matches[0]
@@ -105,7 +105,7 @@ jobs:
               with tempfile.TemporaryDirectory() as directory:
                   destination = pathlib.Path(directory) / name
                   shutil.copyfile(source, destination)
-                  current = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/releases/{release["id"]}'], text=True))
+                  current = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/releases/{release["id"]}']))
                   assert current['draft'] and current['target_commitish'] == commit, 'Release changed before upload'
                   subprocess.run(['gh', 'release', 'upload', tag, str(destination)], check=True)
           print(f'Uploaded verified installer: {name} SHA256={sha256}')
