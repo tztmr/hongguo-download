@@ -2,6 +2,9 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { EpisodeItem, SeriesItem } from "../types";
 import { SeriesInspector } from "./SeriesInspector";
+import { loadEpisodeVideo } from "../playback";
+
+vi.mock("../playback", () => ({ loadEpisodeVideo: vi.fn(() => new Promise(() => {})) }));
 
 const series: SeriesItem = {
   bookId: "book-a",
@@ -21,6 +24,29 @@ const series: SeriesItem = {
 const episodes: EpisodeItem[] = [1, 2, 3, 4].map((index) => ({ index, itemId: `e${index}`, title: `第 ${index} 集` }));
 
 describe("SeriesInspector", () => {
+  it("opens online viewing at the first selected episode without changing download selection", () => {
+    const onSelectionChange = vi.fn();
+    const onEnqueue = vi.fn();
+    const view = render(<SeriesInspector series={series} definition="720p" episodes={episodes} selectedIds={["e3", "e2"]} loading={false} onSelectionChange={onSelectionChange} onEnqueue={onEnqueue} />);
+    fireEvent.click(view.getByRole("button", { name: "在线观看" }));
+    expect(view.getByRole("dialog", { name: "在线观看" })).toBeTruthy();
+    expect(loadEpisodeVideo).toHaveBeenLastCalledWith("e2", "720p", expect.any(AbortSignal));
+    expect(onSelectionChange).not.toHaveBeenCalled();
+    expect(onEnqueue).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole("button", { name: "关闭播放" }));
+    expect(view.queryByRole("dialog")).toBeNull();
+  });
+
+  it("starts at episode one without a selection and disables viewing for an empty catalog", () => {
+    const props = { series, definition: "auto" as const, selectedIds: [], loading: false, onSelectionChange: vi.fn(), onEnqueue: vi.fn() };
+    const view = render(<SeriesInspector {...props} episodes={episodes} />);
+    fireEvent.click(view.getByRole("button", { name: "在线观看" }));
+    expect(loadEpisodeVideo).toHaveBeenLastCalledWith("e1", "auto", expect.any(AbortSignal));
+    fireEvent.click(view.getByRole("button", { name: "关闭播放" }));
+    view.rerender(<SeriesInspector {...props} episodes={[]} />);
+    expect(view.getByRole("button", { name: "在线观看" })).toHaveProperty("disabled", true);
+  });
+
   it("selects an inclusive episode range", () => {
     const onSelectionChange = vi.fn();
     const view = render(
@@ -103,7 +129,8 @@ describe("SeriesInspector", () => {
           playCount: 0,
           hotCount: 25_000,
           collectCount: undefined,
-          likeCount: 8,
+          likeCount: 99,
+          commentCount: 8,
         }}
         definition="720p"
         episodes={episodes}
@@ -119,7 +146,7 @@ describe("SeriesInspector", () => {
     expect(view.getByTestId("metric-play").textContent).toBe("播放量 0");
     expect(view.getByTestId("metric-hot").textContent).toBe("热度量 2.5万");
     expect(view.getByTestId("metric-collect").textContent).toBe("收藏量 —");
-    expect(view.getByTestId("metric-like").textContent).toBe("点赞量 8");
+    expect(view.getByTestId("metric-comment").textContent).toBe("评论量 8");
   });
 
   it("distinguishes metric loading and request failure from missing values", () => {

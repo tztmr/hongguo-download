@@ -14,6 +14,8 @@ pub enum PrivacyStatus {
 #[serde(rename_all = "camelCase")]
 pub struct UploadIntent {
     pub job_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dedup: Option<super::duplicates::UploadIdentity>,
     pub file_path: PathBuf,
     pub cover_path: Option<PathBuf>,
     pub title: String,
@@ -190,6 +192,7 @@ mod tests {
         fs::write(&path, b"video").unwrap();
         let mut intent = UploadIntent {
             job_id: "job-1".into(),
+            dedup: None,
             file_path: path,
             cover_path: None,
             title: "测试剧".into(),

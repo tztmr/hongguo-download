@@ -3,6 +3,21 @@ import { describe, expect, it } from "vitest";
 import App from "./App";
 
 describe("App preview workflow", () => {
+  it("preserves the chosen download and filter after leaving and returning to download management", async () => {
+    window.history.replaceState({}, "", "/?preview=library");
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: /下载管理/ }));
+    const rows = view.getAllByTestId("download-batch-row");
+    fireEvent.click(within(rows[1]).getByRole("button", { name: /任务详情/ }));
+    const selectedHeading = within(view.getByRole("complementary", { name: "任务详情" })).getAllByRole("heading")[1].textContent;
+    fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), {target:{value: selectedHeading}});
+    fireEvent.click(view.getByRole("button", { name: "首页" }));
+    expect(view.queryByRole("heading", { name: "下载管理" })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: /下载管理/ }));
+    expect(view.getByRole("searchbox", { name: "搜索下载任务" }).getAttribute("value")).toBe(selectedHeading);
+    expect(within(view.getByRole("complementary", { name: "任务详情" })).getAllByRole("heading")[1].textContent).toBe(selectedHeading);
+  });
+
   it("opens monitor details in place and retains the list and scroll after closing", async () => {
     window.history.replaceState({}, "", "/?preview=library");
     const view = render(<App />);

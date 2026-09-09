@@ -147,6 +147,30 @@ describe("download storage", () => {
     expect(result.state.batches[0].items[0]).toMatchObject({ status: "done", path: "/Downloads/ep1.mp4" });
   });
 
+  it("recovers a completed download regressed to running by late progress", () => {
+    const fixture = runningFixture();
+    Object.assign(fixture.batches[0].items[0], {
+      percent: 100, received: 6139773, total: 6139773,
+      path: "/Downloads/第103集_1080p.mp4", completedAt: 2000,
+    });
+    const restored = loadDownloadState(memoryStorageWith(fixture));
+
+    expect(restored.state.batches[0].items[0]).toMatchObject({
+      status: "done", percent: 100, received: 6139773, total: 6139773,
+      path: "/Downloads/第103集_1080p.mp4", completedAt: 2000,
+    });
+  });
+
+  it.each(["path", "completedAt"] as const)("does not infer completion from 100 percent without %s", (missing) => {
+    const fixture = runningFixture();
+    const item = fixture.batches[0].items[0];
+    Object.assign(item, { percent: 100, received: 1000, total: 1000, path: "/Downloads/e1.mp4", completedAt: 2000 });
+    delete item[missing];
+
+    const restored = loadDownloadState(memoryStorageWith(fixture));
+    expect(restored.state.batches[0].items[0]).toMatchObject({ status: "queued", percent: 0 });
+  });
+
   it("marks legacy fully completed batches as already notified", () => {
     const fixture = runningFixture();
     fixture.batches[0].items[0] = { ...fixture.batches[0].items[0], status: "done", percent: 100 };

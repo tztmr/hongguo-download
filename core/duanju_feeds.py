@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
+from core.new_releases import series_comment_count
 
 
 FEED_API = "https://api5-normal-sinfonlineb.fqnovel.com"
@@ -183,6 +184,7 @@ def _normalize_video(
         "hot_count": None,
         "collect_count": _optional_int(detail.get("followed_cnt")),
         "like_count": None,
+        "comment_count": None,
     }
 
 
@@ -280,5 +282,6 @@ def parse_batch_metrics(upstream: dict[str, Any]) -> dict[str, dict[str, int | N
             "hot_count": _optional_int(video.get("hot_score")),
             "collect_count": _optional_int(video.get("followed_cnt")),
             "like_count": _optional_int(video.get("digg_cnt")),
+            "comment_count": series_comment_count(video),
         }
     return result

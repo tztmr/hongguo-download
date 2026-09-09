@@ -246,6 +246,7 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
                             "hot_score": 5,
                             "followed_cnt": 6,
                             "digg_cnt": 7,
+                            "comment_cnt": 12,
                         }
                     }
                 },
@@ -257,6 +258,7 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(metrics["play_count"], 0)
         self.assertEqual(metrics["like_count"], 7)
+        self.assertEqual(metrics["comment_count"], 12)
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0]["content_type"], "application/json")
         self.assertNotIn("device-under-test", client.calls[0]["data"])
@@ -298,6 +300,7 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
                 "hot_count",
                 "collect_count",
                 "like_count",
+                "comment_count",
             },
         )
         self.assertNotIn("private_debug", json.dumps(payload))

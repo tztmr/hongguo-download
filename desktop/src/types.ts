@@ -16,6 +16,7 @@ export type SeriesMetrics = {
   hotCount?: number;
   collectCount?: number;
   likeCount?: number;
+  commentCount?: number;
 };
 
 export type SeriesItem = {
@@ -39,6 +40,7 @@ export type SeriesItem = {
   hotCount?: number;
   collectCount?: number;
   likeCount?: number;
+  commentCount?: number;
 };
 
 export type CategoryGroup = {

@@ -375,6 +375,7 @@ impl ResumableUploader {
                 "description": intent.description,
                 "tags": intent.tags,
                 "categoryId": intent.category_id,
+                "defaultAudioLanguage": "zh-TW",
             },
             "status": {
                 "privacyStatus": intent.privacy_status,
@@ -906,6 +907,7 @@ mod tests {
         fs::write(&source, vec![7u8; size]).unwrap();
         UploadIntent {
             job_id: job_id.into(),
+            dedup: None,
             file_path: source,
             cover_path: None,
             title: "测试短剧".into(),

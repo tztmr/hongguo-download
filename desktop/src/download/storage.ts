@@ -23,8 +23,17 @@ function readItem(value: unknown): DownloadItem {
   if (typeof value.status !== "string" || !statuses.has(value.status as DownloadItemStatus)) {
     throw new Error("invalid download status");
   }
-  const restoredStatus = value.status === "running" ? "queued" : (value.status as DownloadItemStatus);
-  const resetProgress = value.status === "running";
+  // Older versions let delayed progress overwrite "done" with "running".
+  // Only recover records with the receipt written by a successful command;
+  // reaching 100% alone does not prove that the file was saved successfully.
+  const completedBeforeLateProgress = value.status === "running"
+    && typeof value.path === "string" && value.path.trim().length > 0
+    && typeof value.completedAt === "number" && Number.isFinite(value.completedAt) && value.completedAt > 0
+    && value.percent === 100
+    && typeof value.received === "number" && Number.isFinite(value.received) && value.received > 0
+    && value.total === value.received;
+  const resetProgress = value.status === "running" && !completedBeforeLateProgress;
+  const restoredStatus = completedBeforeLateProgress ? "done" : resetProgress ? "queued" : (value.status as DownloadItemStatus);
   return {
     id: value.id,
     itemId: value.itemId,

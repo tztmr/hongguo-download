@@ -14,6 +14,18 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 class NewReleaseDomainTests(unittest.TestCase):
+    def test_comments_sum_the_complete_episode_list_and_preserve_missing_data(self):
+        series = {"series_id": "s1", "create_time": 123, "episode_cnt": 2,
+                  "video_list": [{"vid": "e1", "comment_count": 12},
+                                 {"vid": "e2", "comment_count": 0}]}
+        self.assertEqual(normalize_metrics({"data": series}, "s1")["comment_count"], 12)
+        series["video_list"][1].pop("comment_count")
+        self.assertIsNone(normalize_metrics({"data": series}, "s1")["comment_count"])
+        series["video_list"] = [{"vid": "e1", "comment_count": 12}]
+        self.assertIsNone(normalize_metrics({"data": series}, "s1")["comment_count"])
+        series["comment_count"] = 0
+        self.assertEqual(normalize_metrics({"data": series}, "s1")["comment_count"], 0)
+
     def test_normalize_metrics_preserves_zero_and_missing(self):
         upstream = {
             "data": {
@@ -24,7 +36,8 @@ class NewReleaseDomainTests(unittest.TestCase):
                     "series_play_cnt": 0,
                     "hot_score": 20,
                     "followed_cnt": None,
-                    "digg_cnt": 0,
+                    "digg_cnt": 9,
+                    "comment_cnt": 0,
                 },
             }
         }
@@ -35,7 +48,8 @@ class NewReleaseDomainTests(unittest.TestCase):
         self.assertEqual(value["play_count"], 0)
         self.assertEqual(value["hot_count"], 20)
         self.assertIsNone(value["collect_count"])
-        self.assertEqual(value["like_count"], 0)
+        self.assertEqual(value["like_count"], 9)
+        self.assertEqual(value["comment_count"], 0)
 
     def test_normalize_metrics_returns_missing_values_for_unknown_series(self):
         value = normalize_metrics({"data": {"series": {"series_id": "other"}}}, "s1")
@@ -48,6 +62,7 @@ class NewReleaseDomainTests(unittest.TestCase):
                 "hot_count": None,
                 "collect_count": None,
                 "like_count": None,
+                "comment_count": None,
             },
         )
 
