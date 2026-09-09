@@ -1,7 +1,9 @@
+import asyncio
 import json
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -10,8 +12,10 @@ from starlette.requests import Request
 
 from endpoints.duanju import (
     _duanju_new_release_cache,
+    _duanju_rank_page_cache,
     _category_groups,
     _fetch_new_release_page,
+    _fetch_rank_feed_page,
     _fetch_series_metrics,
     _new_release_candidates,
     _series_item,
@@ -97,6 +101,7 @@ class RecordingClient:
 class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         _duanju_new_release_cache.clear()
+        _duanju_rank_page_cache.clear()
 
     def test_auto_definition_prefers_1080_then_720(self):
         def source(definition):
@@ -896,6 +901,307 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(selected_items, ["ai_playlet", "all"])
         self.assertEqual([item["series_id"] for item in page["items"]], ["new-ai-1"])
+
+    async def test_rank_fallback_restarts_mixed_source_without_skipping_its_first_page(self):
+        async def handler(**call):
+            query = parse_qs(urlparse(call["url"]).query, keep_blank_values=True)
+            selector = query["selected_items"][0]
+            offset = int(query.get("offset", ["0"])[0])
+            if selector == "comic_series_rank":
+                items = [{"series_id": "typed-first", "content_type": 1004}] if offset == 0 else []
+                next_offset, has_more = 15, offset == 0
+            else:
+                self.assertEqual(query["unlimited_selector_change_type"], ["2"])
+                self.assertNotIn("offset", query)
+                self.assertNotIn("session_id", query)
+                self.assertEqual(query["rank_version"], [""])
+                self.assertNotIn("filter_ids", query)
+                self.assertEqual(call["preferred_device_id"], "device-under-test")
+                items = [
+                    {"series_id": "typed-first", "content_type": 1004},
+                    {"series_id": "mixed-first", "content_type": 1004},
+                ]
+                next_offset, has_more = 2, False
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": items},
+                "next_offset": next_offset, "has_more": has_more,
+                "session_id": "typed-session", "rank_version": "typed-version",
+            }}}
+
+        payload = response_json(await duanju_rank(
+            request_for(RecordingClient(handler)), board="ranklist_hot_sc",
+            release_type="comic_series_rank", cursor="", limit=20,
+        ))
+
+        self.assertEqual([item["series_id"] for item in payload["data"]["items"]], [
+            "typed-first", "mixed-first",
+        ])
+
+    async def test_new_release_fallback_restarts_mixed_source_paging(self):
+        async def handler(**call):
+            if call["method"] == "POST":
+                return {"ok": True, "upstream": {"data": {}}}
+            query = parse_qs(urlparse(call["url"]).query, keep_blank_values=True)
+            if query["selected_items"] == ["comic_series_rank"]:
+                items, next_offset, has_more = [], 30, False
+            else:
+                self.assertNotIn("offset", query)
+                self.assertNotIn("session_id", query)
+                self.assertNotIn("filter_ids", query)
+                self.assertEqual(query["rank_version"], [""])
+                self.assertEqual(query["unlimited_selector_change_type"], ["2"])
+                items = [{"series_id": "mixed-first", "content_type": 1004}]
+                next_offset, has_more = 1, True
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": items},
+                "next_offset": next_offset, "has_more": has_more,
+            }}}
+
+        page = await _fetch_new_release_page(
+            RecordingClient(handler), "comic_series_rank",
+            {"offset": 15, "session_id": "typed-session", "rank_version": "typed-version",
+             "filter_ids": ["typed-first"], "device_id": "sticky-device"},
+            target_date="20260909",
+        )
+
+        self.assertEqual([item["series_id"] for item in page["items"]], ["mixed-first"])
+        self.assertEqual(page["next"]["offset"], 1)
+        self.assertEqual(page["next"]["selector_type"], "all")
+        self.assertTrue(page["has_more"])
+
+    async def test_new_release_page_cache_keeps_devices_separate(self):
+        async def handler(**_call):
+            return {"ok": True, "upstream": {"data": {
+                "subscribe_items": [], "next_offset": 30, "has_more": False,
+            }}}
+
+        client = RecordingClient(handler)
+        for device in ("device-a", "device-b"):
+            page = await _fetch_new_release_page(
+                client, "playlet", {"offset": 15, "device_id": device},
+                target_date="20260909",
+            )
+            self.assertEqual(page["next"]["device_id"], device)
+        self.assertEqual(len(client.calls), 2)
+
+    async def test_new_release_metadata_failure_keeps_known_series(self):
+        async def handler(**call):
+            if call["method"] == "POST":
+                return {"ok": False, "msg": "metadata temporarily unavailable"}
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{
+                    "series_id": "known-comic", "title": "已知新剧", "content_type": 1004,
+                    "video_detail": {"series_play_cnt": 7},
+                }]},
+                "next_offset": 1, "has_more": False,
+            }}}
+
+        with self.assertLogs("fanqie.duanju", level="WARNING"):
+            payload = response_json(await duanju_new_releases(
+                request_for(RecordingClient(handler)), release_type="comic_series_rank",
+                cursor="", limit=20,
+            ))
+
+        self.assertEqual(payload["code"], 0)
+        item = payload["data"]["items"][0]
+        self.assertEqual(item["series_id"], "known-comic")
+        self.assertEqual(item["play_count"], 7)
+        self.assertIsNone(item["online_time"])
+
+    async def test_new_release_response_distinguishes_daily_schedule_from_latest_rank(self):
+        async def handler(**_call):
+            return {"ok": True, "upstream": {"data": {
+                "subscribe_items": [], "cell_view": {}, "next_offset": 0, "has_more": False,
+            }}}
+
+        for release_type, source, date_scope in (
+            ("playlet", "subscribe", "today"),
+            ("comic_series_rank", "rank", "latest"),
+            ("ai_playlet", "rank", "latest"),
+        ):
+            with self.subTest(release_type=release_type):
+                data = response_json(await duanju_new_releases(
+                    request_for(RecordingClient(handler)), release_type=release_type,
+                    cursor="", limit=20,
+                ))["data"]
+                self.assertEqual(data.get("source"), source)
+                self.assertEqual(data.get("date_scope"), date_scope)
+                self.assertEqual(data["date"], datetime.now(SHANGHAI).date().isoformat())
+
+    async def test_rank_reuses_recent_pages(self):
+        async def handler(**_call):
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{"series_id": "cached-rank", "title": "榜单"}]},
+                "next_offset": 1, "has_more": False,
+            }}}
+
+        client = RecordingClient(handler)
+        first = response_json(await duanju_rank(
+            request_for(client), board="ranklist_must_watch", release_type="all", cursor="", limit=20,
+        ))["data"]
+        first["items"][0]["title"] = "caller modified"
+        second = response_json(await duanju_rank(
+            request_for(client), board="ranklist_must_watch", release_type="all", cursor="", limit=20,
+        ))["data"]
+
+        self.assertEqual(second["items"][0]["title"], "榜单")
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_rank_cache_isolates_source_date_device_and_paging_state(self):
+        calls = 0
+
+        async def handler(**_call):
+            nonlocal calls
+            calls += 1
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{"series_id": f"page-{calls}"}]},
+                "next_offset": 30, "has_more": False,
+            }}}
+
+        client = RecordingClient(handler)
+        base = {
+            "selector_type": "all", "board": "ranklist_hot_sc", "state": None,
+            "target_date": "20260909", "preferred_device_id": "device-a",
+        }
+        first = await _fetch_rank_feed_page(client, **base)
+        first["items"][0]["title"] = "mutated caller item"
+        for change in (
+            {"selector_type": "human"},
+            {"board": "ranklist_new_rank_sc"},
+            {"target_date": "20260910"},
+            {"preferred_device_id": "device-b"},
+            {"state": {"offset": 15}},
+            {"state": {"offset": 15, "session_id": "session-a"}},
+            {"state": {"offset": 15, "session_id": "session-b"}},
+            {"state": {"offset": 15, "rank_version": "version-a"}},
+            {"state": {"offset": 15, "filter_ids": ["previous-item"]}},
+        ):
+            result = await _fetch_rank_feed_page(client, **{**base, **change})
+            self.assertNotEqual(result["items"][0]["series_id"], "page-1")
+        cached = await _fetch_rank_feed_page(client, **base)
+
+        self.assertEqual(calls, 10)
+        self.assertEqual(cached["items"][0]["series_id"], "page-1")
+        self.assertEqual(cached["items"][0]["title"], "")
+
+    async def test_rank_cache_refreshes_after_one_minute(self):
+        calls = 0
+        clock = [100.0]
+
+        async def handler(**_call):
+            nonlocal calls
+            calls += 1
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{"series_id": f"rank-{calls}"}]},
+                "next_offset": 1, "has_more": False,
+            }}}
+
+        client = RecordingClient(handler)
+        with patch("core.cache.time", SimpleNamespace(monotonic=lambda: clock[0])):
+            observed = []
+            for timestamp in (100.0, 159.0, 161.0):
+                clock[0] = timestamp
+                response = response_json(await duanju_rank(
+                    request_for(client), board="ranklist_hot_sc", release_type="all", cursor="", limit=20,
+                ))
+                observed.append(response["data"]["items"][0]["series_id"])
+
+        self.assertEqual(observed, ["rank-1", "rank-1", "rank-2"])
+        self.assertEqual(calls, 2)
+
+    async def test_rank_failed_request_can_retry_without_a_cached_error(self):
+        calls = 0
+
+        async def handler(**_call):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {"ok": False, "msg": "temporarily unavailable"}
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{"series_id": "recovered"}]},
+                "next_offset": 1, "has_more": False,
+            }}}
+
+        client = RecordingClient(handler)
+        with self.assertLogs("fanqie.duanju", level="WARNING"):
+            failed = await duanju_rank(
+                request_for(client), board="ranklist_hot_sc", release_type="all", cursor="", limit=20,
+            )
+        recovered = response_json(await duanju_rank(
+            request_for(client), board="ranklist_hot_sc", release_type="all", cursor="", limit=20,
+        ))
+
+        self.assertEqual(failed.status_code, 502)
+        self.assertEqual(recovered["data"]["items"][0]["series_id"], "recovered")
+        self.assertEqual(calls, 2)
+
+    async def test_rank_non_advancing_page_does_not_prevent_an_immediate_retry(self):
+        calls = 0
+
+        async def handler(**_call):
+            nonlocal calls
+            calls += 1
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{"series_id": "recovered"}]},
+                "next_offset": 0 if calls == 1 else 1, "has_more": calls == 1,
+            }}}
+
+        client = RecordingClient(handler)
+        with self.assertLogs("fanqie.duanju", level="WARNING"):
+            failed = await duanju_rank(
+                request_for(client), board="ranklist_hot_sc", release_type="all", cursor="", limit=20,
+            )
+        recovered = response_json(await duanju_rank(
+            request_for(client), board="ranklist_hot_sc", release_type="all", cursor="", limit=20,
+        ))
+
+        self.assertEqual(failed.status_code, 502)
+        self.assertEqual(recovered["code"], 0)
+        self.assertEqual(recovered["data"]["items"][0]["series_id"], "recovered")
+        self.assertEqual(calls, 2)
+
+    async def test_cancelling_one_rank_request_preserves_the_shared_request(self):
+        entered = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def handler(**_call):
+            entered.set()
+            await resume.wait()
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{"series_id": "shared-survivor"}]},
+                "next_offset": 1, "has_more": False,
+            }}}
+
+        client = RecordingClient(handler)
+        tasks = [asyncio.create_task(duanju_rank(
+            request_for(client), board="ranklist_hot_sc", release_type="all", cursor="", limit=20,
+        )) for _ in range(2)]
+        await entered.wait()
+        tasks[0].cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await tasks[0]
+        resume.set()
+        result = response_json(await tasks[1])
+
+        self.assertEqual(result["data"]["items"][0]["series_id"], "shared-survivor")
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_rank_coalesces_concurrent_requests_for_the_same_page(self):
+        async def handler(**_call):
+            await asyncio.sleep(0)
+            return {"ok": True, "upstream": {"data": {
+                "cell_view": {"video_data": [{"series_id": "shared-rank"}]},
+                "next_offset": 1, "has_more": False,
+            }}}
+
+        client = RecordingClient(handler)
+        responses = await asyncio.gather(*(
+            duanju_rank(request_for(client), board="ranklist_followed", release_type="all", cursor="", limit=20)
+            for _ in range(3)
+        ))
+
+        self.assertTrue(all(response_json(response)["code"] == 0 for response in responses))
+        self.assertEqual(len(client.calls), 1)
 
 
 if __name__ == "__main__":

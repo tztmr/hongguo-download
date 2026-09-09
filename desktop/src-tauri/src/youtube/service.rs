@@ -967,6 +967,7 @@ mod tests {
                 privacy_status: PrivacyStatus::Private,
                 self_declared_made_for_kids: false,
                 contains_synthetic_media: false,
+                has_paid_product_placement: false,
                 audience_confirmed: true,
                 synthetic_media_confirmed: true,
                 publish_confirmed: true,

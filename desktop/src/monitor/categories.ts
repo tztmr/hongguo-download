@@ -6,9 +6,8 @@ const ANCIENT_ALIASES = ["古风", "古装", "古代", "古言", "宫斗", "仙�
 const TYPE_LABELS = new Set(["短剧", "真人剧", "漫剧", "AI剧", "AI漫剧"]);
 
 export function releaseCategoryNames(item: SeriesItem) {
-  const source = item.categoryTags?.length
-    ? item.categoryTags
-    : item.category.split(SPLITTER);
+  const source = (item.categoryTags?.length ? item.categoryTags : [item.category || ""])
+    .flatMap((value) => value.split(SPLITTER));
   const result: string[] = [];
   const add = (label: string) => {
     if (label && !result.includes(label)) result.push(label);
@@ -17,16 +16,13 @@ export function releaseCategoryNames(item: SeriesItem) {
   for (const raw of source) {
     const label = raw.trim();
     if (!label || TYPE_LABELS.has(label)) continue;
-    let normalized = false;
+    add(label);
     if (CAMPUS_ALIASES.some((alias) => label.includes(alias))) {
       add("校园");
-      normalized = true;
     }
     if (ANCIENT_ALIASES.some((alias) => label.includes(alias))) {
       add("古风");
-      normalized = true;
     }
-    if (!normalized) add(label);
   }
   return result.length ? result : ["其他"];
 }

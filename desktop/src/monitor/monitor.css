@@ -1,0 +1,46 @@
+.monitor-page .monitor-header { align-items: center; margin-bottom: 18px; }
+.monitor-page .monitor-eyebrow { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; }
+.monitor-page .monitor-eyebrow time { color: var(--muted); font-size: 11px; }
+.monitor-page .monitor-header h1 { margin: 8px 0; font-size: 28px; letter-spacing: -.03em; }
+.monitor-page .monitor-header p { line-height: 1.8; }
+.monitor-page .monitor-header > button { flex: 0 0 auto; }
+.monitor-page .monitor-status-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 11px 14px; margin-bottom: 22px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); background: var(--surface); font-size: 11px; }
+.monitor-page .monitor-status-strip strong { color: var(--text); font-size: 12px; }
+.monitor-page .monitor-status-strip > span:last-child { margin-left: auto; }
+.monitor-page .monitor-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.monitor-page .monitor-status-dot.scanning { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.monitor-page .monitor-status-dot.complete { background: #66c59c; }
+.monitor-page .monitor-status-dot.incomplete { background: #e3ac61; }
+.monitor-page .monitor-controls { margin-bottom: 22px; }
+.monitor-page .monitor-type-filters { gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.monitor-page .monitor-type-filters button { position: relative; min-width: 90px; padding: 11px 16px 13px; border: 0; border-radius: 0; background: none; font-size: 13px; }
+.monitor-page .monitor-type-filters button.active { color: var(--accent); font-weight: 700; }
+.monitor-page .monitor-type-filters button.active::after { position: absolute; bottom: -1px; left: 16px; right: 16px; height: 2px; content: ""; background: var(--accent); }
+.monitor-page .monitor-category-row { display: flex; align-items: flex-start; gap: 16px; margin: 16px 0; }
+.monitor-page .monitor-filter-label { flex: 0 0 auto; padding-top: 6px; color: var(--muted); font-size: 11px; }
+.monitor-page .monitor-category-filters { flex: 1; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 7px; max-height: 110px; overflow-y: auto; margin: 0; padding: 1px 3px 3px 1px; }
+.monitor-page .monitor-category-filters.expanded { max-height: 160px; }
+.monitor-page .monitor-category-filters button { flex: 0 0 auto; padding: 5px 10px; font-size: 11px; }
+.monitor-page .monitor-category-filters .monitor-category-toggle { color: var(--accent); border-color: transparent; background: none; }
+.monitor-page .monitor-toolbar { display: flex; align-items: center; gap: 12px; padding-top: 4px; }
+.monitor-page .monitor-toolbar input { width: min(300px, 50%); min-width: 140px; height: 34px; padding: 0 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; }
+.monitor-page .monitor-toolbar label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+.monitor-page .monitor-toolbar select { height: 34px; padding: 0 25px 0 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; font-size: 12px; }
+.monitor-page .monitor-result-count { margin-left: auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.monitor-page .monitor-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 18px; }
+.monitor-page .monitor-card { transition: border-color .15s, transform .15s; }
+.monitor-page .monitor-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+.monitor-page .monitor-card:focus-visible, .monitor-page button:focus-visible, .monitor-page input:focus-visible, .monitor-page select:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.monitor-page .monitor-card > p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.7; }
+.monitor-page .monitor-cover .monitor-online-time { left: 7px; right: auto; max-width: calc(100% - 14px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-page .monitor-metrics span { padding: 8px; font-size: 10px; }
+.monitor-page .empty-monitor { margin: 28px 0; }
+.monitor-page .monitor-refreshed { margin-top: 22px; font-size: 11px; }
+@media (max-width: 1000px) {
+  .monitor-page.monitor-page { padding: 24px 22px 40px; }
+  .monitor-page .monitor-status-strip > span:last-child { margin-left: 0; }
+  .monitor-page .monitor-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 13px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .monitor-page .monitor-card { transition: none; }
+}

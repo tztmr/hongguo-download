@@ -69,7 +69,7 @@ describe("useYouTube", () => {
     const request = {
       jobId: "youtube-1", filePath: "/Downloads/merged.mp4", coverPath: null, title: "测试剧", description: "",
       tags: ["短剧"], categoryId: "24", privacyStatus: "private" as const, selfDeclaredMadeForKids: false,
-      containsSyntheticMedia: false, audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,
+      containsSyntheticMedia: false, hasPaidProductPlacement: false, audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,
     };
     await act(async () => {
       await result.current.startUpload(request);

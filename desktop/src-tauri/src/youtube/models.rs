@@ -25,6 +25,8 @@ pub struct UploadIntent {
     pub privacy_status: PrivacyStatus,
     pub self_declared_made_for_kids: bool,
     pub contains_synthetic_media: bool,
+    #[serde(default)]
+    pub has_paid_product_placement: bool,
     pub audience_confirmed: bool,
     pub synthetic_media_confirmed: bool,
     pub publish_confirmed: bool,
@@ -202,6 +204,7 @@ mod tests {
             privacy_status: PrivacyStatus::Public,
             self_declared_made_for_kids: false,
             contains_synthetic_media: true,
+            has_paid_product_placement: false,
             audience_confirmed: false,
             synthetic_media_confirmed: true,
             publish_confirmed: true,

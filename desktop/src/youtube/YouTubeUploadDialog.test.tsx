@@ -54,11 +54,12 @@ describe("YouTubeUploadDialog", () => {
     const button = view.getByRole("button", { name: "确认上传" }) as HTMLButtonElement;
     expect((view.getByLabelText("YouTube 类别") as HTMLSelectElement).value).toBe("1");
     expect((view.getByLabelText("合成内容") as HTMLSelectElement).value).toBe("yes");
+    expect(view.getByLabelText("付费宣传内容")).toHaveProperty("value", "no");
     expect(view.getAllByRole("checkbox").every((checkbox) => (checkbox as HTMLInputElement).checked)).toBe(true);
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
     await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({
-      filePath: "/Downloads/merged.mp4", categoryId: "1", privacyStatus: "private", containsSyntheticMedia: true,
+      filePath: "/Downloads/merged.mp4", categoryId: "1", privacyStatus: "private", containsSyntheticMedia: true, hasPaidProductPlacement: false,
       audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,
     })));
   });
@@ -146,4 +147,12 @@ it("ignores a completed lookup after the dialog is closed", async () => {
   fireEvent.click(view.getByRole("button", { name: "取消" }));
   await act(async () => { finish([]); });
   expect(submit).not.toHaveBeenCalled();
+});
+
+ it("preserves an explicit paid promotion choice in the upload request", async () => {
+  const submit = vi.fn();
+  const view = render(<YouTubeUploadDialog batch={batch} sourcePath="/Downloads/merged.mp4" channelId="channel-a" onClose={vi.fn()} onSubmit={submit} />);
+  fireEvent.change(view.getByLabelText("付费宣传内容"), { target: { value: "yes" } });
+  fireEvent.click(view.getByRole("button", { name: "确认上传" }));
+  await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({ hasPaidProductPlacement: true })));
 });

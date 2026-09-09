@@ -8,6 +8,8 @@ const apiMocks = vi.hoisted(() => ({
   downloadEpisode: vi.fn(),
   fetchCatalog: vi.fn(),
   fetchCategoryGroups: vi.fn(),
+  fetchWebCategoryGroups: vi.fn(),
+  fetchWebCategory: vi.fn(),
   fetchDiscovery: vi.fn(),
   fetchDiscoveryByCategory: vi.fn(),
   fetchDiscoveryMore: vi.fn(),
@@ -103,6 +105,8 @@ describe("App feed and search controls", () => {
     window.history.replaceState({}, "", "/");
     apiMocks.fetchCatalog.mockResolvedValue([]);
     apiMocks.fetchCategoryGroups.mockResolvedValue([]);
+    apiMocks.fetchWebCategoryGroups.mockResolvedValue([]);
+    apiMocks.fetchWebCategory.mockResolvedValue({ items: [], nextPage: 2, hasMore: false });
     apiMocks.fetchHealth.mockResolvedValue({ status: "ok", pool_size: 1, active_count: 1 });
     apiMocks.getAiComponents.mockResolvedValue([]);
     apiMocks.subscribeAiComponentProgress.mockResolvedValue(() => undefined);
@@ -117,6 +121,21 @@ describe("App feed and search controls", () => {
     apiMocks.fetchRank.mockResolvedValue(rankPage([series(1)], 0, false));
     apiMocks.fetchSearch.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
     apiMocks.fetchSearchAll.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
+  });
+
+  it("opens combined real-drama categories and switches back to the manju video feed", async () => {
+    apiMocks.fetchWebCategoryGroups.mockResolvedValue([{ id: "background", name: "背景", items: [{ id: "", name: "全部" }, { id: "cate_757", name: "现代" }] }]);
+    apiMocks.fetchWebCategory.mockResolvedValue({ items: [series(888, "分类真人剧")], nextPage: 2, hasMore: false });
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "分类浏览" }));
+    await waitFor(() => expect(view.getAllByText("分类真人剧").length).toBeGreaterThan(0));
+    expect(apiMocks.fetchWebCategory).toHaveBeenCalledWith("drama", expect.any(Object), 1);
+    fireEvent.click(view.getByRole("button", { name: "现代" }));
+    await waitFor(() => expect(apiMocks.fetchWebCategory).toHaveBeenLastCalledWith("drama", expect.objectContaining({ background: "cate_757" }), 1));
+    expect(apiMocks.fetchCatalog).toHaveBeenCalledWith("book-888");
+    fireEvent.click(within(view.container.querySelector(".content-segment") as HTMLElement).getByRole("button", { name: "漫剧" }));
+    await waitFor(() => expect(apiMocks.fetchDiscovery).toHaveBeenLastCalledWith("manju"));
+    expect(view.queryByRole("heading", { name: "分类浏览" })).toBeNull();
   });
 
   it("shows search modes and keeps only an exact title in matching mode", async () => {

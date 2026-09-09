@@ -67,6 +67,7 @@ export type YouTubeUploadIntent = {
   privacyStatus: YouTubePrivacy;
   selfDeclaredMadeForKids: boolean;
   containsSyntheticMedia: boolean;
+  hasPaidProductPlacement: boolean;
   audienceConfirmed: boolean;
   syntheticMediaConfirmed: boolean;
   publishConfirmed: boolean;

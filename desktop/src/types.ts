@@ -49,12 +49,30 @@ export type CategoryGroup = {
   items: Array<{ id: string; name: string }>;
 };
 
+export type CategoryFilters = {
+  background: string;
+  topic: string;
+  setting: string;
+  gender: string;
+  time: string;
+  sort_type: string;
+};
+
+export type WebCategoryPage = {
+  items: SeriesItem[];
+  nextPage: number;
+  hasMore: boolean;
+  total?: number;
+};
+
 export type NewReleasePage = {
   items: SeriesItem[];
   nextCursor: string;
   hasMore: boolean;
   date: string;
   refreshedAt: string;
+  source?: "subscribe" | "rank";
+  dateScope?: "today" | "latest";
 };
 
 export type AppSettings = {

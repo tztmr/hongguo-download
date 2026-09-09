@@ -5,6 +5,8 @@ import type {
   AIComponentStatus,
   AppSettings,
   CategoryGroup,
+  CategoryFilters,
+  WebCategoryPage,
   ContentType,
   DiscoveryPage,
   EpisodeItem,
@@ -111,6 +113,22 @@ export async function fetchCategoryGroups(contentType: ContentType): Promise<Cat
   return data.groups || [];
 }
 
+export async function fetchWebCategoryGroups(contentType: ContentType): Promise<CategoryGroup[]> {
+  const data = await apiGet<{ groups: CategoryGroup[] }>(`/api/duanju/web-categories?content_type=${contentType}`);
+  return data.groups || [];
+}
+
+export async function fetchWebCategory(contentType: ContentType, filters: CategoryFilters, page = 1): Promise<WebCategoryPage> {
+  const query = new URLSearchParams({ ...filters, content_type: contentType, page: String(page) });
+  const data = await apiGet<{ items?: RawSeries[]; next_page?: number; has_more?: boolean; total?: number }>(`/api/duanju/web-category?${query}`);
+  return {
+    items: (data.items || []).map(asSeries),
+    nextPage: data.next_page || page + 1,
+    hasMore: Boolean(data.has_more),
+    total: optionalNumber(data.total),
+  };
+}
+
 export async function fetchNewReleases(
   type: NewReleaseType,
   cursor = "",
@@ -124,6 +142,8 @@ export async function fetchNewReleases(
     has_more?: boolean;
     date?: string;
     refreshed_at?: string;
+    source?: "subscribe" | "rank";
+    date_scope?: "today" | "latest";
   }>(`/api/duanju/new-releases?${query.toString()}`);
   return {
     items: (data.items || []).map(asSeries),
@@ -131,6 +151,8 @@ export async function fetchNewReleases(
     hasMore: Boolean(data.has_more),
     date: data.date || "",
     refreshedAt: data.refreshed_at || "",
+    source: data.source || (type === "playlet" ? "subscribe" : "rank"),
+    dateScope: data.date_scope || (type === "playlet" ? "today" : "latest"),
   };
 }
 

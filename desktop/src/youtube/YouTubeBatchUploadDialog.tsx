@@ -59,6 +59,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
   const [categoryId, setCategoryId] = useState("1");
   const [madeForKids, setMadeForKids] = useState(false);
   const [synthetic, setSynthetic] = useState(true);
+  const [paidPromotion, setPaidPromotion] = useState(false);
   const [audienceConfirmed, setAudienceConfirmed] = useState(true);
   const [syntheticConfirmed, setSyntheticConfirmed] = useState(true);
   const [publishConfirmed, setPublishConfirmed] = useState(true);
@@ -116,7 +117,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
           title, description: item.description,
           tags: item.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
           categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
-          containsSyntheticMedia: synthetic, audienceConfirmed,
+          containsSyntheticMedia: synthetic, hasPaidProductPlacement: paidPromotion, audienceConfirmed,
           syntheticMediaConfirmed: syntheticConfirmed, publishConfirmed,
           dedup: { channelId, bookId: item.batch.bookId, dramaTitle: item.batch.series.title, allowDuplicate },
         };
@@ -166,6 +167,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
             <label>可见性<select aria-label="YouTube 可见性" value={privacy} onChange={(event) => setPrivacy(event.target.value as YouTubePrivacy)}><option value="private">私享</option><option value="unlisted">不公开</option><option value="public">公开</option></select></label>
             <label>儿童受众<select aria-label="儿童受众" value={madeForKids ? "yes" : "no"} onChange={(event) => setMadeForKids(event.target.value === "yes")}><option value="no">不是面向儿童</option><option value="yes">面向儿童</option></select></label>
             <label>合成内容<select aria-label="合成内容" value={synthetic ? "yes" : "no"} onChange={(event) => setSynthetic(event.target.value === "yes")}><option value="no">不包含</option><option value="yes">包含 AI/合成内容</option></select></label>
+            <label className="youtube-form-wide">付费宣传内容<select aria-label="付费宣传内容" value={paidPromotion ? "yes" : "no"} onChange={(event) => setPaidPromotion(event.target.value === "yes")}><option value="no">否，我的影片不含付費宣傳內容</option><option value="yes">是，我的影片含有付費宣傳內容</option></select></label>
           </div>
           <div className="upload-confirmations">
             <label><input type="checkbox" checked={audienceConfirmed} onChange={(event) => setAudienceConfirmed(event.target.checked)} />我已确认儿童受众设置准确</label>

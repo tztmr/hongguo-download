@@ -1,5 +1,7 @@
 """番茄短剧接口,复用项目现有 70932 纯算签名与设备池。"""
+import asyncio
 import base64
+import copy
 import json
 import logging
 from datetime import datetime
@@ -79,6 +81,8 @@ _duanju_discovery_cache = TTLCache(default_ttl=1800)
 _duanju_video_cache = TTLCache(default_ttl=300)
 _duanju_series_metadata_cache = TTLCache(default_ttl=300)
 _duanju_new_release_cache = TTLCache(default_ttl=60)
+_duanju_rank_page_cache = TTLCache(default_ttl=60, max_size=512)
+_duanju_rank_page_inflight: dict[str, asyncio.Task] = {}
 _duanju_new_release_cursors = CursorStore(ttl_seconds=600, max_entries=256)
 _duanju_rank_cursors = CursorStore(ttl_seconds=600, max_entries=512)
 _duanju_rank_sessions = TTLCache(default_ttl=1800, max_size=512)
@@ -274,6 +278,60 @@ async def _fetch_series_metrics_batch(
     return parse_batch_metrics(result['upstream'])
 
 
+async def _fetch_rank_feed_page(
+    client,
+    selector_type: str,
+    board: str,
+    state: dict | None,
+    *,
+    target_date: str,
+    preferred_device_id: str = '',
+) -> dict:
+    """Cache normalized upstream pages and share simultaneous identical reads."""
+    cache_key = make_cache_key(
+        'duanju_rank_page', selector_type=selector_type, board=board,
+        state=json.dumps(state, sort_keys=True, separators=(',', ':')),
+        target_date=target_date, device_id=preferred_device_id,
+    )
+    cached = _duanju_rank_page_cache.get(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
+    async def fetch() -> dict:
+        result = await client.call_with_device(
+            lambda device_id: build_rank_url(device_id, selector_type, board, state=state),
+            aid=8662, max_device_retries=3,
+            preferred_device_id=preferred_device_id or None,
+            return_device_id=True,
+        )
+        if not result['ok']:
+            raise RuntimeError(result['msg'])
+        page = {
+            **parse_captured_rank_page(result['upstream']),
+            'device_id': str(result.get('device_id') or preferred_device_id),
+        }
+        # A transient broken cursor must remain retryable. The caller still
+        # decides whether to fall back to another selector or reject the page.
+        if not page['has_more'] or page['next_offset'] > int((state or {}).get('offset') or 0):
+            _duanju_rank_page_cache.set(cache_key, page)
+        return page
+
+    task = _duanju_rank_page_inflight.get(cache_key)
+    if task is None:
+        task = asyncio.create_task(fetch())
+        _duanju_rank_page_inflight[cache_key] = task
+
+        def finish(completed: asyncio.Task) -> None:
+            if _duanju_rank_page_inflight.get(cache_key) is completed:
+                _duanju_rank_page_inflight.pop(cache_key, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(finish)
+    # One disconnected caller must not cancel a request shared by other callers.
+    return copy.deepcopy(await asyncio.shield(task))
+
+
 async def _fetch_new_release_page(
     client,
     release_type: str,
@@ -306,17 +364,26 @@ async def _fetch_new_release_page(
         'duanju_new_releases', release_type=release_type, offset=current_offset,
         session_id=session_id, rank_version=rank_version,
         filter_ids=','.join(seen_ids[-200:]), target_date=current_date,
-        selector_type=selector_type,
+        selector_type=selector_type, device_id=preferred_device_id,
     )
     cached = _duanju_new_release_cache.get(cache_key)
     if cached is not None:
-        return cached
+        return copy.deepcopy(cached)
 
-    def build_url(device_id: str) -> str:
-        if release_type == 'playlet':
-            return build_subscribe_url(
+    if release_type == 'playlet':
+        result = await client.call_with_device(
+            lambda device_id: build_subscribe_url(
                 device_id, current_date, offset=current_offset, session_id=session_id,
-            )
+            ),
+            aid=8662, max_device_retries=3,
+            preferred_device_id=preferred_device_id or None,
+            return_device_id=True,
+        )
+        if not result['ok']:
+            raise RuntimeError(result['msg'])
+        preferred_device_id = str(result.get('device_id') or preferred_device_id)
+        parsed = parse_subscribe_page(result['upstream'], current_date)
+    else:
         upstream_state = None
         if current_offset or session_id or rank_version or seen_ids:
             upstream_state = {
@@ -325,23 +392,11 @@ async def _fetch_new_release_page(
                 'rank_version': rank_version,
                 'filter_ids': seen_ids[-200:],
             }
-        return build_rank_url(
-            device_id, selector_type, 'ranklist_new_rank_sc', state=upstream_state,
+        parsed = await _fetch_rank_feed_page(
+            client, selector_type, 'ranklist_new_rank_sc', upstream_state,
+            target_date=current_date, preferred_device_id=preferred_device_id,
         )
-
-    result = await client.call_with_device(
-        build_url, aid=8662, max_device_retries=3,
-        preferred_device_id=preferred_device_id or None,
-        return_device_id=True,
-    )
-    if not result['ok']:
-        raise RuntimeError(result['msg'])
-    if release_type == 'playlet':
-        parsed = parse_subscribe_page(result['upstream'], current_date)
-    else:
-        parsed = parse_captured_rank_page(
-            result['upstream'], release_type=release_type,
-        )
+        preferred_device_id = parsed['device_id']
         raw_items = parsed['items']
         parsed['items'] = _filter_release_items(raw_items, release_type)
         if (
@@ -350,24 +405,25 @@ async def _fetch_new_release_page(
         ):
             # 新剧榜的类型 selector 也可能失效，改用混合榜后再按类型隔离。
             selector_type = 'all'
-            result = await client.call_with_device(
-                build_url, aid=8662, max_device_retries=3,
-                preferred_device_id=preferred_device_id or None,
-                return_device_id=True,
+            # Different selectors have different sessions and offsets.
+            current_offset, session_id, rank_version = 0, '', ''
+            seen_ids = []
+            parsed = await _fetch_rank_feed_page(
+                client, selector_type, 'ranklist_new_rank_sc', None,
+                target_date=current_date, preferred_device_id=preferred_device_id,
             )
-            if not result['ok']:
-                raise RuntimeError(result['msg'])
-            parsed = parse_captured_rank_page(
-                result['upstream'], release_type=release_type,
-            )
+            preferred_device_id = parsed['device_id']
             parsed['items'] = _filter_release_items(parsed['items'], release_type)
-        metrics = await _fetch_series_metrics_batch(
-            client,
-            [item['series_id'] for item in parsed['items']],
-            str(result.get('device_id') or preferred_device_id),
-        )
+        try:
+            metrics = await _fetch_series_metrics_batch(
+                client, [item['series_id'] for item in parsed['items']],
+                preferred_device_id,
+            )
+        except Exception:
+            logger.warning('新剧指标补充暂不可用，保留榜单已知信息')
+            metrics = {}
         parsed['items'] = [
-            {**item, **metrics.get(item['series_id'], {})}
+            {**item, **metrics.get(item['series_id'], {}), 'release_type': release_type}
             for item in parsed['items']
         ]
     items = parsed['items']
@@ -393,7 +449,7 @@ async def _fetch_new_release_page(
         'session_id': str(parsed.get('session_id') or session_id),
         'rank_version': str(parsed.get('rank_version') or rank_version),
         'filter_ids': next_filter_ids[-200:],
-        'device_id': str(result.get('device_id') or preferred_device_id),
+        'device_id': preferred_device_id,
     }
     if release_type != 'playlet':
         next_state['selector_type'] = selector_type
@@ -402,7 +458,7 @@ async def _fetch_new_release_page(
         'next': next_state,
         'has_more': bool(parsed.get('has_more')),
     }
-    _duanju_new_release_cache.set(cache_key, page)
+    _duanju_new_release_cache.set(cache_key, copy.deepcopy(page))
     return page
 
 
@@ -868,6 +924,8 @@ async def duanju_new_releases(
             cursor_store=_duanju_new_release_cursors,
             only_today=release_type == 'playlet',
         )
+        data['source'] = 'subscribe' if release_type == 'playlet' else 'rank'
+        data['date_scope'] = 'today' if release_type == 'playlet' else 'latest'
     except ValueError as exc:
         return error(str(exc), code=-2, status_code=400)
     except RuntimeError as exc:
@@ -1263,27 +1321,11 @@ async def duanju_rank(
                 or RANK_SELECTOR_TYPES[release_type]
             )
 
-            def build_url(device_id: str) -> str:
-                return build_rank_url(
-                    device_id,
-                    selector_type,
-                    board,
-                    state=upstream_state if upstream_state is not None else None,
-                )
-
-            result = await request.app.state.client.call_with_device(
-                build_url,
-                aid=8662,
-                max_device_retries=3,
-                preferred_device_id=preferred_device_id or None,
-                return_device_id=True,
+            parsed = await _fetch_rank_feed_page(
+                request.app.state.client, selector_type, board, upstream_state,
+                target_date=date, preferred_device_id=preferred_device_id,
             )
-            if not result['ok']:
-                raise RuntimeError(result['msg'])
-            parsed = parse_captured_rank_page(
-                result['upstream'],
-                release_type=None if release_type == 'all' else release_type,
-            )
+            preferred_device_id = parsed['device_id']
             raw_items = parsed['items']
             parsed['items'] = _filter_release_items(raw_items, release_type)
             if (
@@ -1293,19 +1335,12 @@ async def duanju_rank(
             ):
                 # 部分榜单不响应类型筛选（例如热搜榜+漫剧），回退到混合榜后本地隔离。
                 selector_type = 'all'
-                result = await request.app.state.client.call_with_device(
-                    build_url,
-                    aid=8662,
-                    max_device_retries=3,
-                    preferred_device_id=preferred_device_id or None,
-                    return_device_id=True,
+                current_offset = 0
+                parsed = await _fetch_rank_feed_page(
+                    request.app.state.client, selector_type, board, None,
+                    target_date=date, preferred_device_id=preferred_device_id,
                 )
-                if not result['ok']:
-                    raise RuntimeError(result['msg'])
-                parsed = parse_captured_rank_page(
-                    result['upstream'],
-                    release_type=None if release_type == 'all' else release_type,
-                )
+                preferred_device_id = parsed['device_id']
                 parsed['items'] = _filter_release_items(parsed['items'], release_type)
             next_offset = int(parsed.get('next_offset') or 0)
             upstream_has_more = bool(parsed.get('has_more'))
@@ -1317,13 +1352,13 @@ async def duanju_rank(
                     continue
                 seen.add(series_id)
                 seen_ids.append(series_id)
-                available.append(item)
+                available.append({**item, 'release_type': '' if release_type == 'all' else release_type})
             upstream_state = {
                 'offset': next_offset,
                 'session_id': str(parsed.get('session_id') or ''),
                 'rank_version': str(parsed.get('rank_version') or ''),
                 'filter_ids': seen_ids[-200:],
-                'device_id': str(result.get('device_id') or preferred_device_id),
+                'device_id': preferred_device_id,
                 'selector_type': selector_type,
             }
 

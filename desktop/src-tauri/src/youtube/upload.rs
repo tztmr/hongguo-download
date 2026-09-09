@@ -381,13 +381,19 @@ impl ResumableUploader {
                 "privacyStatus": intent.privacy_status,
                 "selfDeclaredMadeForKids": intent.self_declared_made_for_kids,
                 "containsSyntheticMedia": intent.contains_synthetic_media,
+            },
+            "paidProductPlacementDetails": {
+                "hasPaidProductPlacement": intent.has_paid_product_placement,
             }
         });
         let mut response = self
             .client
             .post(self.endpoint.clone())
             .timeout(Duration::from_secs(30))
-            .query(&[("uploadType", "resumable"), ("part", "snippet,status")])
+            .query(&[
+                ("uploadType", "resumable"),
+                ("part", "snippet,status,paidProductPlacementDetails"),
+            ])
             .bearer_auth(token.expose_secret())
             .header("X-Upload-Content-Type", "video/*")
             .header("X-Upload-Content-Length", source.size)
@@ -402,7 +408,10 @@ impl ResumableUploader {
                 .client
                 .post(self.endpoint.clone())
                 .timeout(Duration::from_secs(30))
-                .query(&[("uploadType", "resumable"), ("part", "snippet,status")])
+                .query(&[
+                    ("uploadType", "resumable"),
+                    ("part", "snippet,status,paidProductPlacementDetails"),
+                ])
                 .bearer_auth(token.expose_secret())
                 .header("X-Upload-Content-Type", "video/*")
                 .header("X-Upload-Content-Length", source.size)
@@ -639,7 +648,7 @@ fn parse_upload_result(bytes: &[u8]) -> Result<UploadResult, AppError> {
 }
 
 fn intent_hash(intent: &UploadIntent) -> String {
-    hash_text(&format!(
+    let legacy_metadata = format!(
         "{}\0{}\0{:?}\0{}\0{}\0{}\0{}",
         intent.title,
         intent.description,
@@ -648,7 +657,13 @@ fn intent_hash(intent: &UploadIntent) -> String {
         intent.privacy_status as u8,
         intent.self_declared_made_for_kids,
         intent.contains_synthetic_media,
-    ))
+    );
+    // False matches the historical YouTube default; keep old checkpoints resumable.
+    if intent.has_paid_product_placement {
+        hash_text(&format!("{legacy_metadata}\0paidProductPlacement=true"))
+    } else {
+        hash_text(&legacy_metadata)
+    }
 }
 
 fn hash_text(value: &str) -> String {
@@ -776,6 +791,7 @@ mod tests {
         line: String,
         headers: HashMap<String, String>,
         body_bytes: usize,
+        json: Option<Value>,
     }
 
     struct MockUploadServer {
@@ -841,6 +857,9 @@ mod tests {
                             .get("content-length")
                             .and_then(|value| value.parse::<usize>().ok())
                             .unwrap_or(0);
+                        let capture_json = headers
+                            .get("content-type")
+                            .is_some_and(|value| value.starts_with("application/json"));
                         let body_already_read = bytes.len().saturating_sub(header_end);
                         let mut remaining = content_length.saturating_sub(body_already_read);
                         while remaining > 0 {
@@ -850,12 +869,17 @@ mod tests {
                             if count == 0 {
                                 return;
                             }
+                            if capture_json {
+                                bytes.extend_from_slice(&chunk[..count]);
+                            }
                             remaining -= count;
                         }
                         requests.lock().unwrap().push(RecordedRequest {
                             line,
                             headers,
                             body_bytes: content_length,
+                            json: capture_json
+                                .then(|| serde_json::from_slice(&bytes[header_end..]).unwrap()),
                         });
                         let mut response = format!(
                             "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -917,6 +941,7 @@ mod tests {
             privacy_status: PrivacyStatus::Private,
             self_declared_made_for_kids: false,
             contains_synthetic_media: false,
+            has_paid_product_placement: false,
             audience_confirmed: true,
             synthetic_media_confirmed: true,
             publish_confirmed: true,
@@ -929,6 +954,96 @@ mod tests {
                 Err(AppError::new("UNEXPECTED_REFRESH", "测试中不应刷新令牌"))
             })
         })
+    }
+
+    #[tokio::test]
+    async fn session_sends_paid_promotion_default_and_override_even_after_token_refresh() {
+        let root = temp_path("paid-promotion");
+        fs::create_dir_all(&root).unwrap();
+        for paid in [false, true] {
+            let mut value =
+                serde_json::to_value(upload_intent(&root, 16, "promotion-job")).unwrap();
+            if paid {
+                value["hasPaidProductPlacement"] = json!(true);
+            } else {
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("hasPaidProductPlacement");
+            }
+            let intent: UploadIntent = serde_json::from_value(value).unwrap();
+            let server = MockUploadServer::serve(|session| {
+                vec![
+                    MockReply {
+                        status: "401 Unauthorized",
+                        headers: vec![],
+                        body: "",
+                    },
+                    MockReply {
+                        status: "200 OK",
+                        headers: vec![("Location", session.into())],
+                        body: "",
+                    },
+                ]
+            });
+            let refresh: RefreshCallback =
+                Arc::new(|| Box::pin(async { Ok(SecretString::new("fresh-token")) }));
+            server
+                .uploader(root.join("checkpoints"))
+                .create_session(
+                    &intent,
+                    &snapshot_source(&intent.file_path).unwrap(),
+                    &mut SecretString::new("old-token"),
+                    &refresh,
+                    &mut false,
+                )
+                .await
+                .unwrap();
+            let requests = server.requests();
+            assert_eq!(requests.len(), 2);
+            for request in requests {
+                let target = request.line.split_whitespace().nth(1).unwrap();
+                let url = Url::parse(&format!("http://localhost{target}")).unwrap();
+                let parts = url
+                    .query_pairs()
+                    .find(|(key, _)| key == "part")
+                    .unwrap()
+                    .1
+                    .into_owned();
+                assert!(parts
+                    .split(',')
+                    .any(|part| part == "paidProductPlacementDetails"));
+                assert_eq!(
+                    request.json.unwrap()["paidProductPlacementDetails"]["hasPaidProductPlacement"],
+                    json!(paid)
+                );
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn old_upload_intents_default_to_no_paid_promotion_and_changed_choice_invalidates_resume() {
+        let root = temp_path("promotion-compatibility");
+        fs::create_dir_all(&root).unwrap();
+        let mut value = serde_json::to_value(upload_intent(&root, 16, "old-job")).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("hasPaidProductPlacement");
+        let old: UploadIntent = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&old).unwrap()["hasPaidProductPlacement"],
+            json!(false)
+        );
+        value["hasPaidProductPlacement"] = json!(true);
+        let paid: UploadIntent = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            intent_hash(&old),
+            "8d5cb83f5977f2122e2eee03875b40fa6f9b831b68f0f7490ddce83c0d979b59"
+        );
+        assert_ne!(intent_hash(&old), intent_hash(&paid));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

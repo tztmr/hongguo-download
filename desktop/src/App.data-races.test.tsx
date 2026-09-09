@@ -8,6 +8,8 @@ const apiMocks = vi.hoisted(() => ({
   downloadEpisode: vi.fn(),
   fetchCatalog: vi.fn(),
   fetchCategoryGroups: vi.fn(),
+  fetchWebCategoryGroups: vi.fn(),
+  fetchWebCategory: vi.fn(),
   fetchDiscovery: vi.fn(),
   fetchDiscoveryByCategory: vi.fn(),
   fetchDiscoveryMore: vi.fn(),
@@ -113,6 +115,8 @@ describe("App request ordering", () => {
     window.history.replaceState({}, "", "/");
     apiMocks.fetchCatalog.mockResolvedValue([]);
     apiMocks.fetchCategoryGroups.mockResolvedValue([]);
+    apiMocks.fetchWebCategoryGroups.mockResolvedValue([]);
+    apiMocks.fetchWebCategory.mockResolvedValue({ items: [], nextPage: 2, hasMore: false });
     apiMocks.fetchHealth.mockResolvedValue({ status: "ok", pool_size: 1, active_count: 1 });
     apiMocks.getAiComponents.mockResolvedValue([]);
     apiMocks.subscribeAiComponentProgress.mockResolvedValue(() => undefined);

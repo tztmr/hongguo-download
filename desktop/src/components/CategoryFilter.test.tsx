@@ -1,33 +1,28 @@
-import { fireEvent, render } from "@testing-library/react";
+import { fireEvent, render, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { CategoryGroup } from "../types";
 import { CategoryFilter } from "./CategoryFilter";
-
 const groups: CategoryGroup[] = [
-  { id: "综合", name: "综合", items: [{ id: "all", name: "全部" }] },
-  {
-    id: "主题情节",
-    name: "主题情节",
-    items: Array.from({ length: 12 }, (_, index) => ({
-      id: `cate-${index + 1}`,
-      name: index === 0 ? "打脸虐渣" : index === 11 ? "都市修仙" : `题材 ${index + 1}`,
-    })),
-  },
+  { id: "background", name: "背景", items: [{ id: "", name: "全部" }, { id: "cate_757", name: "现代" }] },
+  { id: "topic", name: "主题", items: [{ id: "", name: "全部" }, ...Array.from({ length: 12 }, (_, i) => ({ id: `cate_${i}`, name: i === 0 ? "仙侠" : `主题${i}` }))] },
 ];
-
 describe("CategoryFilter", () => {
-  it("switches groups, expands long rows and emits the selected category", () => {
+  it("shows all facets together and keeps a hidden selection visible", () => {
+    const onChange = vi.fn();
+    const view = render(<CategoryFilter groups={groups} values={{ background: "cate_757", topic: "cate_11" }} onChange={onChange} />);
+    expect(view.getByRole("button", { name: "现代" }).getAttribute("aria-pressed")).toBe("true");
+    expect(view.getByRole("button", { name: "主题11" }).getAttribute("aria-pressed")).toBe("true");
+    expect(view.queryByRole("button", { name: "主题9" })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: /更多/ }));
+    fireEvent.click(view.getByRole("button", { name: "主题9" }));
+    expect(onChange).toHaveBeenCalledWith("topic", "cate_9");
+    fireEvent.click(within(view.getByRole("group", { name: "背景" })).getByRole("button", { name: "全部" }));
+    expect(onChange).toHaveBeenCalledWith("background", "");
+  });
+  it("supports the video-only manju selector in single-selection mode", () => {
     const onSelect = vi.fn();
-    const view = render(
-      <CategoryFilter groups={groups} selectedId="all" onSelect={onSelect} />,
-    );
-
-    fireEvent.click(view.getByRole("button", { name: "主题情节" }));
-    expect(view.getByRole("button", { name: "打脸虐渣" })).toBeTruthy();
-    expect(view.queryByRole("button", { name: "都市修仙" })).toBeNull();
-    fireEvent.click(view.getByRole("button", { name: /展开/ }));
-    fireEvent.click(view.getByRole("button", { name: "都市修仙" }));
-
-    expect(onSelect).toHaveBeenCalledWith("cate-12");
+    const view = render(<CategoryFilter groups={groups} selectedId="cate_0" onSelect={onSelect} />);
+    fireEvent.click(view.getByRole("button", { name: "现代" }));
+    expect(onSelect).toHaveBeenCalledWith("cate_757");
   });
 });

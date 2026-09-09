@@ -401,6 +401,7 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .youtube-upload-fields > label, .youtube-form-grid > label { display: flex; flex-direction: column; gap: 7px; color: var(--muted); font-size: 12px; }
 .youtube-upload-dialog input, .youtube-upload-dialog select, .youtube-upload-dialog textarea { padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: #101115; font: inherit; }
 .youtube-upload-dialog textarea { min-height: 92px; resize: vertical; }
+.youtube-form-grid .youtube-form-wide { grid-column: 1 / -1; }
 .youtube-form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .dialog-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cover-picker { display: flex; align-items: center; gap: 10px; }

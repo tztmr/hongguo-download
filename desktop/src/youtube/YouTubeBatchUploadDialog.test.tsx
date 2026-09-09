@@ -69,6 +69,7 @@ describe("YouTubeBatchUploadDialog", () => {
     view.props.onSubmit.mockImplementation(async (request) => { events.push(`queue:${request.dedup?.bookId}`); });
     expect(view.row("都市归来").getByText("上传文件：/Downloads/都市全集.mp4")).toBeTruthy();
     expect(view.row("仙侠奇缘").getByText("上传文件：/Downloads/仙侠全集.mp4")).toBeTruthy();
+    expect(view.getByLabelText("付费宣传内容")).toHaveProperty("value", "no");
     view.start();
     await waitFor(() => expect(view.props.onQueued).toHaveBeenCalledWith(2));
     expect(events).toEqual(["check:book-1", "queue:book-1", "check:book-2", "queue:book-2"]);
@@ -78,7 +79,7 @@ describe("YouTubeBatchUploadDialog", () => {
     expect(requests[0]).toEqual({
       jobId: expect.any(String), filePath: "/Downloads/都市全集.mp4", coverPath: null,
       title: "都市全集", description: "第一部简介", tags: ["都市", "逆袭", "都市归来"],
-      categoryId: "1", privacyStatus: "private", selfDeclaredMadeForKids: false, containsSyntheticMedia: true,
+      categoryId: "1", privacyStatus: "private", selfDeclaredMadeForKids: false, containsSyntheticMedia: true, hasPaidProductPlacement: false,
       audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,
       dedup: { channelId: "channel-a", bookId: "book-1", dramaTitle: "都市归来", allowDuplicate: false },
     });
@@ -100,12 +101,13 @@ describe("YouTubeBatchUploadDialog", () => {
     fireEvent.change(view.getByLabelText("YouTube 类别"), { target: { value: "24" } });
     fireEvent.change(view.getByLabelText("儿童受众"), { target: { value: "yes" } });
     fireEvent.change(view.getByLabelText("合成内容"), { target: { value: "no" } });
+    fireEvent.change(view.getByLabelText("付费宣传内容"), { target: { value: "yes" } });
     view.start();
     await waitFor(() => expect(view.props.onQueued).toHaveBeenCalledWith(2));
     expect(view.props.onSubmit.mock.calls[0][0]).toMatchObject({ title: "新标题", description: "新简介", tags: ["原创", "测试"], dedup: { dramaTitle: "都市归来" } });
     expect(view.props.onSubmit.mock.calls[1][0]).toMatchObject({ title: "仙侠全集", description: "仙侠全集" });
     for (const [request] of view.props.onSubmit.mock.calls) {
-      expect(request).toMatchObject({ privacyStatus: "unlisted", categoryId: "24", selfDeclaredMadeForKids: true, containsSyntheticMedia: false });
+      expect(request).toMatchObject({ privacyStatus: "unlisted", categoryId: "24", selfDeclaredMadeForKids: true, containsSyntheticMedia: false, hasPaidProductPlacement: true });
     }
     expect(checkUpload.mock.calls[0][0].title).toBe("新标题");
   });

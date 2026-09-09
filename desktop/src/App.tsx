@@ -18,6 +18,7 @@ import {
 } from "./api";
 import { AppRail } from "./components/AppRail";
 import { CategoryFilter } from "./components/CategoryFilter";
+import { CategoryBrowser } from "./components/CategoryBrowser";
 import { Cover } from "./components/Cover";
 import { VideoOrientationBadge } from "./components/VideoOrientationBadge";
 import { DownloadManagerPage } from "./components/DownloadManagerPage";
@@ -164,9 +165,9 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [healthOk, setHealthOk] = useState(isPreview);
   const [backgroundMonitorStarted, setBackgroundMonitorStarted] = useState(isPreview);
-  const [discovery, setDiscovery] = useState<DiscoveryPage | null>(null);
   const [selectedCategory, setSelectedCategory] = useState("");
   const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[]>([]);
+  const [browseCategories, setBrowseCategories] = useState(false);
   const [rankPage, setRankPage] = useState<RankPage | null>(null);
   const [rankBoard, setRankBoard] = useState("ranklist_hot_sc");
   const [rankType, setRankType] = useState<RankReleaseType>("all");
@@ -313,7 +314,7 @@ export default function App() {
     setLoading(true);
     setError("");
     try {
-      if (searchContentType === "all") setCategoryGroups([]);
+      if (searchContentType !== "manju") setCategoryGroups([]);
       else void fetchCategoryGroups(contentType).then((groups) => {
         if (requestId === pageRequestRef.current) setCategoryGroups(groups);
       }).catch(() => undefined);
@@ -329,8 +330,6 @@ export default function App() {
       }, { maxRequests: 1 });
       if (requestId !== pageRequestRef.current) return;
       discoveryPagingRef.current = result.state;
-      const page = result.state.cursor;
-      setDiscovery(page ? { ...page, items: result.state.allItems } : null);
       setItems(result.visible);
       if (result.visible[0]) void selectSeries(result.visible[0]);
       setHealthOk(true);
@@ -360,8 +359,6 @@ export default function App() {
       if (requestId !== pageRequestRef.current) return;
       discoveryPagingRef.current = result.state;
       setItems(result.visible);
-      const page = result.state.cursor;
-      setDiscovery(page ? { ...page, items: result.state.allItems } : null);
     } catch (nextError) {
       if (requestId !== pageRequestRef.current) return;
       setError(nextError instanceof Error ? nextError.message : String(nextError));
@@ -445,7 +442,6 @@ export default function App() {
       if (requestId !== pageRequestRef.current) return;
       if (append) searchCache.current.set(cacheKey, result);
       searchPagingRef.current = result;
-      setDiscovery(null);
       const visible = result.allItems.slice(0, result.visibleCount);
       setItems(visible);
       if (!append && visible[0]) void selectSeries(visible[0]);
@@ -460,6 +456,9 @@ export default function App() {
   useEffect(() => {
     loadMoreInFlightRef.current = false;
     setLoading(false);
+    if (nav === "discover" && browseCategories) {
+      return () => { pageRequestRef.current += 1; };
+    }
     if (nav === "search") {
       if (submittedQuery) void runSearch(submittedQuery);
       else { setItems([]); setSelected(null); setEpisodes([]); setError(""); }
@@ -473,7 +472,7 @@ export default function App() {
     return () => { pageRequestRef.current += 1; };
     // Load from the submitted keyword, never from an unsubmitted input draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nav, contentType, searchContentType, selectedCategory, rankBoard, rankType, isPreview, submittedQuery, searchMode, searchRevision]);
+  }, [nav, contentType, searchContentType, selectedCategory, rankBoard, rankType, isPreview, submittedQuery, searchMode, searchRevision, browseCategories]);
 
   useEffect(() => {
     if (nav === "search") searchInput.current?.focus();
@@ -489,6 +488,7 @@ export default function App() {
   }
 
   function selectContentType(type: SearchContentType) {
+    if (type !== "drama") setBrowseCategories(false);
     setSearchContentType(type);
     if (type !== "all") setContentType(type);
     setSelectedCategory("");
@@ -515,8 +515,7 @@ export default function App() {
   }
 
   const pendingCount = manager.stats.running + manager.stats.queued;
-  const rankBoards = discovery?.rankBoards || [];
-  const pageTitle = nav === "rank" ? "本周榜单" : nav === "search" ? "搜索结果" : "首页推荐";
+  const pageTitle = nav === "rank" ? "短剧榜单" : nav === "search" ? "搜索结果" : browseCategories ? "分类浏览" : "首页推荐";
   const navigate = (next: NavId) => {
     setMonitorDetailOpen(false);
     setNav(next);
@@ -574,6 +573,11 @@ export default function App() {
                   <button type="button" className={rankType === "comic_series_rank" ? "active" : ""} onClick={() => setRankType("comic_series_rank")}>漫剧</button>
                   <button type="button" className={rankType === "ai_playlet" ? "active" : ""} onClick={() => setRankType("ai_playlet")}>AI剧</button>
                 </>
+              ) : nav === "discover" && browseCategories ? (
+                <>
+                  <button type="button" className="active" aria-pressed="true">真人剧</button>
+                  <button type="button" onClick={() => selectContentType("manju")} title="使用漫剧视频源的推荐和分类">漫剧</button>
+                </>
               ) : (
                 <>
                   <button type="button" className={searchContentType === "all" ? "active" : ""} aria-pressed={searchContentType === "all"} onClick={() => selectContentType("all")} title="全部真人剧和漫剧">全部</button>
@@ -586,10 +590,14 @@ export default function App() {
           </header>
 
           {nav === "search" && submittedQuery ? <div className="search-result-summary"><span>“{submittedQuery}” · 已显示 {items.length} 项</span><button type="button" className="text-action" disabled={loading} onClick={() => { searchCache.current.clear(); setSearchRevision((value) => value + 1); }}>刷新结果</button></div> : null}
-          {nav === "discover" && (categoryGroups.length || rankBoards.length) ? (
+          {nav === "discover" ? (
             <section className="filter-strip">
-              {rankBoards.length ? <div className="filter-row"><span>榜单</span>{rankBoards.slice(0, 8).map((board) => <span className="filter-chip passive" key={board.schema || board.label}>{board.label}</span>)}</div> : null}
-              <CategoryFilter groups={categoryGroups} selectedId={selectedCategory || "all"} onSelect={(id) => setSelectedCategory(id === "all" ? "" : id)} />
+              <div className="home-source-row" role="group" aria-label="首页浏览方式">
+                <button type="button" className={`filter-chip ${!browseCategories ? "active" : ""}`} aria-pressed={!browseCategories} onClick={() => setBrowseCategories(false)}>推荐</button>
+                <button type="button" className={`filter-chip ${browseCategories ? "active" : ""}`} aria-pressed={browseCategories} onClick={() => { setSelectedCategory(""); setContentType("drama"); setBrowseCategories(true); }}>分类浏览</button>
+                <span>{browseCategories ? "真人剧 · 多个条件可组合" : searchContentType === "manju" ? "漫剧视频 · 单选分类" : "发现剧目，也可按分类筛选"}</span>
+              </div>
+              {!browseCategories && searchContentType === "manju" ? <CategoryFilter groups={categoryGroups} selectedId={selectedCategory || "all"} onSelect={(id) => setSelectedCategory(id === "all" ? "" : id)} /> : null}
             </section>
           ) : null}
 
@@ -600,9 +608,14 @@ export default function App() {
           ) : null}
 
           <section className="library-workspace">
-            <div className="library-main" onScroll={onLibraryScroll}>
-              {error ? <div className="inline-error">{error}</div> : null}
+            <div className="library-main" onScroll={nav === "discover" && browseCategories ? undefined : onLibraryScroll}>
               {catalogError ? <div className="inline-error">{catalogError}</div> : null}
+              {nav === "discover" && browseCategories ? <CategoryBrowser selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
+                catalogRequestRef.current += 1;
+                setSelected(null); setEpisodes([]); setSelectedEpisodeIds([]);
+                setCatalogError(""); setMetricsError(""); setCatalogLoading(false); setMetricsLoading(false);
+              }} /> : <>
+              {error ? <div className="inline-error">{error}</div> : null}
               {loading ? <div className="library-loading-overlay" role="status" aria-label="正在加载内容"><span className="loading-spinner" aria-hidden="true" />正在加载内容…</div> : null}
               {!loading && !items.length ? <div className="empty-library"><h2>{nav === "search" && !submittedQuery ? "搜索你想看的剧" : "没有找到短剧"}</h2><p>{nav === "search" && !submittedQuery ? "输入剧名，默认搜索全部真人剧和漫剧" : "换一个关键词或分类试试"}</p></div> : null}
               <div className="poster-grid">
@@ -627,6 +640,7 @@ export default function App() {
                   : rankPagingRef.current.hasMore || rankPagingRef.current.visibleCount < rankPagingRef.current.allItems.length) ? (
                 <div className="load-more-row">{nav === "search" || nav === "discover" ? <button type="button" className="secondary-button" onClick={() => void (nav === "discover" ? loadMoreDiscover() : runSearch(submittedQuery, true))} disabled={loading}>{loading ? "加载中…" : "加载更多"}</button> : <span role="status">{loading ? "正在加载更多…" : "继续下拉加载更多"}</span>}</div>
               ) : null}
+              </>}
             </div>
             <SeriesInspector
               series={selected}
