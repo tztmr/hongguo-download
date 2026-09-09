@@ -15,6 +15,7 @@ import { AlertIcon, CheckIcon, ChevronLeftIcon, CloseIcon, FolderIcon, PauseIcon
 import { MergeVideoDialog } from "./MergeVideoDialog";
 import { MediaScopeDialog } from "./MediaScopeDialog";
 import { MediaJobsPanel } from "./MediaJobsPanel";
+import { BatchMediaDialog, type BatchMediaTarget, type BatchMediaKind } from "./BatchMediaDialog";
 import { BatchMergeDialog, type BatchMergeTarget } from "./BatchMergeDialog";
 import { YouTubeBatchUploadDialog, type YouTubeBatchUploadSource } from "../youtube/YouTubeBatchUploadDialog";
 import { getUploadSourceOptions } from "../youtube/uploadSources";
@@ -138,6 +139,9 @@ export function DownloadManagerPage({
   const [checkedBatchIds, setCheckedBatchIds] = useState(new Set<string>());
   const [bulkMergeTargets, setBulkMergeTargets] = useState<BatchMergeTarget[] | null>(null);
   const [bulkUploadSources, setBulkUploadSources] = useState<YouTubeBatchUploadSource[] | null>(null);
+  const [bulkMedia, setBulkMedia] = useState<{ kind: BatchMediaKind; targets: BatchMediaTarget[] } | null>(null);
+  const bulkModel = bulkMedia?.kind === "audioSeparation" ? demucsModel : whisperModel;
+  const bulkMissing = bulkMedia ? missingAiComponentIds(aiComponents, `${bulkMedia.kind === "audioSeparation" ? "demucs" : "whisper"}-${bulkModel}`) : [];
   const [bulkPreparing, setBulkPreparing] = useState(false);
   const bulkPreparingRef = useRef(false);
   const [notice, setNotice] = useState<{ message: string } | null>(null);
@@ -323,17 +327,19 @@ export function DownloadManagerPage({
     showNotice(`已移除 ${removed.size} 个任务记录，正在下载的任务将在当前集结束后移除`);
   }
 
-  async function prepareBulk(kind: "merge" | "upload") {
+  async function prepareBulk(kind: "merge" | "upload" | BatchMediaKind) {
     if (bulkPreparingRef.current || !checkedBatches.length) return;
     bulkPreparingRef.current = true;
     setBulkPreparing(true);
     setActionError("");
+    const mediaTargets: BatchMediaTarget[] = [];
     const mergeTargets: BatchMergeTarget[] = [];
     const uploadSources: YouTubeBatchUploadSource[] = [];
     const skipped: string[] = [];
     try {
       for (const batch of checkedBatches) {
         if (!isCompletedBatch(batch)) {
+          mediaTargets.push({ batch, reason: "下载尚未完成" });
           mergeTargets.push({ batch, reason: "下载尚未完成" });
           skipped.push(`《${batch.title}》下载尚未完成`);
           continue;
@@ -341,6 +347,7 @@ export function DownloadManagerPage({
         try {
           const root = batchSeriesRoot(batch);
           const savedMerge = mergedPathFor(batch, media.jobs) || await media.findMergedVideo?.(root) || undefined;
+          mediaTargets.push({ batch, mergedPath: savedMerge });
           const exists = Boolean(savedMerge) || (kind === "merge" && await media.hasMergedVideo(root));
           mergeTargets.push({ batch, reason: exists ? "已有合并视频，已跳过" : undefined });
           if (kind === "upload") {
@@ -349,11 +356,13 @@ export function DownloadManagerPage({
             else skipped.push(`《${batch.title}》尚无合并或分离成片`);
           }
         } catch {
+          mediaTargets.push({ batch });
           mergeTargets.push({ batch, reason: "无法检查成片，请重试" });
           skipped.push(`《${batch.title}》无法检查成片`);
         }
       }
-      if (kind === "merge") setBulkMergeTargets(mergeTargets);
+      if (kind === "audioSeparation" || kind === "subtitleExtraction") setBulkMedia({ kind, targets: mediaTargets });
+      else if (kind === "merge") setBulkMergeTargets(mergeTargets);
       else {
         if (uploadSources.length) setBulkUploadSources(uploadSources);
         if (skipped.length) setActionError(`已跳过 ${skipped.length} 部：${skipped.join("；")}`);
@@ -425,6 +434,8 @@ export function DownloadManagerPage({
                 <span>已选 {checkedBatches.length} 项</span>
                 <button type="button" className="secondary-button danger" disabled={!checkedBatches.length || bulkPreparing} onClick={removeCheckedBatches}>批量删除</button>
                 <button type="button" className="secondary-button" disabled={!checkedBatches.length || bulkPreparing} onClick={() => void prepareBulk("merge")}>批量合并</button>
+                <button type="button" className="secondary-button" disabled={!checkedBatches.length || bulkPreparing} onClick={() => void prepareBulk("audioSeparation")}>批量分离背景音乐</button>
+                <button type="button" className="secondary-button" disabled={!checkedBatches.length || bulkPreparing} onClick={() => void prepareBulk("subtitleExtraction")}>批量提取字幕</button>
                 <button type="button" className="secondary-button" disabled={!checkedBatches.length || bulkPreparing || !youtube?.credential.configured || !youtube.activeChannelId} title={!youtube?.activeChannelId ? "请先在设置中授权并选择 YouTube 频道" : undefined} onClick={() => void prepareBulk("upload")}>批量上传 YouTube</button>
                 {bulkPreparing ? <span role="status">正在检查成片…</span> : null}
               </div> : null}
@@ -623,6 +634,13 @@ export function DownloadManagerPage({
           }}
         />
       ) : null}
+      {bulkMedia ? <BatchMediaDialog targets={bulkMedia.targets} kind={bulkMedia.kind} modelName={bulkModel}
+        missingComponents={bulkMissing} canInstall={Boolean(onInstallComponent) && bulkMissing.every(id => aiComponents?.some(item => item.id === id))}
+        onInstall={async () => { for (const id of bulkMissing) await onInstallComponent!(id); }}
+        onSubmit={({ batch, mergedPath: sourcePath }, scope) => bulkMedia.kind === "audioSeparation"
+          ? media.startAudioSeparation(batch, scope, demucsModel, scope === "merged" ? sourcePath : undefined)
+          : media.startSubtitleExtraction(batch, scope, whisperModel, scope === "merged" ? sourcePath : undefined)}
+        onClose={() => setBulkMedia(null)} onQueued={count => showNotice(`已加入 ${count} 个${bulkMedia.kind === "audioSeparation" ? "背景音乐分离" : "字幕提取"}任务`)} /> : null}
       {bulkMergeTargets ? <BatchMergeDialog targets={bulkMergeTargets} onSubmit={media.startMerge} onClose={() => setBulkMergeTargets(null)} onQueued={(count) => showNotice(`已加入 ${count} 个合并任务`)} /> : null}
       {bulkUploadSources && youtube ? <YouTubeBatchUploadDialog sources={bulkUploadSources} channelId={youtube.activeChannelId || ""} onSubmit={youtube.startUpload} onClose={() => setBulkUploadSources(null)} onQueued={(count) => showNotice(`已加入 ${count} 个 YouTube 上传任务`)} /> : null}
       {notice ? <div className="toast manager-toast" role="status"><span><CheckIcon size={14} /></span>{notice.message}<button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}><CloseIcon size={16} /></button></div> : null}

@@ -133,7 +133,7 @@ impl AIExecutor for NativeAIExecutor {
         budget: super::scheduling::ExecutionBudget,
     ) -> Result<AIExecutionResult, AppError> {
         let threads =
-            (request.kind == MediaJobKind::SeparateBackgroundMusic).then_some(budget.cpu_threads);
+            super::scheduling::is_parallel_kind(request.kind).then_some(budget.cpu_threads);
         self.execute_with_threads(request, cancellation, progress, threads)
     }
 }
@@ -390,7 +390,7 @@ fn process_subtitles(
                     operation: "transcribe",
                     input: &wav,
                     output: &temp.output,
-                    options: json!({"model": request.model, "device": request.device, "modelRoot": context.model_root}),
+                    options: json!({"model": request.model, "device": request.device, "modelRoot": context.model_root, "cpuThreads": context.cpu_threads}),
                 },
                 context.cancellation,
                 progress,

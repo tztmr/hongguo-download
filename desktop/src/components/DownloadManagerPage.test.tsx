@@ -740,3 +740,72 @@ it("never uses the previous drama's merged file while the next filesystem lookup
   fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
   expect((view.getByRole("button", { name: "上传 YouTube" }) as HTMLButtonElement).disabled).toBe(true);
 });
+
+
+describe("bulk AI operations", () => {
+  it.each([
+    ["批量分离背景音乐", "startAudioSeparation", "htdemucs"],
+    ["批量提取字幕", "startSubtitleExtraction", "small"],
+  ] as const)("%s queues completed selections only", async (label, command, model) => {
+    const media = mediaFixture({ jobs: [] });
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("checkbox", { name: "全选当前下载任务" }));
+    fireEvent.click(view.getByRole("button", { name: label }));
+    const dialog = await view.findByRole("dialog", { name: label });
+    expect(dialog.textContent).toContain("下载尚未完成");
+    fireEvent.click(within(dialog).getByRole("button", { name: "开始批量处理" }));
+    await waitFor(() => expect(media[command]).toHaveBeenCalledTimes(1));
+    expect(media[command]).toHaveBeenCalledWith(expect.objectContaining({ id: "batch-b" }), "episodes", model, undefined);
+  });
+
+  it("uses each selected drama's own merged file and retries only failed submissions", async () => {
+    const manager = managerFixture();
+    manager.state = { ...state, batches: state.batches.map((batch, i) => ({ ...batch, items: batch.items.map(item => ({ ...item, status: "done", path: `/Downloads/drama-${i}/${item.id}.mp4` })) })) };
+    const start = vi.fn().mockResolvedValueOnce({}).mockRejectedValueOnce({ message: "暂时失败" }).mockResolvedValue({});
+    const media = mediaFixture({ jobs: [], findMergedVideo: vi.fn(async root => `${root}/merged.mp4`), startSubtitleExtraction: start });
+    const view = render(<DownloadManagerPage manager={manager} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("checkbox", { name: "全选当前下载任务" }));
+    fireEvent.click(view.getByRole("button", { name: "批量提取字幕" }));
+    const dialog = await view.findByRole("dialog", { name: "批量提取字幕" });
+    fireEvent.click(within(dialog).getByRole("radio", { name: "合并视频" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "开始批量处理" }));
+    await within(dialog).findByText("暂时失败");
+    fireEvent.click(within(dialog).getByRole("button", { name: "重试失败项" }));
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(3));
+    expect(start.mock.calls.map(call => [call[0].id, call[1], call[3]])).toEqual([
+      ["batch-a", "merged", "/Downloads/drama-0/merged.mp4"],
+      ["batch-b", "merged", "/Downloads/drama-1/merged.mp4"],
+      ["batch-b", "merged", "/Downloads/drama-1/merged.mp4"],
+    ]);
+  });
+});
+
+
+it("bulk merged processing skips dramas without a verified merged file", async () => {
+  const media = mediaFixture({ jobs: [], findMergedVideo: vi.fn().mockResolvedValue(null) });
+  const view = render(<DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+  fireEvent.click(view.getByRole("checkbox", { name: "全选当前下载任务" }));
+  fireEvent.click(view.getByRole("button", { name: "批量提取字幕" }));
+  const dialog = await view.findByRole("dialog", { name: "批量提取字幕" });
+  fireEvent.click(within(dialog).getByRole("radio", { name: "合并视频" }));
+  expect(dialog.textContent).toContain("尚无已验证的合并视频，已跳过");
+  expect((within(dialog).getByRole("button", { name: "开始批量处理" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(media.startSubtitleExtraction).not.toHaveBeenCalled();
+});
+
+it("bulk AI installs missing components before queuing and recovers from installation failure", async () => {
+  const media = mediaFixture({ jobs: [] });
+  const install = vi.fn().mockRejectedValueOnce({ message: "安装网络错误" }).mockResolvedValue(undefined);
+  const components = ["runtime-modern", "demucs-htdemucs"].map(id => ({ id, installed: false })) as AIComponentStatus[];
+  const view = render(<DownloadManagerPage manager={managerFixture()} media={media} aiComponents={components} onInstallComponent={install} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+  fireEvent.click(view.getByRole("checkbox", { name: "全选当前下载任务" }));
+  fireEvent.click(view.getByRole("button", { name: "批量分离背景音乐" }));
+  const dialog = await view.findByRole("dialog", { name: "批量分离背景音乐" });
+  const submit = within(dialog).getByRole("button", { name: "确认安装并批量处理" });
+  fireEvent.click(submit);
+  await within(dialog).findByText("安装网络错误");
+  expect(media.startAudioSeparation).not.toHaveBeenCalled();
+  fireEvent.click(submit);
+  await waitFor(() => expect(media.startAudioSeparation).toHaveBeenCalledTimes(1));
+  expect(install.mock.calls.map(call => call[0])).toEqual(["runtime-modern", "runtime-modern", "demucs-htdemucs"]);
+});

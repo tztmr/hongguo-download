@@ -1010,10 +1010,11 @@ fn worker_loop(
                 let Some(mut candidate) = candidate else {
                     break;
                 };
-                // Merge/subtitle tasks retain exclusive execution and FIFO order.
+                // Merge stays exclusive; Windows AI jobs share resource budgets.
+                // Other platforms retain exclusive subtitles and FIFO order.
                 if running
                     .values()
-                    .any(|job| job.kind != MediaJobKind::SeparateBackgroundMusic)
+                    .any(|job| !scheduling::is_parallel_kind(job.kind))
                 {
                     break;
                 }
@@ -2310,6 +2311,89 @@ mod tests {
             }
             Err(AppError::new("AI_CANCELLED", "cancelled"))
         }
+    }
+
+    #[test]
+    fn subtitle_queue_uses_platform_concurrency_and_keeps_merge_exclusive() {
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let (started_tx, started_rx) = mpsc::channel();
+        let service = MediaJobService::with_resource_probe(
+            manager,
+            Arc::new(ImmediateExecutor),
+            Arc::new(HoldingAIExecutor {
+                started: started_tx,
+            }),
+            Arc::new(RecordingSink::default()),
+            Box::new(|| scheduling::Resources {
+                cores: 64,
+                cpu_usage: Some(0.0),
+                available_memory: Some(128 * scheduling::GIB),
+                gpu: None,
+            }),
+        );
+        let jobs: Vec<_> = (0..3)
+            .map(|index| {
+                let subtitle = index < 2;
+                service
+                    .start_ai(
+                        StartAIJobRequest {
+                            book_id: format!("mixed-{index}"),
+                            title: "批量测试".into(),
+                            series_root: fixture.series.clone(),
+                            scope: MediaJobScope::Episodes,
+                            inputs: vec![
+                                fixture.write_input(&format!("mixed-{index}.mp4"), b"input")
+                            ],
+                            model: if subtitle { "small" } else { "htdemucs" }.into(),
+                            device: "cpu".into(),
+                        },
+                        if subtitle {
+                            MediaJobKind::ExtractSubtitles
+                        } else {
+                            MediaJobKind::SeparateBackgroundMusic
+                        },
+                    )
+                    .unwrap()
+            })
+            .collect();
+        if cfg!(target_os = "windows") {
+            let mut started: Vec<_> = (0..3)
+                .map(|_| started_rx.recv_timeout(Duration::from_secs(3)).unwrap())
+                .collect();
+            started.sort();
+            assert_eq!(started, ["mixed-0", "mixed-1", "mixed-2"]);
+        } else {
+            for (index, job) in jobs.iter().enumerate() {
+                assert_eq!(
+                    started_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+                    format!("mixed-{index}")
+                );
+                assert!(started_rx.recv_timeout(Duration::from_millis(100)).is_err());
+                if index < 2 {
+                    service.cancel(&job.id).unwrap();
+                    wait_for_job(&service, &job.id, MediaJobStatus::Cancelled);
+                }
+            }
+        }
+        let merge = service
+            .start_merge(fixture.request(
+                "exclusive-merge",
+                vec![fixture.write_input("merge.mp4", b"input")],
+            ))
+            .unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert_eq!(
+            service.manager.job(&merge.id).unwrap().status,
+            MediaJobStatus::Queued
+        );
+        for job in &jobs {
+            if service.manager.job(&job.id).unwrap().status == MediaJobStatus::Running {
+                service.cancel(&job.id).unwrap();
+                wait_for_job(&service, &job.id, MediaJobStatus::Cancelled);
+            }
+        }
+        wait_for_job(&service, &merge.id, MediaJobStatus::Completed);
     }
 
     #[test]

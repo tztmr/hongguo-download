@@ -9,7 +9,7 @@ use std::{
 };
 use sysinfo::System;
 
-pub const MAX_SEPARATION_JOBS: usize = 5;
+pub const MAX_AI_JOBS: usize = 5;
 pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
@@ -176,19 +176,37 @@ fn parse_gpu_resources(output: &str) -> Option<GpuResources> {
     })
 }
 
+pub(crate) fn is_parallel_kind(kind: MediaJobKind) -> bool {
+    parallel_kind_for_platform(kind, cfg!(target_os = "windows"))
+}
+
+fn parallel_kind_for_platform(kind: MediaJobKind, windows: bool) -> bool {
+    kind == MediaJobKind::SeparateBackgroundMusic
+        || (windows && kind == MediaJobKind::ExtractSubtitles)
+}
+
 pub(crate) fn admit(
     job: &MediaJob,
     active: &[ExecutionBudget],
     resources: Resources,
 ) -> Option<ExecutionBudget> {
-    if job.kind != MediaJobKind::SeparateBackgroundMusic {
+    admit_for_platform(job, active, resources, cfg!(target_os = "windows"))
+}
+
+fn admit_for_platform(
+    job: &MediaJob,
+    active: &[ExecutionBudget],
+    resources: Resources,
+    windows: bool,
+) -> Option<ExecutionBudget> {
+    if !parallel_kind_for_platform(job.kind, windows) {
         return active.is_empty().then_some(ExecutionBudget {
             cpu_threads: 1,
             memory: 0,
             gpu_memory: 0,
         });
     }
-    if active.len() >= MAX_SEPARATION_JOBS {
+    if active.len() >= MAX_AI_JOBS {
         return None;
     }
     let Some(request) = job.ai_request.as_ref() else {
@@ -199,6 +217,8 @@ pub(crate) fn admit(
             gpu_memory: 0,
         });
     };
+    let subtitles = job.kind == MediaJobKind::ExtractSubtitles;
+    let medium = request.model == "medium";
     let fine_tuned = request.model == "htdemucs_ft";
     let gpu_requested = request.device != "cpu";
     let cuda = gpu_requested && resources.gpu.is_some_and(|gpu| !gpu.shared_memory);
@@ -211,7 +231,14 @@ pub(crate) fn admit(
         (resources.cores / 3).clamp(1, 4)
     }
     .min(resources.cores.max(1));
-    let memory = (if mps {
+    // Conservative per-process reservations include decoding and CPU fallback.
+    let memory = (if subtitles {
+        if medium {
+            8
+        } else {
+            4
+        }
+    } else if mps {
         if fine_tuned {
             14
         } else {
@@ -223,7 +250,17 @@ pub(crate) fn admit(
         6
     }) * GIB;
     let gpu_memory = if cuda {
-        (if fine_tuned { 6 } else { 4 }) * GIB
+        (if subtitles {
+            if medium {
+                6
+            } else {
+                3
+            }
+        } else if fine_tuned {
+            6
+        } else {
+            4
+        }) * GIB
     } else {
         0
     };
@@ -446,9 +483,62 @@ mod tests {
         for kind in [MediaJobKind::Merge, MediaJobKind::ExtractSubtitles] {
             let mut exclusive = separate.clone();
             exclusive.kind = kind;
-            assert!(admit(&exclusive, &[first], idle()).is_none());
+            assert!(admit_for_platform(&exclusive, &[first], idle(), false).is_none());
             assert!(admit(&exclusive, &[], idle()).is_some());
         }
+    }
+
+    #[test]
+    fn windows_subtitles_share_ai_capacity_while_macos_retains_exclusive_subtitles() {
+        let separation = job("cpu", "htdemucs");
+        let first = admit_for_platform(&separation, &[], idle(), true).unwrap();
+        let mut subtitle = job("cpu", "small");
+        subtitle.kind = MediaJobKind::ExtractSubtitles;
+        subtitle.ai_request.as_mut().unwrap().kind = MediaJobKind::ExtractSubtitles;
+        assert!(parallel_kind_for_platform(subtitle.kind, true));
+        assert!(!parallel_kind_for_platform(subtitle.kind, false));
+        assert!(!parallel_kind_for_platform(MediaJobKind::Merge, true));
+        let second = admit_for_platform(&subtitle, &[first], idle(), true).unwrap();
+        assert_eq!(second.memory, 4 * GIB);
+        assert!(admit_for_platform(&subtitle, &[second; 4], idle(), true).is_some());
+        assert!(admit_for_platform(&subtitle, &[second; 5], idle(), true).is_none());
+        assert!(admit_for_platform(&subtitle, &[first], idle(), false).is_none());
+        let mac = admit_for_platform(&subtitle, &[], idle(), false).unwrap();
+        assert_eq!(mac.cpu_threads, 1);
+        assert_eq!(mac.memory, 0);
+        for scarce in [
+            Resources {
+                available_memory: Some(8 * GIB),
+                ..idle()
+            },
+            Resources {
+                cpu_usage: Some(98.0),
+                ..idle()
+            },
+            Resources {
+                cpu_usage: None,
+                ..idle()
+            },
+        ] {
+            assert!(admit_for_platform(&subtitle, &[first], scarce, true).is_none());
+        }
+        subtitle.ai_request.as_mut().unwrap().device = "cuda".into();
+        assert!(admit_for_platform(&subtitle, &[first], idle(), true).is_none());
+        let gpu = Resources {
+            gpu: Some(GpuResources {
+                free_memory: 10 * GIB,
+                usage: 0.0,
+                shared_memory: false,
+            }),
+            ..idle()
+        };
+        let first = admit_for_platform(&separation, &[], gpu, true).unwrap();
+        assert!(admit_for_platform(&subtitle, &[first], gpu, true).is_some());
+        subtitle.ai_request.as_mut().unwrap().model = "medium".into();
+        let medium = admit_for_platform(&subtitle, &[], gpu, true).unwrap();
+        assert_eq!(medium.memory, 8 * GIB);
+        assert_eq!(medium.gpu_memory, 6 * GIB);
+        assert!(admit_for_platform(&subtitle, &[medium], gpu, true).is_none());
     }
 
     #[test]
