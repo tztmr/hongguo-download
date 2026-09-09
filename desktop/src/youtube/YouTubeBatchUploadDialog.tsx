@@ -1,3 +1,5 @@
+import { useUploadPreferences } from "./uploadPreferences";
+import { SubtitlePicker, subtitleRequest, type SubtitleChoice } from "./SubtitlePicker";
 import { useEffect, useRef, useState } from "react";
 import type { DownloadBatch } from "../download/model";
 import { checkYouTubeUpload } from "./commands";
@@ -19,6 +21,7 @@ type Props = {
 type ReviewItem = YouTubeBatchUploadSource & {
   jobId: string;
   selectedSourcePath: string;
+  subtitle?: SubtitleChoice;
   title: string;
   description: string;
   tags: string;
@@ -55,11 +58,17 @@ export function YouTubeBatchUploadDialog(props: Props) {
 
 function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: Props) {
   const [items, setItems] = useState(() => sources.map(reviewItem));
-  const [privacy, setPrivacy] = useState<YouTubePrivacy>("private");
-  const [categoryId, setCategoryId] = useState("1");
-  const [madeForKids, setMadeForKids] = useState(false);
-  const [synthetic, setSynthetic] = useState(true);
-  const [paidPromotion, setPaidPromotion] = useState(false);
+  const { settings, setSetting } = useUploadPreferences();
+  const privacy = settings.privacy;
+  const setPrivacy = (value: YouTubePrivacy) => setSetting("privacy", value);
+  const categoryId = settings.categoryId;
+  const setCategoryId = (value: string) => setSetting("categoryId", value);
+  const madeForKids = settings.madeForKids;
+  const setMadeForKids = (value: boolean) => setSetting("madeForKids", value);
+  const synthetic = settings.synthetic;
+  const setSynthetic = (value: boolean) => setSetting("synthetic", value);
+  const paidPromotion = settings.paidPromotion;
+  const setPaidPromotion = (value: boolean) => setSetting("paidPromotion", value);
   const [audienceConfirmed, setAudienceConfirmed] = useState(true);
   const [syntheticConfirmed, setSyntheticConfirmed] = useState(true);
   const [publishConfirmed, setPublishConfirmed] = useState(true);
@@ -86,7 +95,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
     setItems((current) => current.map((item) => item.jobId === jobId ? { ...item, ...patch } : item));
   }
 
-  function edit(jobId: string, patch: Pick<Partial<ReviewItem>, "title" | "description" | "tags" | "selectedSourcePath">) {
+  function edit(jobId: string, patch: Pick<Partial<ReviewItem>, "title" | "description" | "tags" | "selectedSourcePath" | "subtitle">) {
     if (inFlight.current || queuedIds.current.has(jobId)) return;
     update(jobId, { ...patch, status: "pending", matches: [], error: "" });
   }
@@ -114,6 +123,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
         const allowDuplicate = item.jobId === overrideJobId;
         const request: YouTubeUploadIntent = {
           jobId: item.jobId, filePath: item.selectedSourcePath, coverPath: null,
+          subtitle: subtitleRequest(item.subtitle, item.selectedSourcePath, settings.subtitleLanguage),
           title, description: item.description,
           tags: item.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
           categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
@@ -181,6 +191,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
               <h3>{item.batch.series.title || item.batch.title}</h3>
               <UploadSourcePicker sources={availableUploadSources(item.sourcePath, item.sourceOptions)} value={item.selectedSourcePath}
                 disabled={busy || item.status === "queued"} onChange={(path) => edit(item.jobId, { selectedSourcePath: path })} />
+              <SubtitlePicker sourcePath={item.selectedSourcePath} value={item.subtitle} onChange={(subtitle) => edit(item.jobId, { subtitle })} language={settings.subtitleLanguage} onLanguageChange={(value) => setSetting("subtitleLanguage", value)} disabled={busy || item.status === "queued"} />
               <fieldset className="youtube-upload-fields" disabled={busy || item.status === "queued"}>
                 <label>标题<input aria-label="YouTube 标题" value={item.title} maxLength={100} onChange={(event) => edit(item.jobId, { title: event.target.value })} /></label>
                 <label>简介<textarea aria-label="YouTube 简介" value={item.description} maxLength={5000} onChange={(event) => edit(item.jobId, { description: event.target.value })} /></label>

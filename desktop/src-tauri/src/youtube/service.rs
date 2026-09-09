@@ -7,6 +7,7 @@ use super::{
     },
     oauth::OAuthService,
     state::YouTubeStateStore,
+    subtitles::{self, SubtitleRequest, SubtitleState},
     thumbnail::{prepare_thumbnail, set_thumbnail},
     upload::{RefreshCallback, ResumableUploader, UploadCancellationToken, UploadProgressEvent},
     vault::{OsTokenVault, TokenVault},
@@ -211,8 +212,16 @@ impl YouTubeService {
 
     pub async fn start_upload(
         self: &Arc<Self>,
-        intent: UploadIntent,
+        mut intent: UploadIntent,
     ) -> Result<YouTubeJob, AppError> {
+        if let Some(subtitle) = &mut intent.subtitle {
+            if subtitle.path.is_none() {
+                subtitle.path = self.find_subtitle(&intent.file_path);
+                if subtitle.path.is_none() {
+                    intent.subtitle = None;
+                }
+            }
+        }
         intent.validate()?;
         let identity = intent.dedup.as_ref().ok_or_else(|| {
             AppError::new("YOUTUBE_CHECK_REQUIRED", "请重新打开上传窗口完成频道查重")
@@ -257,6 +266,12 @@ impl YouTubeService {
             youtube_url: None,
             actual_privacy_status: None,
             thumbnail_state: ThumbnailState::Pending,
+            subtitle_state: if intent.subtitle.is_some() {
+                super::subtitles::SubtitleState::Pending
+            } else {
+                super::subtitles::SubtitleState::Skipped
+            },
+            subtitle_error: None,
             completion_notified_at: None,
             failure_notified_at: None,
         };
@@ -386,6 +401,83 @@ impl YouTubeService {
         Ok(())
     }
 
+    pub fn find_subtitle(&self, source: &Path) -> Option<PathBuf> {
+        subtitles::find_subtitle(&self.media_jobs.snapshot().jobs, source)
+    }
+
+    /// Attach to an existing video. None retries the stored subtitle without uploading video bytes.
+    pub async fn upload_subtitle(
+        &self,
+        job_id: &str,
+        request: Option<SubtitleRequest>,
+    ) -> Result<YouTubeJob, AppError> {
+        let stored = {
+            let mut uploads = self.uploads.lock().map_err(state_lock_error)?;
+            let item = uploads
+                .iter_mut()
+                .find(|item| item.job.id == job_id)
+                .ok_or_else(|| AppError::new("UPLOAD_JOB_NOT_FOUND", "YouTube 上传任务不存在"))?;
+            if item.job.video_id.is_none() || is_active(item.job.status) {
+                return Err(AppError::new(
+                    "UPLOAD_INVALID_TRANSITION",
+                    "请等待视频上传完成后再上传字幕",
+                ));
+            }
+            let mut subtitle = request
+                .or_else(|| item.intent.subtitle.clone())
+                .ok_or_else(|| AppError::new("SUBTITLE_MISSING", "请先选择字幕文件"))?;
+            if subtitle.path.is_none() {
+                subtitle.path = self.find_subtitle(&item.job.source_path);
+            }
+            if subtitle.path.is_none() {
+                return Err(AppError::new(
+                    "SUBTITLE_MISSING",
+                    "没有找到匹配的整季字幕，请先提取字幕或手动选择 SRT",
+                ));
+            }
+            subtitle.validate()?;
+            item.intent.subtitle = Some(subtitle);
+            item.job.status = YouTubeJobStatus::UploadingSubtitles;
+            item.job.subtitle_state = SubtitleState::Pending;
+            item.job.subtitle_error = None;
+            item.job.failure_notified_at = None;
+            item.job.completion_notified_at = None;
+            let stored = item.clone();
+            persist_uploads(&self.data_dir, &uploads)?;
+            stored
+        };
+        self.event_sink.emit(stored.job.clone());
+        let result = match self.oauth_service() {
+            Ok(oauth) => {
+                self.publish_subtitle(&stored, &oauth, stored.job.video_id.as_deref().unwrap())
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        self.update_job(job_id, |job| {
+            apply_subtitle_result(job, result);
+            Ok(())
+        })
+    }
+
+    async fn publish_subtitle(
+        &self,
+        stored: &StoredUpload,
+        oauth: &OAuthService,
+        video_id: &str,
+    ) -> Result<SubtitleState, AppError> {
+        let Some(request) = &stored.intent.subtitle else {
+            return Ok(SubtitleState::Skipped);
+        };
+        self.update_job(&stored.job.id, |job| {
+            job.status = YouTubeJobStatus::UploadingSubtitles;
+            Ok(())
+        })?;
+        let token = oauth.access_token(&stored.job.channel_id).await?;
+        subtitles::upload_subtitle(video_id, request, &token).await?;
+        Ok(SubtitleState::Submitted)
+    }
+
     pub async fn retry_thumbnail(&self, job_id: &str) -> Result<YouTubeJob, AppError> {
         let stored = self
             .uploads
@@ -395,7 +487,7 @@ impl YouTubeService {
             .find(|item| item.job.id == job_id)
             .cloned()
             .ok_or_else(|| AppError::new("UPLOAD_JOB_NOT_FOUND", "YouTube 上传任务不存在"))?;
-        if stored.job.status != YouTubeJobStatus::VideoUploadedThumbnailFailed {
+        if stored.job.thumbnail_state != ThumbnailState::Failed || is_active(stored.job.status) {
             return Err(AppError::new(
                 "UPLOAD_INVALID_TRANSITION",
                 "当前 YouTube 任务不能重试封面",
@@ -410,17 +502,27 @@ impl YouTubeService {
             return Err(AppError::new("UPLOAD_COVER_INVALID", "上传封面无效"));
         }
         let oauth = self.oauth_service()?;
+        self.update_job(job_id, |job| {
+            if is_active(job.status) {
+                return Err(AppError::new(
+                    "UPLOAD_INVALID_TRANSITION",
+                    "上传任务正在处理，请稍后重试封面",
+                ));
+            }
+            job.status = YouTubeJobStatus::SettingThumbnail;
+            Ok(())
+        })?;
         match self.publish_thumbnail(&stored, &oauth, &video_id).await {
             Ok(state) => self.update_job(job_id, |job| {
                 job.thumbnail_state = state;
-                job.status = YouTubeJobStatus::Completed;
+                job.status = attachment_status(job);
                 job.error_code = None;
                 job.error_message = None;
                 Ok(())
             }),
             Err(error) => self.update_job(job_id, |job| {
                 job.thumbnail_state = ThumbnailState::Failed;
-                job.status = YouTubeJobStatus::VideoUploadedThumbnailFailed;
+                job.status = attachment_status(job);
                 job.error_code = Some(error.code);
                 job.error_message = Some(error.message);
                 Ok(())
@@ -435,7 +537,9 @@ impl YouTubeService {
             } else {
                 matches!(
                     job.status,
-                    YouTubeJobStatus::Failed | YouTubeJobStatus::VideoUploadedThumbnailFailed
+                    YouTubeJobStatus::Failed
+                        | YouTubeJobStatus::VideoUploadedThumbnailFailed
+                        | YouTubeJobStatus::VideoUploadedSubtitleFailed
                 )
             };
             if !terminal_matches {
@@ -590,6 +694,17 @@ impl YouTubeService {
                             job.error_message = Some(error.message.clone());
                         }
                     }
+                    // Do not emit a completed notification before subtitles have been submitted.
+                    if stored.intent.subtitle.is_some() {
+                        job.status = YouTubeJobStatus::UploadingSubtitles;
+                    }
+                    Ok(())
+                });
+                let subtitle_result = self
+                    .publish_subtitle(&stored, &oauth, &result.video_id)
+                    .await;
+                let _ = self.update_job(&job_id, |job| {
+                    apply_subtitle_result(job, subtitle_result);
                     Ok(())
                 });
             }
@@ -703,24 +818,52 @@ impl Drop for ThumbnailWorkspace {
     }
 }
 
+fn attachment_status(job: &YouTubeJob) -> YouTubeJobStatus {
+    if job.subtitle_state == SubtitleState::Failed {
+        YouTubeJobStatus::VideoUploadedSubtitleFailed
+    } else if job.thumbnail_state == ThumbnailState::Failed {
+        YouTubeJobStatus::VideoUploadedThumbnailFailed
+    } else {
+        YouTubeJobStatus::Completed
+    }
+}
+
+fn apply_subtitle_result(job: &mut YouTubeJob, result: Result<SubtitleState, AppError>) {
+    match result {
+        Ok(state) => {
+            job.subtitle_state = state;
+            job.subtitle_error = None;
+        }
+        Err(error) => {
+            job.subtitle_state = SubtitleState::Failed;
+            job.subtitle_error = Some(error.message);
+        }
+    }
+    job.status = attachment_status(job);
+}
+
 fn restore_upload_queue(uploads: &mut [StoredUpload]) -> bool {
     let mut changed = false;
     for item in uploads {
         if item.job.video_id.is_some() && is_active(item.job.status) {
-            // Upload succeeded before shutdown; only thumbnail work may remain.
+            // Never re-upload a video after its ID has been persisted.
             item.job.percent = 100.0;
             item.job.uploaded_bytes = item.job.total_bytes;
-            if item.intent.cover_path.is_some() {
-                item.job.status = YouTubeJobStatus::VideoUploadedThumbnailFailed;
+            if item.intent.cover_path.is_some()
+                && item.job.thumbnail_state != ThumbnailState::Succeeded
+            {
                 item.job.thumbnail_state = ThumbnailState::Failed;
                 item.job.error_code = Some("THUMBNAIL_INTERRUPTED".into());
                 item.job.error_message = Some("视频已上传，封面处理被中断，请仅重试封面".into());
-            } else {
-                item.job.status = YouTubeJobStatus::Completed;
+            } else if item.intent.cover_path.is_none() {
                 item.job.thumbnail_state = ThumbnailState::Skipped;
-                item.job.error_code = None;
-                item.job.error_message = None;
             }
+            if item.intent.subtitle.is_some() && item.job.subtitle_state != SubtitleState::Submitted
+            {
+                item.job.subtitle_state = SubtitleState::Failed;
+                item.job.subtitle_error = Some("视频已上传，字幕处理被中断，请仅重试字幕".into());
+            }
+            item.job.status = attachment_status(&item.job);
             changed = true;
         } else if item.job.status == YouTubeJobStatus::Pausing {
             item.job.status = YouTubeJobStatus::Paused;
@@ -886,6 +1029,7 @@ fn is_active(status: YouTubeJobStatus) -> bool {
             | YouTubeJobStatus::WaitingToRetry
             | YouTubeJobStatus::Processing
             | YouTubeJobStatus::SettingThumbnail
+            | YouTubeJobStatus::UploadingSubtitles
     )
 }
 
@@ -952,6 +1096,8 @@ mod tests {
                 youtube_url: None,
                 actual_privacy_status: None,
                 thumbnail_state: ThumbnailState::Pending,
+                subtitle_state: super::super::subtitles::SubtitleState::Skipped,
+                subtitle_error: None,
                 completion_notified_at: None,
                 failure_notified_at: None,
             },
@@ -960,6 +1106,7 @@ mod tests {
                 dedup: None,
                 file_path: PathBuf::from(format!("/{id}.mp4")),
                 cover_path: None,
+                subtitle: None,
                 title: id.into(),
                 description: String::new(),
                 tags: vec![],
@@ -973,6 +1120,48 @@ mod tests {
                 publish_confirmed: true,
             },
         }
+    }
+
+    #[test]
+    fn subtitle_failure_and_restart_never_requeue_an_uploaded_video() {
+        let mut stored = queued("subtitle");
+        stored.job.video_id = Some("existing-video".into());
+        stored.job.thumbnail_state = ThumbnailState::Succeeded;
+        stored.intent.cover_path = Some("cover.jpg".into());
+        stored.intent.subtitle = Some(SubtitleRequest {
+            path: Some("字幕.srt".into()),
+            language: "zh-Hans".into(),
+        });
+        stored.job.status = YouTubeJobStatus::UploadingSubtitles;
+        stored.job.subtitle_state = SubtitleState::Pending;
+        let mut uploads = vec![stored];
+        assert!(restore_upload_queue(&mut uploads));
+        assert_eq!(
+            uploads[0].job.status,
+            YouTubeJobStatus::VideoUploadedSubtitleFailed
+        );
+        assert_eq!(uploads[0].job.thumbnail_state, ThumbnailState::Succeeded);
+        assert_eq!(uploads[0].job.video_id.as_deref(), Some("existing-video"));
+        assert!(reserve_uploads(&uploads, &mut HashMap::new()).is_empty());
+        apply_subtitle_result(&mut uploads[0].job, Ok(SubtitleState::Submitted));
+        assert_eq!(uploads[0].job.status, YouTubeJobStatus::Completed);
+        uploads[0].job.thumbnail_state = ThumbnailState::Failed;
+        apply_subtitle_result(&mut uploads[0].job, Ok(SubtitleState::Submitted));
+        assert_eq!(
+            uploads[0].job.status,
+            YouTubeJobStatus::VideoUploadedThumbnailFailed
+        );
+    }
+
+    #[test]
+    fn old_saved_jobs_without_subtitle_fields_still_load_and_skip_subtitles() {
+        let original = queued("legacy");
+        let mut json = serde_json::to_value(&original).unwrap();
+        json["job"].as_object_mut().unwrap().remove("subtitleState");
+        json["job"].as_object_mut().unwrap().remove("subtitleError");
+        let restored: StoredUpload = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.job.subtitle_state, SubtitleState::Skipped);
+        assert!(restored.intent.subtitle.is_none());
     }
 
     #[test]

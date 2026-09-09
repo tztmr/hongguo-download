@@ -242,6 +242,7 @@ export const previewYouTubeModel: YouTubeModel = {
   resume: async () => undefined,
   retry: async () => undefined,
   retryThumbnail: async () => undefined,
+  uploadSubtitle: async () => undefined,
   removeJob: async () => undefined,
   markNotified: async () => undefined,
 };

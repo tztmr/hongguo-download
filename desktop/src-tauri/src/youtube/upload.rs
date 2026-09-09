@@ -934,6 +934,7 @@ mod tests {
             dedup: None,
             file_path: source,
             cover_path: None,
+            subtitle: None,
             title: "测试短剧".into(),
             description: "本地协议测试".into(),
             tags: vec!["短剧".into()],

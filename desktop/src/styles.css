@@ -727,3 +727,9 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
   .poster-copy .heat-metric { gap: 3px; padding: 4px 5px; font-size: 10px; }
   .poster-copy .heat-metric strong { font-size: 11px; }
 }
+
+.youtube-subtitle-picker { display: grid; gap: 10px; border: 1px solid var(--border, #303239); border-radius: 10px; padding: 12px; margin: 8px 0; min-width: 0; }
+.youtube-subtitle-picker legend { padding: 0 6px; font-size: 13px; }
+.youtube-subtitle-picker small { overflow-wrap: anywhere; color: #a2a5ad; line-height: 1.5; }
+.youtube-subtitle-picker .cover-picker { flex-wrap: wrap; margin: 0; }
+.youtube-job-card.status-videoUploadedSubtitleFailed .upload-status { color: #e6b976; background: #e6b97612; }

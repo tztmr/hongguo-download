@@ -21,6 +21,8 @@ export type YouTubeJobStatus =
   | "waitingToRetry"
   | "processing"
   | "settingThumbnail"
+  | "uploadingSubtitles"
+  | "videoUploadedSubtitleFailed"
   | "completed"
   | "videoUploadedThumbnailFailed"
   | "failed"
@@ -41,6 +43,8 @@ export type YouTubeJob = {
   youtubeUrl: string | null;
   actualPrivacyStatus: YouTubePrivacy | null;
   thumbnailState: "pending" | "succeeded" | "skipped" | "failed";
+  subtitleState?: "skipped" | "pending" | "submitted" | "failed";
+  subtitleError?: string | null;
   completionNotifiedAt?: number;
   failureNotifiedAt?: number;
 };
@@ -60,6 +64,7 @@ export type YouTubeUploadIntent = {
   jobId: string;
   filePath: string;
   coverPath: string | null;
+  subtitle?: { path: string | null; language: string } | null;
   title: string;
   description: string;
   tags: string[];
@@ -88,6 +93,7 @@ export type YouTubeCommands = {
   resume(jobId: string): Promise<YouTubeJob>;
   retry(jobId: string): Promise<YouTubeJob>;
   retryThumbnail(jobId: string): Promise<YouTubeJob>;
+  uploadSubtitle(jobId: string, request: YouTubeUploadIntent["subtitle"]): Promise<YouTubeJob>;
   removeJob(jobId: string): Promise<void>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<YouTubeJob>;
   subscribeProgress(listener: (job: YouTubeJob) => void): Promise<() => void>;
@@ -108,6 +114,7 @@ export type YouTubeModel = YouTubeSnapshot & {
   resume(jobId: string): Promise<void>;
   retry(jobId: string): Promise<void>;
   retryThumbnail(jobId: string): Promise<void>;
+  uploadSubtitle(jobId: string, request: YouTubeUploadIntent["subtitle"]): Promise<void>;
   removeJob(jobId: string): Promise<void>;
   markNotified?(jobId: string, outcome: "success" | "failure"): Promise<void>;
 };

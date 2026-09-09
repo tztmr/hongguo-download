@@ -19,6 +19,7 @@ use tokio::{
 use url::Url;
 
 pub const YOUTUBE_UPLOAD_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload";
+pub const YOUTUBE_CAPTIONS_SCOPE: &str = "https://www.googleapis.com/auth/youtube.force-ssl";
 pub const YOUTUBE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/youtube.readonly";
 const CHANNELS_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
 const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
@@ -75,7 +76,7 @@ fn build_authorization_request(
         .append_pair("response_type", "code")
         .append_pair(
             "scope",
-            &format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE}"),
+            &format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE} {YOUTUBE_CAPTIONS_SCOPE}"),
         )
         .append_pair("state", state)
         .append_pair("code_challenge", &challenge)
@@ -554,7 +555,10 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(
             query.get("scope").map(|value| value.as_ref()),
-            Some(format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE}").as_str())
+            Some(
+                format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE} {YOUTUBE_CAPTIONS_SCOPE}")
+                    .as_str()
+            )
         );
         assert_eq!(
             query.get("state").map(|value| value.as_ref()),

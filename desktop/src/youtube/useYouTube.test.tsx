@@ -23,7 +23,7 @@ function fixture() {
     setChannel: vi.fn().mockResolvedValue(snapshot), revoke: vi.fn().mockResolvedValue(snapshot),
     removeCredential: vi.fn().mockResolvedValue(snapshot), startUpload: vi.fn().mockResolvedValue(job),
     pause: vi.fn().mockResolvedValue({ ...job, status: "paused" }), resume: vi.fn().mockResolvedValue(job),
-    cancel: vi.fn().mockResolvedValue(undefined), retry: vi.fn().mockResolvedValue(job), retryThumbnail: vi.fn().mockResolvedValue(job),
+    cancel: vi.fn().mockResolvedValue(undefined), retry: vi.fn().mockResolvedValue(job), retryThumbnail: vi.fn().mockResolvedValue(job), uploadSubtitle: vi.fn().mockResolvedValue(job),
     removeJob: vi.fn().mockResolvedValue(undefined),
     subscribeProgress: vi.fn(async (next) => { listener = next; return vi.fn(); }),
     emit: (value) => listener?.(value),

@@ -54,15 +54,16 @@ export function useNotificationRouter({ adapter, media, youtube, notifyMedia, no
     if (!enabled) return;
     for (const job of youtube.jobs) {
       const success = job.status === "completed";
-      const failure = job.status === "failed" || job.status === "videoUploadedThumbnailFailed";
+      const failure = job.status === "failed" || job.status === "videoUploadedThumbnailFailed" || job.status === "videoUploadedSubtitleFailed";
       if ((!success && !failure) || (success ? job.completionNotifiedAt : job.failureNotifiedAt)) continue;
       const key = `youtube:${job.id}:${success ? "success" : "failure"}`;
       if (pending.current.has(key)) continue;
       pending.current.add(key);
-      const partial = job.status === "videoUploadedThumbnailFailed";
+      const subtitleFailed = job.status === "videoUploadedSubtitleFailed";
+      const partial = job.status === "videoUploadedThumbnailFailed" || subtitleFailed;
       const notification = {
-        title: partial ? "视频已上传，封面失败" : `YouTube 上传${success ? "完成" : "失败"}`,
-        body: `《${job.title.slice(0, 100)}》${partial ? "可在上传任务中仅重试封面" : success ? "已完成" : "未完成"}`,
+        title: partial ? (subtitleFailed ? "视频已上传，字幕失败" : "视频已上传，封面失败") : `YouTube 上传${success ? "完成" : "失败"}`,
+        body: `《${job.title.slice(0, 100)}》${partial ? (subtitleFailed ? "可在上传任务中仅重试字幕" : "可在上传任务中仅重试封面") : success ? "已完成" : "未完成"}`,
         target: { kind: "youtubeJob" as const, id: job.id },
       };
       const attempt = notifyYouTube ? adapter.send(notification) : Promise.resolve(false);

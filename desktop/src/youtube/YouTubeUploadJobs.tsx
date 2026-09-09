@@ -1,3 +1,4 @@
+import { SubtitleUploadDialog } from "./SubtitleUploadDialog";
 import { useEffect, useRef, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { YouTubeJob, YouTubeModel } from "./types";
@@ -13,6 +14,8 @@ function statusCopy(job: YouTubeJob) {
     waitingToRetry: "等待重试",
     processing: "YouTube 处理中",
     settingThumbnail: "设置封面",
+    uploadingSubtitles: "上传字幕",
+    videoUploadedSubtitleFailed: "视频已上传，字幕失败",
     completed: "已完成",
     videoUploadedThumbnailFailed: "视频已上传，封面失败",
     failed: "失败",
@@ -45,8 +48,8 @@ export function YouTubeVideoLink({ url }: { url: string }) {
   </>;
 }
 
-const activeStatuses = ["pausing", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing", "settingThumbnail"];
-const attentionStatuses = ["failed", "videoUploadedThumbnailFailed"];
+const activeStatuses = ["pausing", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing", "settingThumbnail", "uploadingSubtitles"];
+const attentionStatuses = ["failed", "videoUploadedThumbnailFailed", "videoUploadedSubtitleFailed"];
 function fileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -64,6 +67,7 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId, onNotice }:
   focusJobId?: string;
   onNotice?: (message: string) => void;
 }) {
+  const [subtitleJob, setSubtitleJob] = useState<YouTubeJob>();
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [pending, setPending] = useState<Set<string>>(new Set());
@@ -173,6 +177,8 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId, onNotice }:
             <p className="upload-file-meta"><span>{model.channels.find((channel) => channel.channelId === job.channelId)?.title || "YouTube 频道"}</span><span title={job.sourcePath}>{job.sourcePath.split(/[\\/]/).pop()}</span></p>
             <div className="upload-progress-label"><strong>{Math.round(job.percent)}<small>%</small></strong><span>{fileSize(job.uploadedBytes)} / {fileSize(job.totalBytes)}</span></div>
             <div className="progress-track" role="progressbar" aria-label={`${job.title}上传进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.percent)}><span style={{ width: `${job.percent}%` }} /></div>
+            <small>字幕：{{ skipped: "未上传", pending: "待提交", submitted: "已提交 YouTube", failed: "上传失败" }[job.subtitleState || "skipped"]}</small>
+            {job.subtitleError ? <small className="error-copy upload-error">{job.subtitleError}</small> : null}
             {job.errorMessage ? <small className="error-copy upload-error">{job.errorMessage}</small> : null}
             {job.youtubeUrl ? <YouTubeVideoLink key={job.youtubeUrl} url={job.youtubeUrl} /> : null}
           </div>
@@ -180,7 +186,9 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId, onNotice }:
             {["queued", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry"].includes(job.status) ? <button type="button" className="secondary-button" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.pause(job.id))}>暂停</button> : null}
             {job.status === "paused" ? <button type="button" className="primary-button compact" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.resume(job.id))}>继续</button> : null}
             {job.status === "failed" || job.status === "cancelled" ? <button type="button" className="primary-button compact" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.retry(job.id))}>重试</button> : null}
-            {job.status === "videoUploadedThumbnailFailed" ? <button type="button" className="primary-button compact" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.retryThumbnail(job.id))}>仅重试封面</button> : null}
+            {job.thumbnailState === "failed" && !activeStatuses.includes(job.status) ? <button type="button" className="primary-button compact" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.retryThumbnail(job.id))}>仅重试封面</button> : null}
+            {job.subtitleState === "failed" && !activeStatuses.includes(job.status) ? <button type="button" className="primary-button compact" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.uploadSubtitle(job.id, null))}>仅重试字幕</button> : null}
+            {job.videoId && !activeStatuses.includes(job.status) && job.status !== "queued" ? <button type="button" className="secondary-button" disabled={bulkPending || pending.has(job.id)} onClick={() => setSubtitleJob(job)}>上传字幕</button> : null}
             <button type="button" className="text-action" onClick={() => onRevealPath(job.sourcePath)}>源文件</button>
             {["queued", "pausing", "paused", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing"].includes(job.status) ? <button type="button" className="text-action upload-cancel" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.cancel(job.id))}>取消</button> : null}
             <button type="button" className="text-action upload-delete" disabled={bulkPending || pending.has(job.id)} onClick={() => void runAction(job.id, () => model.removeJob(job.id), true)}>删除</button>
@@ -188,6 +196,7 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId, onNotice }:
         </article>
       ))}
       </div>
+      {subtitleJob ? <SubtitleUploadDialog job={subtitleJob} onClose={() => setSubtitleJob(undefined)} onSubmit={(request) => model.uploadSubtitle(subtitleJob.id, request)} /> : null}
     </div>
   );
 }

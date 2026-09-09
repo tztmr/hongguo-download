@@ -1,3 +1,5 @@
+import { useUploadPreferences } from "./uploadPreferences";
+import { SubtitlePicker, subtitleRequest, type SubtitleChoice } from "./SubtitlePicker";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
 import type { DownloadBatch } from "../download/model";
@@ -35,11 +37,18 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
   const [title, setTitle] = useState(batch.title.slice(0, 100));
   const [description, setDescription] = useState((batch.series.abstract || batch.title).slice(0, 5000));
   const [tags, setTags] = useState(youtubeTags(batch).join(", "));
-  const [privacy, setPrivacy] = useState<YouTubePrivacy>("private");
-  const [categoryId, setCategoryId] = useState("1");
-  const [madeForKids, setMadeForKids] = useState(false);
-  const [synthetic, setSynthetic] = useState(true);
-  const [paidPromotion, setPaidPromotion] = useState(false);
+  const { settings, setSetting } = useUploadPreferences();
+  const privacy = settings.privacy;
+  const setPrivacy = (value: YouTubePrivacy) => setSetting("privacy", value);
+  const categoryId = settings.categoryId;
+  const setCategoryId = (value: string) => setSetting("categoryId", value);
+  const madeForKids = settings.madeForKids;
+  const setMadeForKids = (value: boolean) => setSetting("madeForKids", value);
+  const synthetic = settings.synthetic;
+  const setSynthetic = (value: boolean) => setSetting("synthetic", value);
+  const paidPromotion = settings.paidPromotion;
+  const setPaidPromotion = (value: boolean) => setSetting("paidPromotion", value);
+  const [subtitle, setSubtitle] = useState<SubtitleChoice>();
   const [coverPath, setCoverPath] = useState<string | null>(null);
   const [audienceConfirmed, setAudienceConfirmed] = useState(true);
   const [syntheticConfirmed, setSyntheticConfirmed] = useState(true);
@@ -74,7 +83,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
     setPhase(allowDuplicate ? "submitting" : "checking");
     const request: YouTubeUploadIntent = {
       jobId: `youtube-${Date.now()}`,
-      filePath: selectedSourcePath, coverPath, title: title.trim(), description,
+      filePath: selectedSourcePath, coverPath, subtitle: subtitleRequest(subtitle, selectedSourcePath, settings.subtitleLanguage), title: title.trim(), description,
       tags: tags.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
       categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
       containsSyntheticMedia: synthetic, hasPaidProductPlacement: paidPromotion, audienceConfirmed, syntheticMediaConfirmed: syntheticConfirmed, publishConfirmed,
@@ -119,6 +128,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
           <label>合成内容<select aria-label="合成内容" value={synthetic ? "yes" : "no"} onChange={(event) => setSynthetic(event.target.value === "yes")}><option value="no">不包含</option><option value="yes">包含 AI/合成内容</option></select></label>
           <label className="youtube-form-wide">付费宣传内容<select aria-label="付费宣传内容" value={paidPromotion ? "yes" : "no"} onChange={(event) => setPaidPromotion(event.target.value === "yes")}><option value="no">否，我的影片不含付費宣傳內容</option><option value="yes">是，我的影片含有付費宣傳內容</option></select></label>
         </div>
+        <SubtitlePicker sourcePath={selectedSourcePath} value={subtitle} onChange={setSubtitle} language={settings.subtitleLanguage} onLanguageChange={(value) => setSetting("subtitleLanguage", value)} disabled={busy} />
         <div className="cover-picker"><button type="button" className="secondary-button" onClick={() => void chooseCover()}>选择本地封面</button><small>{coverPath || "不设置自定义封面"}</small></div>
         <div className="upload-confirmations">
           <label><input type="checkbox" checked={audienceConfirmed} onChange={(event) => setAudienceConfirmed(event.target.checked)} />我已确认儿童受众设置准确</label>

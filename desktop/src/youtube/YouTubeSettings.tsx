@@ -29,7 +29,7 @@ export function YouTubeSettings({ model }: { model: YouTubeModel }) {
       <div className="settings-path-card youtube-auth-card">
         <div>
           <strong>{model.credential.configured ? `OAuth 已配置 ${model.credential.clientIdSuffix}` : "尚未导入 OAuth 桌面客户端 JSON"}</strong>
-          <p>请求上传视频和读取 YouTube 账号权限，用于绑定频道；请在系统浏览器中确认授权。</p>
+          <p>请求上传视频、读取账号及管理字幕权限；首次使用字幕上传，请重新点击“授权频道”并在浏览器中勾选相应权限。</p>
         </div>
         <div>
           <button type="button" className="secondary-button" disabled={model.busy} onClick={() => void chooseCredential()}>导入凭证</button>

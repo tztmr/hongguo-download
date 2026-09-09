@@ -1202,6 +1202,20 @@ fn retry_youtube_upload_job(state: State<AppState>, job_id: String) -> AppResult
 }
 
 #[tauri::command]
+fn find_youtube_subtitle(state: State<AppState>, source_path: String) -> Option<PathBuf> {
+    state.youtube.find_subtitle(Path::new(&source_path))
+}
+
+#[tauri::command]
+async fn upload_youtube_subtitle(
+    state: State<'_, AppState>,
+    job_id: String,
+    request: Option<youtube::subtitles::SubtitleRequest>,
+) -> AppResult<YouTubeJob> {
+    state.youtube.upload_subtitle(&job_id, request).await
+}
+
+#[tauri::command]
 async fn retry_youtube_thumbnail(
     state: State<'_, AppState>,
     job_id: String,
@@ -1511,6 +1525,8 @@ pub fn run() {
             resume_youtube_upload_job,
             retry_youtube_upload_job,
             retry_youtube_thumbnail,
+            find_youtube_subtitle,
+            upload_youtube_subtitle,
             mark_youtube_job_notified
         ])
         .run(tauri::generate_context!())

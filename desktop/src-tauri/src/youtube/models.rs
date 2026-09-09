@@ -18,6 +18,8 @@ pub struct UploadIntent {
     pub dedup: Option<super::duplicates::UploadIdentity>,
     pub file_path: PathBuf,
     pub cover_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitle: Option<super::subtitles::SubtitleRequest>,
     pub title: String,
     pub description: String,
     pub tags: Vec<String>,
@@ -66,6 +68,9 @@ impl UploadIntent {
         validate_regular_file(&self.file_path, "UPLOAD_SOURCE_INVALID", "上传源文件无效")?;
         if let Some(cover) = &self.cover_path {
             validate_regular_file(cover, "UPLOAD_COVER_INVALID", "上传封面无效")?;
+        }
+        if let Some(subtitle) = &self.subtitle {
+            subtitle.validate()?;
         }
         if !self.audience_confirmed {
             return Err(AppError::new(
@@ -124,6 +129,8 @@ pub enum YouTubeJobStatus {
     WaitingToRetry,
     Processing,
     SettingThumbnail,
+    UploadingSubtitles,
+    VideoUploadedSubtitleFailed,
     Completed,
     VideoUploadedThumbnailFailed,
     Failed,
@@ -156,6 +163,10 @@ pub struct YouTubeJob {
     pub youtube_url: Option<String>,
     pub actual_privacy_status: Option<PrivacyStatus>,
     pub thumbnail_state: ThumbnailState,
+    #[serde(default)]
+    pub subtitle_state: super::subtitles::SubtitleState,
+    #[serde(default)]
+    pub subtitle_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_notified_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -197,6 +208,7 @@ mod tests {
             dedup: None,
             file_path: path,
             cover_path: None,
+            subtitle: None,
             title: "测试剧".into(),
             description: "测试剧".into(),
             tags: vec!["短剧".into()],

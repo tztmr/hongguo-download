@@ -7,7 +7,7 @@ import type { YouTubeDuplicateMatch, YouTubeUploadIntent } from "./types";
 // The only lookup boundary invokes Tauri / YouTube; submissions are supplied by the parent.
 const checkUpload = vi.hoisted(() => vi.fn());
 vi.mock("./commands", () => ({ checkYouTubeUpload: checkUpload }));
-beforeEach(() => { checkUpload.mockReset().mockResolvedValue([]); });
+beforeEach(() => { const values = new Map<string, string>(); Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), clear: () => values.clear() } }); checkUpload.mockReset().mockResolvedValue([]); });
 
 const sources: YouTubeBatchUploadSource[] = [
   {
@@ -78,6 +78,7 @@ describe("YouTubeBatchUploadDialog", () => {
     expect(requests.every((request) => request.jobId.length > 0)).toBe(true);
     expect(requests[0]).toEqual({
       jobId: expect.any(String), filePath: "/Downloads/都市全集.mp4", coverPath: null,
+      subtitle: { path: null, language: "zh-Hans" },
       title: "都市全集", description: "第一部简介", tags: ["都市", "逆袭", "都市归来"],
       categoryId: "1", privacyStatus: "private", selfDeclaredMadeForKids: false, containsSyntheticMedia: true, hasPaidProductPlacement: false,
       audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,

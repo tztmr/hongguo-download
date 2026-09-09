@@ -7,3 +7,5 @@ pub mod state;
 pub mod thumbnail;
 pub mod upload;
 pub mod vault;
+
+pub mod subtitles;

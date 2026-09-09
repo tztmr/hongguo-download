@@ -5,7 +5,7 @@ import { YouTubeUploadDialog } from "./YouTubeUploadDialog";
 
 const checkUpload = vi.hoisted(() => vi.fn());
 vi.mock("./commands", () => ({ checkYouTubeUpload: checkUpload }));
-beforeEach(() => { checkUpload.mockReset().mockResolvedValue([]); });
+beforeEach(() => { const values = new Map<string, string>(); Object.defineProperty(window, "localStorage", { configurable: true, value: { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), clear: () => values.clear() } }); checkUpload.mockReset().mockResolvedValue([]); });
 
 const batch: DownloadBatch = {
   id: "batch-ai", bookId: "book-ai", title: "AI 漫剧", cover: "", paused: false, createdAt: 1, updatedAt: 2,

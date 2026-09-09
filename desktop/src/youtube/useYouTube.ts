@@ -113,6 +113,7 @@ export function useYouTube(commands: YouTubeCommands = youtubeCommands, enabled 
   const resume = useCallback(async (jobId: string) => { await jobAction(jobId, () => commandsRef.current.resume(jobId)); }, [jobAction]);
   const retry = useCallback(async (jobId: string) => { await jobAction(jobId, () => commandsRef.current.retry(jobId)); }, [jobAction]);
   const retryThumbnail = useCallback(async (jobId: string) => { await action(() => commandsRef.current.retryThumbnail(jobId), (job) => setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, job) }))); }, [action]);
+  const uploadSubtitle = useCallback(async (jobId: string, request: YouTubeUploadIntent["subtitle"]) => { await jobAction(jobId, () => commandsRef.current.uploadSubtitle(jobId, request)); }, [jobAction]);
   const removeJob = useCallback(async (jobId: string) => {
     removedJobIds.current.add(jobId);
     try {
@@ -129,5 +130,5 @@ export function useYouTube(commands: YouTubeCommands = youtubeCommands, enabled 
     await action(() => commandsRef.current.markNotified!(jobId, outcome), (next) => setSnapshot((current) => ({ ...current, jobs: upsert(current.jobs, next) })));
   }, [action]);
 
-  return useMemo(() => ({ ...snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, pause, resume, retry, retryThumbnail, removeJob, markNotified }), [snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, pause, resume, retry, retryThumbnail, removeJob, markNotified]);
+  return useMemo(() => ({ ...snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, pause, resume, retry, retryThumbnail, uploadSubtitle, removeJob, markNotified }), [snapshot, loading, busy, error, importCredential, authorize, setChannel, revoke, removeCredential, startUpload, cancel, pause, resume, retry, retryThumbnail, uploadSubtitle, removeJob, markNotified]);
 }
