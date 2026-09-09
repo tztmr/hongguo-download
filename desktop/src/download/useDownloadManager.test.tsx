@@ -113,6 +113,23 @@ describe("useDownloadManager", () => {
     }
   });
 
+  it("replaces any of five downloads immediately without waiting for the slowest", async () => {
+    const fake = deferredAdapter();
+    const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage: memoryStorage() }));
+    act(() => { result.current.setConcurrency(5); result.current.enqueue(series, manyEpisodes); });
+    await waitFor(() => expect(fake.started).toHaveLength(5));
+    const initial = [...fake.started];
+    for (const index of [3, 1, 2, 0]) {
+      const count = fake.started.length;
+      act(() => fake.resolve(initial[index]));
+      await waitFor(() => expect(fake.started).toHaveLength(count + 1));
+      expect(result.current.stats.running).toBe(5);
+    }
+    expect(result.current.stats.done).toBe(4);
+    expect(result.current.state.batches[0].items.find(item => item.id === initial[4])?.status).toBe("running");
+    unmount();
+  });
+
   it("starts eight downloads by default and fills a freed slot", async () => {
     const fake = deferredAdapter();
     const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage: memoryStorage() }));

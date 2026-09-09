@@ -32,10 +32,12 @@ jobs:
           workspaces: desktop/src-tauri
       - name: Install test dependencies
         run: |
-          python -m pip install --disable-pip-version-check PyYAML
+          python -m pip install --disable-pip-version-check PyYAML -r requirements.txt
           npm ci --prefix desktop
       - name: Python worker tests
         run: python -m unittest discover -s ai_worker/tests -v
+      - name: Playback route and cancellation tests
+        run: python -m unittest tests.test_playback -v
       - name: Release upload regression
         run: python -m unittest tests.test_windows_release_workflow -v
       - name: Frontend tests
@@ -64,7 +66,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-      - run: python -m pip install --disable-pip-version-check PyYAML
+      - run: python -m pip install --disable-pip-version-check PyYAML -r requirements.txt
       - run: npm ci --prefix desktop
       - run: python -m unittest discover -s ai_worker/tests -v
       - run: npm test --prefix desktop -- --run

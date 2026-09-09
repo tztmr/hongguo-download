@@ -250,6 +250,10 @@ fn spawn_api(app: &AppHandle, port: u16, download_proxy: Option<&str>) -> AppRes
         .map_err(|e| err(format!("应用数据目录失败: {e}")))?;
     fs::create_dir_all(&data_dir).map_err(|e| err(format!("创建应用数据目录失败: {e}")))?;
 
+    let playback_tools = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf));
+
     #[cfg(debug_assertions)]
     {
         let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -267,6 +271,9 @@ fn spawn_api(app: &AppHandle, port: u16, download_proxy: Option<&str>) -> AppRes
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(directory) = &playback_tools {
+            command.env("HONGGUO_PLAYBACK_TOOLS_DIR", directory);
+        }
         if let Some(proxy) = download_proxy.filter(|value| !value.trim().is_empty()) {
             command
                 .env("HTTP_PROXY", proxy)
@@ -288,6 +295,9 @@ fn spawn_api(app: &AppHandle, port: u16, download_proxy: Option<&str>) -> AppRes
             .map_err(sidecar_spawn_error)?
             .args(release_api_args(port, &data_dir));
         let mut command = command;
+        if let Some(directory) = &playback_tools {
+            command = command.env("HONGGUO_PLAYBACK_TOOLS_DIR", directory);
+        }
         if let Some(proxy) = download_proxy.filter(|value| !value.trim().is_empty()) {
             command = command
                 .env("HTTP_PROXY", proxy)
@@ -304,6 +314,15 @@ fn spawn_api(app: &AppHandle, port: u16, download_proxy: Option<&str>) -> AppRes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn online_playback_uses_compatibility_only_on_windows() {
+        assert_eq!(playback_url("http://127.0.0.1:1234", "a&b", "1080p", true),
+            "http://127.0.0.1:1234/api/duanju/download?item_id=a%26b&definition=1080p&playback_compat=true");
+        assert!(
+            !playback_url("http://127.0.0.1:1234", "a", "auto", false).contains("playback_compat")
+        );
+    }
 
     #[test]
     fn startup_health_timeout_bounds_a_server_that_accepts_without_responding() {
@@ -809,6 +828,15 @@ async fn api_get(state: State<'_, AppState>, path: String) -> AppResult<Value> {
     .await
 }
 
+fn playback_url(api_base: &str, item_id: &str, definition: &str, windows: bool) -> String {
+    format!(
+        "{api_base}/api/duanju/download?item_id={}&definition={}{}",
+        urlencoding::encode(item_id),
+        urlencoding::encode(definition),
+        if windows { "&playback_compat=true" } else { "" }
+    )
+}
+
 #[tauri::command]
 async fn get_playback_url(
     state: State<'_, AppState>,
@@ -820,10 +848,11 @@ async fn get_playback_url(
     let ready = state.api_ready.clone();
     run_blocking(move || {
         ensure_api_ready(&client, &api_base, &ready)?;
-        Ok(format!(
-            "{api_base}/api/duanju/download?item_id={}&definition={}",
-            urlencoding::encode(&item_id),
-            urlencoding::encode(&definition)
+        Ok(playback_url(
+            &api_base,
+            &item_id,
+            &definition,
+            cfg!(windows),
         ))
     })
     .await
@@ -848,6 +877,7 @@ fn persist_settings_patch(state: &AppState, patch: UpdateSettings) -> AppResult<
     save_settings(&state.settings_path, &next).map_err(err)?;
     *guard = next.clone();
     drop(guard);
+    state.media_jobs.set_concurrency(next.ai_concurrency);
     if let Some(manager) = state.ai_components.as_ref() {
         manager.configure_network(
             next.download_proxy.as_deref(),
@@ -993,6 +1023,11 @@ async fn download_episode(
         )
     })
     .await
+}
+
+#[tauri::command]
+fn get_media_scheduling(state: State<AppState>) -> serde_json::Value {
+    state.media_jobs.scheduling_status()
 }
 
 #[tauri::command]
@@ -1443,15 +1478,23 @@ pub fn run() {
             });
             let merge_executor = std::sync::Arc::new(NativeMergeExecutor::from_packaged_tools());
             let media_jobs = std::sync::Arc::new(if let Some(components) = ai_components.clone() {
-                MediaJobService::new_with_ai(
+                MediaJobService::new_configured(
                     media_job_manager,
                     merge_executor,
                     std::sync::Arc::new(NativeAIExecutor::from_packaged_tools(components)),
                     event_sink,
+                    settings.ai_concurrency,
                 )
             } else {
-                MediaJobService::new(media_job_manager, merge_executor, event_sink)
+                MediaJobService::new_configured(
+                    media_job_manager,
+                    merge_executor,
+                    std::sync::Arc::new(media::UnavailableAIExecutor),
+                    event_sink,
+                    settings.ai_concurrency,
+                )
             });
+            media_jobs.set_concurrency(settings.ai_concurrency);
             let youtube = YouTubeService::load(
                 config_dir,
                 media_jobs_path,
@@ -1497,6 +1540,7 @@ pub fn run() {
             health,
             download_episode,
             get_media_jobs,
+            get_media_scheduling,
             start_merge_job,
             start_audio_separation_job,
             start_subtitle_job,

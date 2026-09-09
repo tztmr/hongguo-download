@@ -1,11 +1,12 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import type { DownloadBatch } from "../download/model";
 import type { MediaJobScope } from "../media/types";
 
 export type BatchMediaTarget = { batch: DownloadBatch; mergedPath?: string; reason?: string };
 export type BatchMediaKind = "audioSeparation" | "subtitleExtraction";
 
-export function BatchMediaDialog({ targets, kind, modelName, missingComponents, canInstall, onInstall, onSubmit, onClose, onQueued }: {
+export function BatchMediaDialog({ targets, kind, modelName, missingComponents, canInstall, onInstall, onSubmit, onClose, onQueued, concurrencyControl }: {
+  concurrencyControl?: ReactNode;
   targets: BatchMediaTarget[];
   kind: BatchMediaKind;
   modelName: string;
@@ -60,6 +61,7 @@ export function BatchMediaDialog({ targets, kind, modelName, missingComponents, 
     <section className="merge-dialog batch-operation-dialog" role="dialog" aria-modal="true" aria-label={label}>
       <header><h2>{label}</h2></header>
       <p>每部剧分别加入处理队列。当前模型：{modelName}（可在设置中修改）。</p>
+      <fieldset disabled={busy} className="media-concurrency-field">{concurrencyControl}</fieldset>
       <div className="scope-options" role="radiogroup" aria-label="批量处理范围">
         <label><input type="radio" name="bulk-media-scope" disabled={busy || queued.size > 0} checked={scope === "episodes"} onChange={() => setScope("episodes")} />逐集处理</label>
         <label><input type="radio" name="bulk-media-scope" disabled={busy || queued.size > 0} checked={scope === "merged"} onChange={() => setScope("merged")} />合并视频</label>

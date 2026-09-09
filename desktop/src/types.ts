@@ -86,6 +86,7 @@ export type AppSettings = {
   demucsModel: DemucsModel;
   whisperModel: WhisperModel;
   aiDevice: AIDevicePreference;
+  aiConcurrency?: number;
   downloadProxy?: string;
   downloadMirror?: string;
   warning?: string;

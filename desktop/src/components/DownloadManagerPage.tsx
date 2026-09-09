@@ -15,6 +15,7 @@ import { AlertIcon, CheckIcon, ChevronLeftIcon, CloseIcon, FolderIcon, PauseIcon
 import { MergeVideoDialog } from "./MergeVideoDialog";
 import { MediaScopeDialog } from "./MediaScopeDialog";
 import { MediaJobsPanel } from "./MediaJobsPanel";
+import { MediaConcurrencyControl } from "./MediaConcurrencyControl";
 import { BatchMediaDialog, type BatchMediaTarget, type BatchMediaKind } from "./BatchMediaDialog";
 import { BatchMergeDialog, type BatchMergeTarget } from "./BatchMergeDialog";
 import { YouTubeBatchUploadDialog, type YouTubeBatchUploadSource } from "../youtube/YouTubeBatchUploadDialog";
@@ -32,6 +33,8 @@ type DownloadManagerPageProps = {
   demucsModel?: DemucsModel;
   whisperModel?: WhisperModel;
   aiComponents?: AIComponentStatus[];
+  aiConcurrency?: number;
+  onAIConcurrencyChange?: (value: number) => Promise<void>;
   onInstallComponent?: (id: string) => Promise<void>;
   youtube?: YouTubeModel;
   focusTarget?: NotificationTarget | null;
@@ -128,6 +131,8 @@ export function DownloadManagerPage({
   demucsModel = "htdemucs",
   whisperModel = "small",
   aiComponents,
+  aiConcurrency,
+  onAIConcurrencyChange,
   onInstallComponent,
   youtube,
   focusTarget,
@@ -536,6 +541,7 @@ export function DownloadManagerPage({
       ) : null}
 
       <div hidden={section !== "media"} className="manager-section-content">
+        {media.scheduling?.windows && onAIConcurrencyChange ? <MediaConcurrencyControl value={aiConcurrency} onChange={onAIConcurrencyChange} /> : null}
         <MediaJobsPanel
           media={media}
           batches={manager.state.batches}
@@ -634,7 +640,7 @@ export function DownloadManagerPage({
           }}
         />
       ) : null}
-      {bulkMedia ? <BatchMediaDialog targets={bulkMedia.targets} kind={bulkMedia.kind} modelName={bulkModel}
+      {bulkMedia ? <BatchMediaDialog concurrencyControl={media.scheduling?.windows && onAIConcurrencyChange ? <MediaConcurrencyControl value={aiConcurrency} onChange={onAIConcurrencyChange} /> : undefined} targets={bulkMedia.targets} kind={bulkMedia.kind} modelName={bulkModel}
         missingComponents={bulkMissing} canInstall={Boolean(onInstallComponent) && bulkMissing.every(id => aiComponents?.some(item => item.id === id))}
         onInstall={async () => { for (const id of bulkMissing) await onInstallComponent!(id); }}
         onSubmit={({ batch, mergedPath: sourcePath }, scope) => bulkMedia.kind === "audioSeparation"

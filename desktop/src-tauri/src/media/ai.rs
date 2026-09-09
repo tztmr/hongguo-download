@@ -738,7 +738,15 @@ fn run_worker(
         .as_object_mut()
         .and_then(|options| options.remove("cpuThreads"))
         .and_then(|value| value.as_u64())
-        .map(|threads| threads.clamp(1, 4));
+        .map(|threads| {
+            if cfg!(windows) {
+                std::thread::available_parallelism()
+                    .map_or(1, usize::from)
+                    .clamp(1, 16) as u64
+            } else {
+                threads.clamp(1, 4)
+            }
+        });
     if invocation.operation == "transcribe" && cfg!(target_os = "macos") {
         // The installed Torch 2.5.1 runtime cannot move Whisper's sparse alignment
         // buffers to MPS. This also fixes older installed workers without downloading

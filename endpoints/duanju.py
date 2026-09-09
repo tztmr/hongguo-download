@@ -25,6 +25,7 @@ from core.duanju_feeds import (
     parse_rank_page as parse_captured_rank_page,
     parse_subscribe_page,
 )
+from core.playback import prepare_compatible_video
 from core.mp4_decrypt import decrypt_mp4, derive_key_from_spade_a
 from core.new_releases import (
     SHANGHAI,
@@ -960,12 +961,15 @@ async def _fetch_video_model(request: Request, item_id: str) -> dict:
     return data
 
 
-def _pick_source(sources: list[dict], definition: str) -> dict:
+def _pick_source(sources: list[dict], definition: str, prefer_h264: bool = False) -> dict:
     """按目标档位挑选播放源: 命中优先, 否则先降档再升档。"""
     tiers = ['1080p', '720p', '540p', '480p', '360p']
     usable = [item for item in sources if item['urls'] and item['spade_a']]
     if not usable:
         raise RuntimeError('没有同时具备播放地址和 spade_a 的视频源')
+    if prefer_h264:
+        # Keep requested quality; prefer AVC only among sources at the same tier.
+        usable.sort(key=lambda item: str(item.get('codec_type', '')).lower() not in ('h264', 'avc', 'avc1', 'avc3'))
     want = definition.strip().lower()
     if want == 'auto':
         order = tiers
@@ -1037,6 +1041,7 @@ async def duanju_download(
     request: Request,
     item_id: str = Query(..., min_length=1, description='剧集 item_id / vid'),
     definition: str = Query('720p', description='目标清晰度,命中不到时自动降/升档'),
+    playback_compat: bool = Query(False, description='仅在线观看: 转为 H.264/AAC 兼容 MP4'),
 ):
     """下载并解密剧集,直接返回可播放 MP4。
 
@@ -1044,7 +1049,7 @@ async def duanju_download(
     """
     try:
         data = await _fetch_video_model(request, item_id)
-        source = _pick_source(data['sources'], definition)
+        source = _pick_source(data['sources'], definition, prefer_h264=playback_compat)
         key_hex = derive_key_from_spade_a(source['spade_a'])
         encrypted = await _download_encrypted(source['urls'])
     except (RuntimeError, ValueError) as exc:
@@ -1057,6 +1062,13 @@ async def duanju_download(
         logger.error('短剧解密失败: %s', exc)
         return error(f'视频解密失败: {exc}', code=-9, status_code=502)
 
+    if playback_compat:
+        try:
+            decrypted = await prepare_compatible_video(decrypted, request.is_disconnected)
+        except RuntimeError as exc:
+            logger.warning('播放兼容处理失败: %s', exc)
+            return error(str(exc), code=-10, status_code=502)
+
     logger.info('短剧解密完成: %s %s, %d→%d 字节', item_id, source['definition'], len(encrypted), len(decrypted))
     return Response(
         content=decrypted,
@@ -1065,7 +1077,8 @@ async def duanju_download(
             'Content-Disposition': f'attachment; filename="{item_id}_{source["definition"]}.mp4"',
             'Content-Length': str(len(decrypted)),
             'X-Duanju-Definition': str(source['definition']),
-            'Cache-Control': 'public, max-age=86400',
+            'X-Duanju-Playback': 'h264-aac' if playback_compat else 'original',
+            'Cache-Control': 'no-store' if playback_compat else 'public, max-age=86400',
         },
     )
 

@@ -539,6 +539,8 @@ export default function App() {
           manager={manager}
           media={media}
           saveDir={activeSettings.saveDir}
+          aiConcurrency={activeSettings.aiConcurrency}
+          onAIConcurrencyChange={value => settingsModel.update({ aiConcurrency: value })}
           demucsModel={activeSettings.demucsModel}
           whisperModel={activeSettings.whisperModel}
           aiComponents={isPreview ? undefined : settingsModel.components}

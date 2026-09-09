@@ -4,7 +4,7 @@ use std::{
     os::windows::{io::AsRawHandle, process::CommandExt},
     process::{Child, Command},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex,
     },
 };
@@ -15,8 +15,10 @@ use windows_sys::Win32::{
             CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
         },
         JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-            SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectCpuRateControlInformation,
+            JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+            JOBOBJECT_CPU_RATE_CONTROL_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         },
         Threading::{
@@ -49,6 +51,7 @@ impl Drop for JobHandle {
 struct ProcessControlState {
     cancelled: AtomicBool,
     paused: AtomicBool,
+    cpu_rate: AtomicU32,
     process: Mutex<Option<(u32, JobHandle)>>,
 }
 
@@ -74,13 +77,30 @@ impl ProcessControl {
             return Err(control_error(std::io::Error::last_os_error()));
         }
         let pid = child.id();
-        *self.0.process.lock().map_err(|_| unavailable_error())? = Some((pid, job));
+        {
+            let mut guard = self.0.process.lock().map_err(|_| unavailable_error())?;
+            apply_cpu_rate(&job, self.0.cpu_rate.load(Ordering::Acquire))?;
+            *guard = Some((pid, job));
+        }
         if self.0.paused.load(Ordering::Acquire) {
             suspend_process_threads(pid)?;
         }
         if self.0.cancelled.load(Ordering::Acquire) {
             self.terminate_current();
         }
+        Ok(())
+    }
+
+    pub fn set_cpu_rate(&self, rate: u32) -> Result<(), AppError> {
+        let guard = self.0.process.lock().map_err(|_| unavailable_error())?;
+        let rate = rate.clamp(1, 10000);
+        if self.0.cpu_rate.load(Ordering::Acquire) == rate {
+            return Ok(());
+        }
+        if let Some((_, job)) = guard.as_ref() {
+            apply_cpu_rate(job, rate)?;
+        }
+        self.0.cpu_rate.store(rate, Ordering::Release);
         Ok(())
     }
 
@@ -143,6 +163,29 @@ impl ProcessControl {
             }
         }
     }
+}
+
+fn apply_cpu_rate(job: &JobHandle, rate: u32) -> Result<(), AppError> {
+    if rate == 0 {
+        return Ok(());
+    }
+    let mut limits = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
+        ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+        ..Default::default()
+    };
+    limits.Anonymous.CpuRate = rate;
+    let result = unsafe {
+        SetInformationJobObject(
+            job.raw(),
+            JobObjectCpuRateControlInformation,
+            &limits as *const _ as *const _,
+            size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+        )
+    };
+    if result == 0 {
+        return Err(control_error(std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 fn create_kill_on_close_job() -> Result<JobHandle, AppError> {
@@ -229,4 +272,58 @@ fn control_error(cause: impl std::fmt::Display) -> AppError {
         "无法控制媒体处理进程",
         cause.to_string(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::System::JobObjects::QueryInformationJobObject;
+
+    fn configured_rate(control: &ProcessControl) -> u32 {
+        let guard = control.0.process.lock().unwrap();
+        let (_, job) = guard.as_ref().unwrap();
+        let mut info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION::default();
+        let result = unsafe {
+            QueryInformationJobObject(
+                job.raw(),
+                JobObjectCpuRateControlInformation,
+                &mut info as *mut _ as *mut _,
+                size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(result, 0);
+        assert_eq!(
+            info.ControlFlags,
+            JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP
+        );
+        unsafe { info.Anonymous.CpuRate }
+    }
+
+    #[test]
+    fn live_worker_gains_freed_cpu_and_later_child_keeps_the_rate() {
+        let control = ProcessControl::new();
+        control
+            .set_cpu_rate(super::super::scheduling::cpu_share(5))
+            .unwrap();
+        for _ in 0..2 {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"]);
+            control.prepare_command(&mut command);
+            let mut child = command.spawn().unwrap();
+            control.register_child(&mut child).unwrap();
+            assert!(matches!(configured_rate(&control), 1700 | 8500));
+            control
+                .set_cpu_rate(super::super::scheduling::cpu_share(1))
+                .unwrap();
+            assert_eq!(configured_rate(&control), 8500);
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "rebalance must not restart the worker"
+            );
+            control.kill();
+            child.wait().unwrap();
+            control.clear_child(child.id());
+        }
+    }
 }

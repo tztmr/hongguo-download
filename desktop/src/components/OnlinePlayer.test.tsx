@@ -30,6 +30,26 @@ describe("OnlinePlayer", () => {
     expect(vi.mocked(loadEpisodeVideo).mock.calls[1][2].aborted).toBe(true);
   });
 
+  it("keeps loading visible until the first frame and clears it on loadeddata", async () => {
+    const view = render(<OnlinePlayer title="测试剧" episodes={episodes} initialItemId="e1" definition="auto" onClose={vi.fn()} />);
+    await waitFor(() => expect(view.container.querySelector("video")).not.toBeNull());
+    expect(view.getByRole("status").textContent).toContain("加载视频画面");
+    fireEvent.loadedData(view.container.querySelector("video")!);
+    expect(view.queryByRole("status")).toBeNull();
+  });
+
+  it("turns a stalled first frame into a retryable error", async () => {
+    vi.useFakeTimers();
+    try {
+      const view = render(<OnlinePlayer title="测试剧" episodes={episodes} initialItemId="e1" definition="auto" onClose={vi.fn()} />);
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(view.getByRole("alert").textContent).toContain("画面未能加载");
+      expect(view.getByRole("button", { name: "重试播放" })).toBeTruthy();
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+
   it("shows request failures and retries the same episode", async () => {
     vi.mocked(loadEpisodeVideo).mockRejectedValueOnce(new Error("视频暂不可用"));
     const view = render(<OnlinePlayer title="测试剧" episodes={episodes} initialItemId="e1" definition="auto" onClose={vi.fn()} />);

@@ -1642,6 +1642,9 @@ mod tests {
                             requests.fetch_add(1, Ordering::SeqCst);
                             let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                             max_in_flight.fetch_max(current, Ordering::SeqCst);
+                            // Accepted sockets inherit nonblocking mode on macOS. A
+                            // timeout cannot make WouldBlock wait for the request line.
+                            stream.set_nonblocking(false).unwrap();
                             // TCP reads may split the request line under parallel test load.
                             // Read bounded, complete headers before selecting a mock route.
                             use std::io::{BufRead, BufReader};

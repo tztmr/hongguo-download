@@ -1,0 +1,119 @@
+import asyncio
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import AsyncMock, patch
+
+import httpx
+from fastapi import FastAPI
+from endpoints.duanju import router, _pick_source
+from core import playback
+
+
+class PlaybackRouteTests(unittest.IsolatedAsyncioTestCase):
+    def source(self, codec, definition='720p'):
+        return {'urls': ['https://invalid.test/video'], 'spade_a': 'test', 'codec_type': codec, 'definition': definition}
+
+    def test_prefer_avc_only_at_same_quality_and_leave_download_selection_unchanged(self):
+        hevc, avc = self.source('bytevc1'), self.source('h264')
+        self.assertEqual(_pick_source([hevc, avc], '720p'), hevc)
+        self.assertEqual(_pick_source([hevc, avc], '720p', True), avc)
+        high = self.source('bytevc1', '1080p')
+        self.assertEqual(_pick_source([avc, high], '1080p', True), high)
+        self.assertEqual(_pick_source([avc, high], 'auto', True), high)
+
+    async def test_only_playback_converts_and_regular_download_keeps_original_bytes(self):
+        app = FastAPI(); app.include_router(router, prefix='/api')
+        converter = AsyncMock(return_value=b'compatible-mp4')
+        with patch('endpoints.duanju._fetch_video_model', AsyncMock(return_value={'sources':[self.source('bytevc1')]})), \
+             patch('endpoints.duanju.derive_key_from_spade_a', return_value='key'), \
+             patch('endpoints.duanju._download_encrypted', AsyncMock(return_value=b'encrypted')), \
+             patch('endpoints.duanju.decrypt_mp4', return_value=b'original-mp4'), \
+             patch('endpoints.duanju.prepare_compatible_video', converter):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                original = await client.get('/api/duanju/download?item_id=episode&definition=720p')
+                self.assertEqual(original.content, b'original-mp4')
+                converter.assert_not_called()
+                compatible = await client.get('/api/duanju/download?item_id=episode&definition=720p&playback_compat=true')
+                self.assertEqual(compatible.status_code, 200)
+                self.assertEqual(compatible.content, b'compatible-mp4')
+                self.assertEqual(compatible.headers['x-duanju-playback'], 'h264-aac')
+                self.assertEqual(compatible.headers['cache-control'], 'no-store')
+                converter.assert_awaited_once()
+
+    async def test_failed_compatibility_returns_actionable_error_not_unplayable_video(self):
+        app = FastAPI(); app.include_router(router, prefix='/api')
+        with patch('endpoints.duanju._fetch_video_model', AsyncMock(return_value={'sources':[self.source('hevc')]})), \
+             patch('endpoints.duanju.derive_key_from_spade_a', return_value='key'), \
+             patch('endpoints.duanju._download_encrypted', AsyncMock(return_value=b'encrypted')), \
+             patch('endpoints.duanju.decrypt_mp4', return_value=b'original-mp4'), \
+             patch('endpoints.duanju.prepare_compatible_video', AsyncMock(side_effect=RuntimeError('缺少内置播放组件'))):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.get('/api/duanju/download?item_id=episode&playback_compat=true')
+                self.assertEqual(response.status_code, 502)
+                self.assertIn('缺少内置播放组件', response.json()['msg'])
+
+
+class PlaybackProcessTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        playback._slots = asyncio.Semaphore(1)
+
+    async def test_disconnect_kills_encoder_and_reaps_it(self):
+        done = asyncio.Event()
+        async def communicate():
+            await done.wait()
+            process.returncode = -9
+            return b'', b''
+        process = AsyncMock()
+        process.returncode = None
+        process.communicate = communicate
+        def kill(): done.set()
+        from unittest.mock import Mock
+        process.kill = Mock(side_effect=kill)
+        with patch('core.playback.asyncio.create_subprocess_exec', AsyncMock(return_value=process)):
+            with self.assertRaises(asyncio.CancelledError):
+                await playback._run(['ffmpeg'], AsyncMock(return_value=True))
+        process.kill.assert_called_once()
+        self.assertEqual(process.returncode, -9)
+
+    async def test_missing_tools_fail_before_any_processing(self):
+        with patch.dict(os.environ, {'HONGGUO_PLAYBACK_TOOLS_DIR': '/nonexistent/hongguo-tools'}):
+            with self.assertRaisesRegex(RuntimeError, '缺少内置播放组件'):
+                await playback.prepare_compatible_video(b'mp4')
+
+    def test_h264_is_copied_but_hevc_or_ten_bit_avc_is_reencoded(self):
+        def args(codec, pix_fmt):
+            return playback._encode_args(Path('/ffmpeg'), Path('/in.mp4'), Path('/out.mp4'), {'streams':[{'codec_type':'video','codec_name':codec,'pix_fmt':pix_fmt}]})
+        avc = args('h264', 'yuv420p')
+        self.assertEqual(avc[avc.index('-c:v') + 1], 'copy')
+        for codec, pixel in [('hevc','yuv420p'), ('h264','yuv420p10le')]:
+            encoded = args(codec, pixel)
+            self.assertEqual(encoded[encoded.index('-c:v')+1], 'libx264')
+            self.assertIn('yuv420p', encoded)
+
+    @unittest.skipUnless(os.environ.get('HONGGUO_TEST_PLAYBACK_TOOLS'), 'requires bundled FFmpeg/FFprobe')
+    async def test_real_hevc_and_ten_bit_avc_are_compatible_and_decodable(self):
+        tools = Path(os.environ['HONGGUO_TEST_PLAYBACK_TOOLS']).resolve()
+        suffix = '.exe' if os.name == 'nt' else ''
+        ffmpeg, ffprobe = tools / ('ffmpeg'+suffix), tools / ('ffprobe'+suffix)
+        with tempfile.TemporaryDirectory(prefix='播放验证 ') as directory, patch.dict(os.environ, {'HONGGUO_PLAYBACK_TOOLS_DIR':str(tools)}):
+            for fixture in ['playback-hevc.mp4', 'playback-avc10.mp4']:
+                source = Path(directory) / '源视频.mp4'
+                source.write_bytes((Path(__file__).parent / 'fixtures' / fixture).read_bytes())
+                original = source.read_bytes()
+                result = await playback.prepare_compatible_video(original)
+                self.assertEqual(source.read_bytes(), original)
+                output = Path(directory) / '兼容播放.mp4'; output.write_bytes(result)
+                probe = json.loads(await playback._run(playback._probe_args(ffprobe, output)))
+                self.assertTrue(playback._compatible_video(probe))
+                self.assertTrue(playback._compatible_audio(probe))
+                # Decode actual frames; valid container metadata alone is insufficient.
+                decoded = await playback._run([str(ffmpeg), '-v', 'error', '-i', str(output), '-an', '-frames:v', '2', '-f', 'framemd5', '-'])
+                frames = [line for line in decoded.splitlines() if not line.startswith(b'#')]
+                self.assertEqual(len(frames), 2)
+                self.assertLess(result.find(b'moov'), result.find(b'mdat'))
+
+if __name__ == '__main__':
+    unittest.main()

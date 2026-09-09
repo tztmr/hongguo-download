@@ -8,6 +8,7 @@ import type {
   MediaCommands,
   MediaJob,
   MediaJobsModel,
+  MediaScheduling,
   MediaJobScope,
   MergeSubmitOptions,
 } from "./types";
@@ -33,6 +34,7 @@ export function useMediaJobs({
   initialJobs = [],
   initialWarning,
 }: UseMediaJobsOptions = {}): MediaJobsModel {
+  const [scheduling, setScheduling] = useState<MediaScheduling>();
   const [jobs, setJobs] = useState<MediaJob[]>(initialJobs);
   const [warning, setWarning] = useState<string | undefined>(initialWarning);
   const [error, setError] = useState<MediaCommandError | undefined>();
@@ -70,6 +72,19 @@ export function useMediaJobs({
       active = false;
       unlisten?.();
     };
+  }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled || !commandsRef.current.scheduling) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try { const value = await commandsRef.current.scheduling!(); if (active) setScheduling(value); }
+      catch { /* Keep job controls available if the status probe fails. */ }
+      finally { if (active) timer = setTimeout(refresh, 2000); }
+    }
+    void refresh();
+    return () => { active = false; clearTimeout(timer); };
   }, [enabled]);
 
   const startMerge = useCallback(
@@ -241,7 +256,7 @@ export function useMediaJobs({
   }, []);
 
   return useMemo(
-    () => ({ jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, findMergedVideo, retry, markNotified }),
-    [jobs, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, findMergedVideo, retry, markNotified],
+    () => ({ jobs, scheduling, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, findMergedVideo, retry, markNotified }),
+    [jobs, scheduling, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, findMergedVideo, retry, markNotified],
   );
 }

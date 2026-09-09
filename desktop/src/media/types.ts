@@ -71,6 +71,8 @@ export type MediaJob = {
   failureNotifiedAt?: number;
 };
 
+export type MediaScheduling = { windows: boolean; concurrency: number; reason: string };
+
 export type MediaJobsSnapshot = {
   version: number;
   jobs: MediaJob[];
@@ -92,6 +94,7 @@ export type MergeSubmitOptions = {
 
 export type MediaCommands = {
   snapshot(): Promise<MediaJobsSnapshot>;
+  scheduling?(): Promise<MediaScheduling>;
   startMerge(request: StartMergeRequest): Promise<MediaJob>;
   startAudioSeparation(request: StartAIJobRequest): Promise<MediaJob>;
   startSubtitleExtraction(request: StartAIJobRequest): Promise<MediaJob>;
@@ -107,6 +110,7 @@ export type MediaCommands = {
 };
 
 export type MediaJobsModel = {
+  scheduling?: MediaScheduling;
   jobs: MediaJob[];
   warning?: string;
   error?: MediaCommandError;

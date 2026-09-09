@@ -43,7 +43,7 @@ use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering},
         mpsc, Arc, Mutex,
     },
     thread::{self, JoinHandle},
@@ -536,7 +536,7 @@ pub trait AIExecutor: Send + Sync + 'static {
     ) -> Result<AIExecutionResult, AppError>;
 }
 
-struct UnavailableAIExecutor;
+pub(crate) struct UnavailableAIExecutor;
 
 impl AIExecutor for UnavailableAIExecutor {
     fn execute(
@@ -608,6 +608,8 @@ pub struct MediaJobService {
     pending_removals: Arc<Mutex<HashSet<String>>>,
     merge_request_lock: Mutex<()>,
     shutting_down: Arc<AtomicBool>,
+    concurrency: Arc<AtomicUsize>,
+    queue_reason: Arc<Mutex<String>>,
     worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -647,6 +649,34 @@ impl MediaJobService {
         event_sink: Arc<dyn MediaJobEventSink>,
         probe: scheduling::ResourceProbe,
     ) -> Self {
+        Self::with_resource_probe_and_limit(manager, executor, ai_executor, event_sink, probe, 0)
+    }
+
+    pub fn new_configured(
+        manager: Arc<MediaJobManager>,
+        executor: Arc<dyn MergeExecutor>,
+        ai_executor: Arc<dyn AIExecutor>,
+        event_sink: Arc<dyn MediaJobEventSink>,
+        concurrency: usize,
+    ) -> Self {
+        Self::with_resource_probe_and_limit(
+            manager,
+            executor,
+            ai_executor,
+            event_sink,
+            scheduling::native_probe(),
+            concurrency,
+        )
+    }
+
+    fn with_resource_probe_and_limit(
+        manager: Arc<MediaJobManager>,
+        executor: Arc<dyn MergeExecutor>,
+        ai_executor: Arc<dyn AIExecutor>,
+        event_sink: Arc<dyn MediaJobEventSink>,
+        probe: scheduling::ResourceProbe,
+        initial_concurrency: usize,
+    ) -> Self {
         let resume_queued = manager
             .snapshot()
             .jobs
@@ -656,6 +686,8 @@ impl MediaJobService {
         let running = Arc::new(Mutex::new(HashMap::new()));
         let pending_removals = Arc::new(Mutex::new(HashSet::new()));
         let shutting_down = Arc::new(AtomicBool::new(false));
+        let concurrency = Arc::new(AtomicUsize::new(initial_concurrency.min(10)));
+        let queue_reason = Arc::new(Mutex::new(String::new()));
         let worker_context = MediaWorkerContext {
             manager: manager.clone(),
             executor,
@@ -664,6 +696,8 @@ impl MediaJobService {
             running: running.clone(),
             pending_removals: pending_removals.clone(),
             shutting_down: shutting_down.clone(),
+            concurrency: concurrency.clone(),
+            queue_reason: queue_reason.clone(),
         };
         let completion_sender = wake_sender.clone();
         let worker = thread::Builder::new()
@@ -678,12 +712,28 @@ impl MediaJobService {
             pending_removals,
             merge_request_lock: Mutex::new(()),
             shutting_down,
+            concurrency,
+            queue_reason,
             worker: Mutex::new(Some(worker)),
         };
         if resume_queued {
             service.wake_worker();
         }
         service
+    }
+
+    pub fn set_concurrency(&self, value: usize) {
+        self.concurrency
+            .store(value.min(10), AtomicOrdering::Release);
+        self.wake_worker();
+    }
+
+    pub fn scheduling_status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "windows": cfg!(windows),
+            "concurrency": self.concurrency.load(AtomicOrdering::Acquire),
+            "reason": self.queue_reason.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+        })
     }
 
     pub fn snapshot(&self) -> MediaJobsSnapshot {
@@ -950,6 +1000,8 @@ struct MediaWorkerContext {
     running: RunningJobs,
     pending_removals: Arc<Mutex<HashSet<String>>>,
     shutting_down: Arc<AtomicBool>,
+    concurrency: Arc<AtomicUsize>,
+    queue_reason: Arc<Mutex<String>>,
 }
 
 fn worker_loop(
@@ -980,6 +1032,13 @@ fn worker_loop(
         if context.shutting_down.load(AtomicOrdering::Acquire) {
             break;
         }
+        #[cfg(windows)]
+        rebalance_cpu(&context.running);
+        context
+            .queue_reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         if !context
             .manager
             .snapshot()
@@ -994,7 +1053,7 @@ fn worker_loop(
             }
             continue;
         }
-        let resources = probe();
+        let mut resources = probe();
         loop {
             let claimed = {
                 let mut running = context.running.lock().unwrap_or_else(|e| e.into_inner());
@@ -1016,15 +1075,33 @@ fn worker_loop(
                     .values()
                     .any(|job| !scheduling::is_parallel_kind(job.kind))
                 {
+                    *context
+                        .queue_reason
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = "等待当前合并任务完成".into();
                     break;
                 }
                 if let Some(request) = candidate.ai_request.as_mut() {
                     request.device = context.ai_executor.scheduling_device(request);
                 }
                 let active: Vec<_> = running.values().map(|job| job.budget).collect();
-                let Some(budget) = scheduling::admit(&candidate, &active, resources) else {
-                    break;
+                let concurrency = if cfg!(windows) {
+                    context.concurrency.load(AtomicOrdering::Acquire)
+                } else {
+                    0
                 };
+                let budget =
+                    match scheduling::admit_configured(&candidate, &active, resources, concurrency)
+                    {
+                        Ok(budget) => budget,
+                        Err(reason) => {
+                            *context
+                                .queue_reason
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = reason.into();
+                            break;
+                        }
+                    };
                 match context.manager.claim_oldest_queued() {
                     Ok(Some(job)) if context.shutting_down.load(AtomicOrdering::Acquire) => {
                         let _ = context.manager.restore_claimed_to_queued(&job.id);
@@ -1046,6 +1123,18 @@ fn worker_loop(
                 }
             };
             let (job, token, budget) = claimed;
+            // The probe is shared by this admission pass. Reserve only NEW launches;
+            // its free-memory counters already include older workers' allocations.
+            if cfg!(windows) {
+                resources.available_memory = resources
+                    .available_memory
+                    .map(|v| v.saturating_sub(budget.memory));
+                if let Some(gpu) = resources.gpu.as_mut() {
+                    gpu.free_memory = gpu.free_memory.saturating_sub(budget.gpu_memory);
+                }
+            }
+            #[cfg(windows)]
+            rebalance_cpu(&context.running);
             let id = job.id.clone();
             let worker_context = context.clone();
             let notify = completion_sender.clone();
@@ -1093,6 +1182,24 @@ fn worker_loop(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+}
+
+#[cfg(windows)]
+fn rebalance_cpu(running: &RunningJobs) {
+    let jobs = running.lock().unwrap_or_else(|e| e.into_inner());
+    let active = jobs
+        .values()
+        .filter(|j| scheduling::is_parallel_kind(j.kind) && !j.token.is_paused())
+        .count();
+    let rate = scheduling::cpu_share(active);
+    for job in jobs
+        .values()
+        .filter(|j| scheduling::is_parallel_kind(j.kind))
+    {
+        // A failure is surfaced when registering a subprocess. Never terminate an
+        // otherwise healthy task merely because a driver rejected a live update.
+        let _ = job.token.set_cpu_rate(rate);
+    }
 }
 
 fn execute_job(
@@ -2394,6 +2501,105 @@ mod tests {
             }
         }
         wait_for_job(&service, &merge.id, MediaJobStatus::Completed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn configured_queue_refills_on_any_completion_and_lowering_does_not_cancel() {
+        struct CompletingAI {
+            started: mpsc::Sender<String>,
+            completed: Arc<Mutex<HashSet<String>>>,
+        }
+        impl AIExecutor for CompletingAI {
+            fn execute(
+                &self,
+                request: ValidatedAIJobRequest,
+                token: &CancellationToken,
+                _progress: &mut dyn FnMut(MergeProgress),
+            ) -> Result<AIExecutionResult, AppError> {
+                self.started.send(request.book_id.clone()).unwrap();
+                loop {
+                    if token.is_cancelled() {
+                        return Err(AppError::new("AI_CANCELLED", "cancelled"));
+                    }
+                    if self.completed.lock().unwrap().contains(&request.book_id) {
+                        return Ok(AIExecutionResult {
+                            output_path: request.inputs[0].path.clone(),
+                            outputs: Vec::new(),
+                        });
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let (tx, rx) = mpsc::channel();
+        let completed = Arc::new(Mutex::new(HashSet::new()));
+        let service = MediaJobService::with_resource_probe_and_limit(
+            manager,
+            Arc::new(ImmediateExecutor),
+            Arc::new(CompletingAI {
+                started: tx,
+                completed: completed.clone(),
+            }),
+            Arc::new(RecordingSink::default()),
+            Box::new(|| scheduling::Resources {
+                cores: 8,
+                cpu_usage: Some(15.0),
+                available_memory: Some(32 * scheduling::GIB),
+                gpu: None,
+            }),
+            5,
+        );
+        let jobs: Vec<_> = (0..7)
+            .map(|index| {
+                service
+                    .start_ai(
+                        StartAIJobRequest {
+                            book_id: format!("refill-{index}"),
+                            title: "补位测试".into(),
+                            series_root: fixture.series.clone(),
+                            scope: MediaJobScope::Episodes,
+                            inputs: vec![
+                                fixture.write_input(&format!("refill-{index}.mp4"), b"input")
+                            ],
+                            model: "htdemucs".into(),
+                            device: "cpu".into(),
+                        },
+                        MediaJobKind::SeparateBackgroundMusic,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        for _ in 0..5 {
+            rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+        completed.lock().unwrap().insert("refill-2".into());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "refill-5");
+        wait_for_job(&service, &jobs[2].id, MediaJobStatus::Completed);
+        for index in [0, 1, 3, 4, 5] {
+            assert_eq!(
+                service.manager.job(&jobs[index].id).unwrap().status,
+                MediaJobStatus::Running
+            );
+        }
+        service.set_concurrency(2);
+        for index in [0, 1, 3] {
+            completed.lock().unwrap().insert(format!("refill-{index}"));
+            wait_for_job(&service, &jobs[index].id, MediaJobStatus::Completed);
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(150)).is_err());
+        assert_eq!(
+            service.manager.job(&jobs[4].id).unwrap().status,
+            MediaJobStatus::Running
+        );
+        assert_eq!(
+            service.manager.job(&jobs[5].id).unwrap().status,
+            MediaJobStatus::Running
+        );
+        completed.lock().unwrap().insert("refill-5".into());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "refill-6");
     }
 
     #[test]

@@ -539,7 +539,7 @@ fn libx264_args(quality: MergeQuality) -> [&'static str; 8] {
         MergeQuality::Compact => "28",
     };
     [
-        "-c:v", "libx264", "-preset", "medium", "-crf", crf, "-c:a", "aac",
+        "-c:v", "libx264", "-preset", "fast", "-crf", crf, "-c:a", "aac",
     ]
 }
 

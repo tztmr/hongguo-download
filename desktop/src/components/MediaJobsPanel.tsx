@@ -132,9 +132,10 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
   return (
     <section className="media-workspace" aria-label="媒体处理">
       <div className="media-overview">
-        <div><h2>媒体处理</h2><p>背景音乐分离按 CPU / GPU 资源自动调度，最多同时处理 5 个任务。</p></div>
+        <div><h2>媒体处理</h2><p>{media.scheduling?.windows ? "分离与字幕完成一个任务后自动补位；合并任务按顺序处理。" : "背景音乐分离按 CPU / GPU 资源自动调度，最多同时处理 5 个任务。"}</p></div>
         <button type="button" className="secondary-button" onClick={onShowDownloads}><QueueIcon />从下载任务创建</button>
       </div>
+      {media.scheduling?.windows && media.scheduling.reason && media.jobs.some(job => job.status === "queued") ? <p role="status" className="media-queue-reason">{media.scheduling.reason}</p> : null}
       <div className="media-toolbar">
         <div className="media-filters" role="group" aria-label="媒体任务状态">
           {filters.map((item) => <button type="button" key={item.id} aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>{item.label}<span>{media.jobs.filter((job) => matches(job, item.id)).length}</span></button>)}

@@ -4,6 +4,7 @@ import type { MediaCommands, MediaJob, MediaJobsSnapshot, StartAIJobRequest, Sta
 
 export const mediaCommands: MediaCommands = {
   snapshot: () => invoke<MediaJobsSnapshot>("get_media_jobs"),
+  scheduling: () => invoke("get_media_scheduling"),
   startMerge: (request: StartMergeRequest) => invoke<MediaJob>("start_merge_job", { request }),
   startAudioSeparation: (request: StartAIJobRequest) => invoke<MediaJob>("start_audio_separation_job", { request }),
   startSubtitleExtraction: (request: StartAIJobRequest) => invoke<MediaJob>("start_subtitle_job", { request }),

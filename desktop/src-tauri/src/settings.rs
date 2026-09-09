@@ -134,6 +134,9 @@ pub struct AppSettings {
     pub whisper_model: WhisperModel,
     #[serde(default = "default_ai_device")]
     pub ai_device: AIDevicePreference,
+    /// Windows: zero selects automatic resource admission; 1..=10 sets the slot limit.
+    #[serde(default)]
+    pub ai_concurrency: usize,
     /// Optional proxy for upstream API and component downloads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub download_proxy: Option<String>,
@@ -157,6 +160,7 @@ impl AppSettings {
             demucs_model: DemucsModel::HtDemucs,
             whisper_model: WhisperModel::Small,
             ai_device: AIDevicePreference::Auto,
+            ai_concurrency: 0,
             download_proxy: None,
             download_mirror: None,
             warning: None,
@@ -192,6 +196,12 @@ impl AppSettings {
         if let Some(value) = patch.whisper_model {
             next.whisper_model = WhisperModel::parse(&value)?;
         }
+        if let Some(value) = patch.ai_concurrency {
+            if value > 10 {
+                return Err("AI 同时处理任务数必须为自动或 1–10".into());
+            }
+            next.ai_concurrency = value;
+        }
         if let Some(value) = patch.ai_device {
             next.ai_device = AIDevicePreference::parse(&value)?;
         }
@@ -220,6 +230,7 @@ pub struct UpdateSettings {
     pub demucs_model: Option<String>,
     pub whisper_model: Option<String>,
     pub ai_device: Option<String>,
+    pub ai_concurrency: Option<usize>,
     /// Empty string clears the proxy. Supported schemes: http, https, socks5, socks5h.
     pub download_proxy: Option<String>,
     /// Empty string clears the component mirror. Must be an HTTPS directory URL.
@@ -297,6 +308,7 @@ fn migrate_settings(mut settings: AppSettings, default_save_dir: PathBuf) -> App
             }
         }
     }
+    settings.ai_concurrency = settings.ai_concurrency.min(10);
     settings.version = SETTINGS_VERSION;
     settings.warning = invalid_network.then(|| "下载网络设置无效，已恢复直连".into());
     settings
@@ -427,6 +439,32 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("hongguo-settings-{name}-{nonce}"))
+    }
+
+    #[test]
+    fn ai_concurrency_is_persisted_and_invalid_patch_is_atomic() {
+        let root = test_dir("concurrency");
+        let path = root.join("settings.json");
+        let mut settings = AppSettings::default_for(root.join("downloads"));
+        assert_eq!(settings.ai_concurrency, 0);
+        settings
+            .apply(UpdateSettings {
+                ai_concurrency: Some(5),
+                ..Default::default()
+            })
+            .unwrap();
+        save_settings(&path, &settings).unwrap();
+        assert_eq!(load_settings(&path, root.clone()).ai_concurrency, 5);
+        assert!(settings
+            .apply(UpdateSettings {
+                ai_concurrency: Some(11),
+                ai_device: Some("cpu".into()),
+                ..Default::default()
+            })
+            .is_err());
+        assert_eq!(settings.ai_concurrency, 5);
+        assert_eq!(settings.ai_device.as_str(), "auto");
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

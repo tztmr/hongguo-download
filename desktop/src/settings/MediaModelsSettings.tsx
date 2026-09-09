@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import type { AIComponentStatus } from "../types";
 import type { UseAppSettingsResult } from "./useAppSettings";
+import { MediaConcurrencyControl } from "../components/MediaConcurrencyControl";
 import { DownloadIcon, QueueIcon } from "../components/icons";
 
 const componentNames: Record<string, string> = {
@@ -67,6 +68,7 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
           </label>)}
         </div>
       </fieldset>
+      {model.components.some(item => item.id === "runtime-modern") || /Windows/i.test(navigator.userAgent) ? <MediaConcurrencyControl value={settings.aiConcurrency} onChange={value => model.update({ aiConcurrency: value })} /> : null}
       <div className="model-choice-grid">
         <fieldset className="model-choice-group"><legend>音频分离 <span>Demucs</span></legend><p>分离人声与背景音乐，生成去背景音乐视频。</p>
           <div className="model-options">

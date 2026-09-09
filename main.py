@@ -57,7 +57,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition", "X-Duanju-Definition", "Content-Length"],
+    expose_headers=["Content-Disposition", "X-Duanju-Definition", "X-Duanju-Playback", "Content-Length"],
 )
 
 app.include_router(device.router, prefix="/api", tags=["设备管理"])

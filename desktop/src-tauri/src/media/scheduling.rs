@@ -44,7 +44,7 @@ pub(crate) fn native_probe() -> ResourceProbe {
     let mut cached = None;
     Box::new(move || {
         if let Some(value) = cached {
-            if refreshed.elapsed() < Duration::from_secs(2) {
+            if !cfg!(windows) && refreshed.elapsed() < Duration::from_secs(2) {
                 return value;
             }
         }
@@ -185,12 +185,71 @@ fn parallel_kind_for_platform(kind: MediaJobKind, windows: bool) -> bool {
         || (windows && kind == MediaJobKind::ExtractSubtitles)
 }
 
-pub(crate) fn admit(
+#[cfg(test)]
+fn admit_legacy(
     job: &MediaJob,
     active: &[ExecutionBudget],
     resources: Resources,
 ) -> Option<ExecutionBudget> {
-    admit_for_platform(job, active, resources, cfg!(target_os = "windows"))
+    admit_for_platform(job, active, resources, false)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn cpu_share(active: usize) -> u32 {
+    // Job object rates are hundredths of the machine's CPU capacity.
+    8500 / active.max(1) as u32
+}
+
+pub(crate) fn admit_configured(
+    job: &MediaJob,
+    active: &[ExecutionBudget],
+    resources: Resources,
+    concurrency: usize,
+) -> Result<ExecutionBudget, &'static str> {
+    configured_for_platform(job, active, resources, concurrency, cfg!(windows))
+}
+
+fn configured_for_platform(
+    job: &MediaJob,
+    active: &[ExecutionBudget],
+    resources: Resources,
+    concurrency: usize,
+    windows: bool,
+) -> Result<ExecutionBudget, &'static str> {
+    if !parallel_kind_for_platform(job.kind, windows) && !active.is_empty() {
+        return Err("合并任务等待其他媒体任务完成");
+    }
+    let limit = if windows && concurrency > 0 {
+        concurrency.min(10)
+    } else {
+        MAX_AI_JOBS
+    };
+    if active.len() >= limit {
+        return Err("已达到同时处理上限；完成一个任务后自动补位（暂停任务仍占用名额）");
+    }
+    if windows && concurrency > 0 && parallel_kind_for_platform(job.kind, true) {
+        // A user-selected limit overrides conservative model estimates, while
+        // preserving actual OS/VRAM headroom. Unknown telemetry is shown in UI.
+        if resources.available_memory.is_some_and(|v| v < 2 * GIB) {
+            return Err("可用内存不足 2 GB，等待运行中的任务释放内存");
+        }
+        let gpu_requested = job.ai_request.as_ref().is_some_and(|r| r.device != "cpu");
+        if gpu_requested && resources.gpu.is_some_and(|g| g.free_memory < GIB) {
+            return Err("可用显存不足 1 GB，等待运行中的任务释放显存");
+        }
+        return Ok(ExecutionBudget {
+            cpu_threads: 1,
+            memory: 2 * GIB,
+            gpu_memory: if gpu_requested { GIB } else { 0 },
+        });
+    }
+    admit_for_platform(job, active, resources, windows).ok_or_else(|| {
+        if job.ai_request.as_ref().is_some_and(|r| r.device != "cpu") && resources.gpu.is_none() {
+            "自动模式未读取到显卡资源，暂按单任务处理；可手动指定同时处理数"
+        } else {
+            "自动模式等待可用 CPU、内存或显存；可调整同时处理数"
+        }
+    })
 }
 
 fn admit_for_platform(
@@ -270,7 +329,11 @@ fn admit_for_platform(
         gpu_memory,
     };
     if let Some(available) = resources.available_memory {
-        let reserved: u64 = active.iter().map(|item| item.memory).sum();
+        let reserved: u64 = if windows {
+            0
+        } else {
+            active.iter().map(|item| item.memory).sum()
+        };
         // Preserve the existing single-job path on smaller machines. Additional
         // jobs need the full reservation plus OS headroom.
         if available < 2 * GIB
@@ -282,7 +345,11 @@ fn admit_for_platform(
         return None;
     }
     if let Some(gpu) = resources.gpu.filter(|_| gpu_requested) {
-        let reserved: u64 = active.iter().map(|item| item.gpu_memory).sum();
+        let reserved: u64 = if windows {
+            0
+        } else {
+            active.iter().map(|item| item.gpu_memory).sum()
+        };
         if !active.is_empty()
             && (gpu.usage >= 85.0
                 || (cuda && gpu.free_memory.saturating_sub(reserved) < gpu_memory + GIB))
@@ -330,13 +397,83 @@ mod tests {
     }
 
     #[test]
+    fn windows_explicit_slots_override_estimates_and_keep_real_headroom() {
+        let job = job("cuda", "htdemucs");
+        let resources = Resources {
+            cores: 8,
+            cpu_usage: Some(15.0),
+            available_memory: Some(8 * GIB),
+            gpu: Some(GpuResources {
+                free_memory: 2 * GIB,
+                usage: 15.0,
+                shared_memory: false,
+            }),
+        };
+        let first = configured_for_platform(&job, &[], resources, 5, true).unwrap();
+        assert!(configured_for_platform(&job, &[first; 4], resources, 5, true).is_ok());
+        assert!(
+            configured_for_platform(&job, &[first; 5], resources, 5, true)
+                .unwrap_err()
+                .contains("上限")
+        );
+        // Lowering the limit stops new admission, without cancelling existing jobs.
+        assert!(configured_for_platform(&job, &[first; 4], resources, 2, true).is_err());
+        assert!(configured_for_platform(&job, &[first], resources, 2, true).is_ok());
+        assert!(configured_for_platform(&job, &[first; 9], resources, 10, true).is_ok());
+        let scarce = Resources {
+            available_memory: Some(GIB),
+            ..resources
+        };
+        assert!(configured_for_platform(&job, &[first], scarce, 5, true)
+            .unwrap_err()
+            .contains("内存"));
+        let scarce = Resources {
+            gpu: Some(GpuResources {
+                free_memory: GIB / 2,
+                ..resources.gpu.unwrap()
+            }),
+            ..resources
+        };
+        assert!(configured_for_platform(&job, &[first], scarce, 5, true)
+            .unwrap_err()
+            .contains("显存"));
+        // The Windows-only override must never alter macOS admission.
+        assert!(configured_for_platform(&job, &[first], resources, 5, false).is_err());
+    }
+
+    #[test]
+    fn windows_does_not_deduct_running_allocations_from_live_free_memory_twice() {
+        let job = job("cuda", "htdemucs");
+        let resources = Resources {
+            available_memory: Some(10 * GIB),
+            gpu: Some(GpuResources {
+                free_memory: 6 * GIB,
+                usage: 15.0,
+                shared_memory: false,
+            }),
+            ..idle()
+        };
+        let first = admit_for_platform(&job, &[], resources, true).unwrap();
+        assert!(admit_for_platform(&job, &[first], resources, true).is_some());
+        assert!(admit_for_platform(&job, &[first], resources, false).is_none());
+    }
+
+    #[test]
+    fn cpu_share_releases_capacity_to_the_final_task() {
+        assert_eq!(cpu_share(5), 1700);
+        assert_eq!(cpu_share(2), 4250);
+        assert_eq!(cpu_share(1), 8500);
+        assert_eq!(cpu_share(0), 8500);
+    }
+
+    #[test]
     fn cpu_admission_obeys_live_load_ram_core_budget_and_hard_cap() {
         let job = job("cpu", "htdemucs");
         let resources = idle();
-        let first = admit(&job, &[], resources).unwrap();
+        let first = admit_legacy(&job, &[], resources).unwrap();
         assert_eq!(first.cpu_threads, 4);
-        assert!(admit(&job, &[first; 4], resources).is_some());
-        assert!(admit(&job, &[first; 5], resources).is_none());
+        assert!(admit_legacy(&job, &[first; 4], resources).is_some());
+        assert!(admit_legacy(&job, &[first; 5], resources).is_none());
         for scarce in [
             Resources {
                 cpu_usage: Some(98.0),
@@ -359,10 +496,10 @@ mod tests {
                 ..resources
             },
         ] {
-            assert!(admit(&job, &[first], scarce).is_none());
+            assert!(admit_legacy(&job, &[first], scarce).is_none());
         }
         // A single task can still try on a smaller machine, as before.
-        assert!(admit(
+        assert!(admit_legacy(
             &job,
             &[],
             Resources {
@@ -386,9 +523,9 @@ mod tests {
             gpu: Some(gpu),
             ..idle()
         };
-        let first = admit(&job, &[], resources).unwrap();
+        let first = admit_legacy(&job, &[], resources).unwrap();
         assert_eq!(first.cpu_threads, 2);
-        assert!(admit(&job, &[first; 4], resources).is_some());
+        assert!(admit_legacy(&job, &[first; 4], resources).is_some());
         for scarce in [
             Resources {
                 gpu: Some(GpuResources {
@@ -406,9 +543,9 @@ mod tests {
                 ..resources
             },
         ] {
-            assert!(admit(&job, &[first], scarce).is_none());
+            assert!(admit_legacy(&job, &[first], scarce).is_none());
             assert!(
-                admit(&job, &[], scarce).is_some(),
+                admit_legacy(&job, &[], scarce).is_some(),
                 "single task retains accelerator/CPU fallback"
             );
         }
@@ -426,9 +563,9 @@ mod tests {
             }),
             ..idle()
         };
-        let first = admit(&standard, &[], resources).unwrap();
-        assert!(admit(&standard, &[first], resources).is_some());
-        assert!(admit(&fine, &[first], resources).is_none());
+        let first = admit_legacy(&standard, &[], resources).unwrap();
+        assert!(admit_legacy(&standard, &[first], resources).is_some());
+        assert!(admit_legacy(&fine, &[first], resources).is_none());
     }
 
     #[test]
@@ -443,10 +580,10 @@ mod tests {
             gpu: Some(gpu),
             ..idle()
         };
-        let first = admit(&job, &[], resources).unwrap();
+        let first = admit_legacy(&job, &[], resources).unwrap();
         assert_eq!(first.cpu_threads, 2);
-        assert!(admit(&job, &[first; 4], resources).is_some());
-        assert!(admit(
+        assert!(admit_legacy(&job, &[first; 4], resources).is_some());
+        assert!(admit_legacy(
             &job,
             &[first],
             Resources {
@@ -455,7 +592,7 @@ mod tests {
             }
         )
         .is_none());
-        assert!(admit(
+        assert!(admit_legacy(
             &job,
             &[first],
             Resources {
@@ -479,12 +616,12 @@ mod tests {
     #[test]
     fn merge_and_subtitles_never_overlap_with_separation() {
         let separate = job("cpu", "htdemucs");
-        let first = admit(&separate, &[], idle()).unwrap();
+        let first = admit_legacy(&separate, &[], idle()).unwrap();
         for kind in [MediaJobKind::Merge, MediaJobKind::ExtractSubtitles] {
             let mut exclusive = separate.clone();
             exclusive.kind = kind;
             assert!(admit_for_platform(&exclusive, &[first], idle(), false).is_none());
-            assert!(admit(&exclusive, &[], idle()).is_some());
+            assert!(admit_legacy(&exclusive, &[], idle()).is_some());
         }
     }
 
@@ -508,7 +645,7 @@ mod tests {
         assert_eq!(mac.memory, 0);
         for scarce in [
             Resources {
-                available_memory: Some(8 * GIB),
+                available_memory: Some(5 * GIB),
                 ..idle()
             },
             Resources {
@@ -538,7 +675,19 @@ mod tests {
         let medium = admit_for_platform(&subtitle, &[], gpu, true).unwrap();
         assert_eq!(medium.memory, 8 * GIB);
         assert_eq!(medium.gpu_memory, 6 * GIB);
-        assert!(admit_for_platform(&subtitle, &[medium], gpu, true).is_none());
+        assert!(admit_for_platform(
+            &subtitle,
+            &[medium],
+            Resources {
+                gpu: Some(GpuResources {
+                    free_memory: 6 * GIB,
+                    ..gpu.gpu.unwrap()
+                }),
+                ..gpu
+            },
+            true
+        )
+        .is_none());
     }
 
     #[test]

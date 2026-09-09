@@ -492,7 +492,10 @@ mod tests {
         assert!(find_subtitle(&[extraction(&video, &srt, "episodes")], &video).is_none());
         assert!(find_subtitle(&[extraction(&other, &srt, "merged")], &video).is_none());
         let job = extraction(&video, &srt, "merged");
-        assert_eq!(find_subtitle(&[job.clone()], &video), Some(srt.clone()));
+        assert_eq!(
+            find_subtitle(std::slice::from_ref(&job), &video),
+            Some(srt.clone())
+        );
         fs::write(&video, b"replaced video has new timing").unwrap();
         assert!(find_subtitle(&[job], &video).is_none());
         let job = extraction(&video, &srt, "merged");
