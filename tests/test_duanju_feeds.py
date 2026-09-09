@@ -247,3 +247,20 @@ class RecommendationGenreTests(unittest.TestCase):
             {'content': '系统', 'data_type': 1, 'rec_type': 24},
             {'content': '点赞破100万', 'data_type': 1, 'rec_type': 10},
         ]}), ['玄幻', '系统'])
+
+
+class HomepageHeatTests(unittest.TestCase):
+    def test_homepage_rec_text_and_next_page_keep_real_heat(self):
+        from endpoints.duanju import _parse_bookmall_tab, _parse_bookmall_change
+        videos = [
+            {"series_id": "live", "content_type": 1, "rec_text": "6130万热度"},
+            {"series_id": "comic", "content_type": 1004, "rec_text": "10122万热度"},
+            {"series_id": "ai", "video_category_type": "ai_video", "rec_text": "🔥 1.25亿热度"},
+            {"series_id": "recommend", "rec_text": "996万推荐", "play_cnt": 999},
+            {"series_id": "zero", "hot_score": 0, "rec_text": "6130万热度"},
+        ]
+        cell = {"cell_data": [{"video_data": [video]} for video in videos]}
+        first = _parse_bookmall_tab({"data": {"tab_item": [{"tab_type": "38", "cell_data": [cell]}]}}, "38")
+        more = _parse_bookmall_change({"data": {"cell_view": cell}})
+        for page in (first, more):
+            self.assertEqual([item["hot_count"] for item in page["items"]], [61300000, 101220000, 125000000, None, 0])

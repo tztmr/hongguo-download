@@ -1,3 +1,4 @@
+import { HeatMetric } from "./HeatMetric";
 import { seriesTypeLabel } from "../seriesPresentation";
 import { useEffect, useState } from "react";
 import type { DefinitionPreference, EpisodeItem, SeriesItem } from "../types";
@@ -94,7 +95,7 @@ export function SeriesInspector({
             {metricsError ? <p className="metrics-state error" role="alert">剧集数据加载失败，请重新点击该剧重试</p> : null}
             <span data-testid="metric-online">上线时间 {onlineLabel}</span>
             <span data-testid="metric-play">播放量 {countLabel(series.playCount)}</span>
-            <span data-testid="metric-hot">🔥 热度量 {countLabel(series.hotCount)}</span>
+            <HeatMetric detail value={series.hotCount} />
             <span data-testid="metric-collect">收藏量 {countLabel(series.collectCount)}</span>
             <span data-testid="metric-comment" title="整部剧的评论总数，数据缺失时显示 —">讨论量 {countLabel(series.commentCount)}</span>
           </>

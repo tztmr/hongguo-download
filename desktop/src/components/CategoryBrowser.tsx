@@ -1,4 +1,5 @@
-import { metricLabel } from "../seriesPresentation";
+import { HeatMetric } from "./HeatMetric";
+import { seriesHeatKey } from "../seriesPresentation";
 import { useEffect, useRef, useState } from "react";
 import { fetchWebCategory, fetchWebCategoryGroups } from "../api";
 import type { CategoryFilters, CategoryGroup, SeriesItem, WebCategoryPage } from "../types";
@@ -8,9 +9,9 @@ import { VideoOrientationBadge } from "./VideoOrientationBadge";
 
 export const DEFAULT_CATEGORY_FILTERS: CategoryFilters = { background: "", topic: "", setting: "", gender: "2", time: "0", sort_type: "0" };
 const liveApi = { fetchWebCategory, fetchWebCategoryGroups };
-type Props = { onSelect(item: SeriesItem): void; onResetSelection?(): void; selectedId?: string; api?: typeof liveApi; detectOrientation?: boolean };
+type Props = { knownHeat?: Readonly<Record<string, number>>; onSelect(item: SeriesItem): void; onResetSelection?(): void; selectedId?: string; api?: typeof liveApi; detectOrientation?: boolean };
 
-export function CategoryBrowser({ onSelect, onResetSelection, selectedId, api = liveApi, detectOrientation = true }: Props) {
+export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, selectedId, api = liveApi, detectOrientation = true }: Props) {
   const [groups, setGroups] = useState<CategoryGroup[]>([]);
   const [filters, setFilters] = useState<CategoryFilters>(DEFAULT_CATEGORY_FILTERS);
   const [page, setPage] = useState<WebCategoryPage | null>(null);
@@ -95,7 +96,7 @@ export function CategoryBrowser({ onSelect, onResetSelection, selectedId, api = 
       <div className="poster-grid category-result-grid">
         {items.map((item) => <button type="button" key={item.bookId} className={`poster-card ${selectedId === item.bookId ? "selected" : ""}`} onClick={() => onSelect(item)}>
           <div className="poster-image"><Cover src={item.cover} title={item.title} /><div className="poster-badges"><VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={detectOrientation} /></div></div>
-          <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || "真人剧"}{item.score ? ` · ${item.score}分` : ""}</p><p>🔥 热度 {metricLabel(item.hotCount)}</p></div>
+          <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || "真人剧"}{item.score ? ` · ${item.score}分` : ""}</p><HeatMetric value={item.hotCount ?? knownHeat[seriesHeatKey(item)]} /></div>
         </button>)}
       </div>
       {loading ? <div className="category-loading" role="status"><span className="loading-spinner" />正在加载分类剧目…</div> : page?.hasMore ? <div className="load-more-row"><button type="button" className="secondary-button" onClick={() => void loadMore()}>加载更多</button></div> : items.length ? <p className="monitor-refreshed">当前条件的剧目已显示完毕</p> : null}

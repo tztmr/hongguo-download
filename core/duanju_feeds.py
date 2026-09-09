@@ -179,7 +179,8 @@ def series_release_type(video: dict) -> str:
 
 
 def text_metric(video: dict, label: str) -> int | None:
-    texts = [(video.get("rec_text_item") or {}).get("RecommendText")]
+    # Homepage recommendations use rec_text; rank feeds use RecommendText.
+    texts = [video.get("rec_text"), (video.get("rec_text_item") or {}).get("RecommendText")]
     texts += [tag.get("content") for key in ("sub_title_list", "secondary_info_list")
               for tag in video.get(key) or [] if isinstance(tag, dict)]
     for text in texts:

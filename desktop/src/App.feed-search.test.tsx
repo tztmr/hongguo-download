@@ -142,7 +142,23 @@ describe("App feed and search controls", () => {
     apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage([{ ...series(777, "真实漫剧"), contentTypeCode: 1004, category: "", hotCount: 12500 }], 0, false));
     const view = render(<App />);
     await waitFor(() => expect(view.container.querySelector(".poster-copy")?.textContent).toContain("漫剧"));
-    expect(view.container.querySelector(".poster-copy")?.textContent).toContain("🔥 热度 1.3万");
+    expect(view.container.querySelector(".poster-copy")?.textContent).toContain("🔥 热度 1.25万");
+  });
+
+  it("fills a missing homepage heat value from details without using play counts", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage([{ ...series(779, "热度补全"), playCount: 999999 }], 0, false));
+    apiMocks.fetchSeriesMetrics.mockResolvedValue({ seriesId: "book-779", contentTypeCode: 1, hotCount: 61300000 });
+    const view = render(<App />);
+    await waitFor(() => expect(view.container.querySelector(".poster-copy")?.textContent).toContain("🔥 热度 6130万"));
+    expect(view.container.querySelector(".poster-copy .heat-metric")?.getAttribute("title")).toContain("61,300,000");
+  });
+
+  it("keeps the homepage heat when details report a different counter", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage([{ ...series(780, "首页热度优先"), hotCount: 61300000 }], 0, false));
+    apiMocks.fetchSeriesMetrics.mockResolvedValue({ seriesId: "book-780", contentTypeCode: 1, hotCount: 12000 });
+    const view = render(<App />);
+    await waitFor(() => expect(view.getByTestId("metric-hot").textContent).toContain("1.2万"));
+    expect(view.container.querySelector(".poster-copy")?.textContent).toContain("🔥 热度 6130万");
   });
 
   it("opens AI recommendations and keeps category browsing available", async () => {

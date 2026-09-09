@@ -1642,9 +1642,26 @@ mod tests {
                             requests.fetch_add(1, Ordering::SeqCst);
                             let current = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
                             max_in_flight.fetch_max(current, Ordering::SeqCst);
-                            let mut buf = [0u8; 1024];
-                            let n = stream.read(&mut buf).unwrap_or(0);
-                            let request = String::from_utf8_lossy(&buf[..n]);
+                            // TCP reads may split the request line under parallel test load.
+                            // Read bounded, complete headers before selecting a mock route.
+                            use std::io::{BufRead, BufReader};
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(5)))
+                                .unwrap();
+                            let mut request = String::new();
+                            let mut reader = BufReader::new((&mut stream).take(16 * 1024));
+                            loop {
+                                let mut line = String::new();
+                                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                                    break;
+                                }
+                                let end = line == "\r\n" || line == "\n";
+                                request.push_str(&line);
+                                if end {
+                                    break;
+                                }
+                            }
+                            drop(reader);
                             let path = request
                                 .lines()
                                 .next()

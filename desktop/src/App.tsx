@@ -1,4 +1,5 @@
-import { seriesTypeLabel, metricLabel } from "./seriesPresentation";
+import { HeatMetric } from "./components/HeatMetric";
+import { seriesTypeLabel, seriesHeatKey } from "./seriesPresentation";
 import { AIRecommendations } from "./components/AIRecommendations";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -150,6 +151,7 @@ export default function App() {
   const searchCache = useRef(new SearchCache<GroupedPagingState<SeriesItem, SearchPage | null>>(20, 5 * 60_000, Date.now, (state) => state.allItems.length <= 500));
   const [searchMode, setSearchMode] = useState<SearchMode>("fuzzy");
   const [items, setItems] = useState<SeriesItem[]>(isPreview ? previewSeries.slice(0, 20) : []);
+  const [knownHeat, setKnownHeat] = useState<Record<string, number>>({});
   const [selected, setSelected] = useState<SeriesItem | null>(isPreview ? previewSeries[0] : null);
   const [episodes, setEpisodes] = useState<EpisodeItem[]>(isPreview ? previewEpisodes : []);
   const [selectedEpisodeIds, setSelectedEpisodeIds] = useState<string[]>(isPreview ? [previewEpisodes[0].itemId] : []);
@@ -287,6 +289,10 @@ export default function App() {
     // prevent choosing episodes or adding them to the queue.
     const metricsRequest = fetchSeriesMetrics(item.seriesId, item.contentTypeCode).then((metrics) => {
       if (requestId !== catalogRequestRef.current) return;
+      if (metrics.hotCount !== undefined && Number.isFinite(metrics.hotCount) && metrics.hotCount >= 0) {
+        const heat = metrics.hotCount;
+        setKnownHeat(current => ({ ...current, [seriesHeatKey(item)]: heat }));
+      }
       setSelected((current) =>
         current?.seriesId === item.seriesId && current.contentTypeCode === item.contentTypeCode
           ? { ...current, ...Object.fromEntries(Object.entries(metrics).filter(([, value]) => value !== undefined)) }
@@ -607,7 +613,7 @@ export default function App() {
           <section className="library-workspace">
             <div className="library-main" onScroll={nav === "discover" && (webCategories || homeAI) ? undefined : onLibraryScroll}>
               {catalogError ? <div className="inline-error">{catalogError}</div> : null}
-              {nav === "discover" && homeAI ? <AIRecommendations categoryMode={browseCategories} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} /> : nav === "discover" && webCategories ? <CategoryBrowser selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
+              {nav === "discover" && homeAI ? <AIRecommendations knownHeat={knownHeat} categoryMode={browseCategories} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} /> : nav === "discover" && webCategories ? <CategoryBrowser knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
                 catalogRequestRef.current += 1;
                 setSelected(null); setEpisodes([]); setSelectedEpisodeIds([]);
                 setCatalogError(""); setMetricsError(""); setCatalogLoading(false); setMetricsLoading(false);
@@ -627,7 +633,7 @@ export default function App() {
                       </div>
                       {item.rankTags[0]?.label ? <span className="rank-label">{item.rankTags[0].label}</span> : null}
                     </div>
-                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {seriesTypeLabel(item)}{item.category && !["真人剧", "漫剧", "AI剧"].includes(item.category) ? ` · ${item.category}` : ""}{item.score ? ` · ${item.score}分` : ""}</p><p>🔥 热度 {metricLabel(item.hotCount)}</p></div>
+                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {seriesTypeLabel(item)}{item.category && !["真人剧", "漫剧", "AI剧"].includes(item.category) ? ` · ${item.category}` : ""}{item.score ? ` · ${item.score}分` : ""}</p><HeatMetric value={item.hotCount ?? knownHeat[seriesHeatKey(item)]} /></div>
                   </button>
                 ))}
               </div>

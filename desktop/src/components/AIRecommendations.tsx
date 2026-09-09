@@ -1,13 +1,14 @@
+import { HeatMetric } from "./HeatMetric";
 import { useEffect, useRef, useState } from "react";
 import { fetchRank } from "../api";
 import type { RankPage, SeriesItem } from "../types";
 import { releaseCategoryNames, releaseCategoryOptions } from "../monitor/categories";
-import { metricLabel } from "../seriesPresentation";
+import { seriesHeatKey } from "../seriesPresentation";
 import { Cover } from "./Cover";
 import { VideoOrientationBadge } from "./VideoOrientationBadge";
 
-export function AIRecommendations({ categoryMode, onSelect, selectedId, detectOrientation = true }: {
-  categoryMode: boolean; onSelect(item: SeriesItem): void; selectedId?: string; detectOrientation?: boolean;
+export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, selectedId, detectOrientation = true }: {
+  knownHeat?: Readonly<Record<string, number>>; categoryMode: boolean; onSelect(item: SeriesItem): void; selectedId?: string; detectOrientation?: boolean;
 }) {
   const [items, setItems] = useState<SeriesItem[]>([]);
   const [page, setPage] = useState<RankPage | null>(null);
@@ -52,7 +53,7 @@ export function AIRecommendations({ categoryMode, onSelect, selectedId, detectOr
     {error ? <div className="inline-error" role="alert">{error}<button onClick={() => page ? void more() : setRevision((value) => value + 1)}>重试</button></div> : null}
     <div className="poster-grid">{visible.map((item) => <button type="button" className={`poster-card ${selectedId === item.bookId ? "selected" : ""}`} key={item.bookId} onClick={() => onSelect(item)}>
       <div className="poster-image"><Cover src={item.cover} title={item.title} /><div className="poster-badges"><VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={detectOrientation} /></div></div>
-      <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · AI剧{item.category ? ` · ${item.category}` : ""}</p><p>🔥 热度 {metricLabel(item.hotCount)}</p></div>
+      <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · AI剧{item.category ? ` · ${item.category}` : ""}</p><HeatMetric value={item.hotCount ?? knownHeat[seriesHeatKey(item)]} /></div>
     </button>)}</div>
     {loading ? <div className="category-loading" role="status">正在加载 AI 剧…</div> : page?.hasMore ? <div className="load-more-row"><button className="secondary-button" onClick={() => void more()}>加载更多</button></div> : <p className="monitor-refreshed">当前推荐剧目已显示完毕</p>}
   </div>;
