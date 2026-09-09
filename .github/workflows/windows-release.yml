@@ -11,6 +11,11 @@ on:
         description: SHA-256 of the FFmpeg archive
         required: true
         type: string
+      release_tag:
+        description: Optional existing draft release to receive the verified installer directly
+        required: false
+        default: ""
+        type: string
       previous_tag:
         description: Optional release tag to test upgrading a running older installation
         required: false
@@ -18,7 +23,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   installer:
@@ -65,7 +70,47 @@ jobs:
           $installer = Get-ChildItem desktop/src-tauri/target/release/bundle/nsis/*.exe | Select-Object -First 1
           $previous = Get-ChildItem "$env:RUNNER_TEMP/previous-installer/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           ./scripts/verify-release-windows.ps1 -Installer $installer.FullName -InstallSmokeTest -PreviousInstaller $previous.FullName
+      - name: Upload verified installer to release draft
+        if: inputs.release_tag != ''
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          import hashlib, json, os, pathlib, re, shutil, subprocess, tempfile
+
+          tag = os.environ['RELEASE_TAG']
+          repo = os.environ['GH_REPO']
+          commit = os.environ['EXPECTED_COMMIT']
+          assert re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+', tag), 'Invalid release tag'
+          installers = list(pathlib.Path('desktop/src-tauri/target/release/bundle/nsis').glob(f'*{tag[1:]}_x64-setup.exe'))
+          assert len(installers) == 1, 'Expected one matching installer'
+          source = installers[0]
+          with source.open('rb') as stream:
+              sha256 = hashlib.file_digest(stream, 'sha256').hexdigest()
+          pages = json.loads(subprocess.check_output(
+              ['gh', 'api', '--paginate', '--slurp', f'repos/{repo}/releases?per_page=100'], text=True))
+          matches = [release for page in pages for release in page if release['tag_name'] == tag]
+          assert len(matches) == 1, 'Expected one existing release draft'
+          release = matches[0]
+          assert release['draft'] and release['target_commitish'] == commit, 'Release/build commit mismatch or release already published'
+          name = f'hongguo-download_{tag[1:]}_x64-setup.exe'
+          existing = [asset for asset in release['assets'] if asset['name'] == name]
+          if existing:
+              assert len(existing) == 1 and existing[0]['state'] == 'uploaded'
+              assert existing[0]['digest'] == f'sha256:{sha256}' and existing[0]['size'] == source.stat().st_size, 'Different installer already uploaded'
+          else:
+              with tempfile.TemporaryDirectory() as directory:
+                  destination = pathlib.Path(directory) / name
+                  shutil.copyfile(source, destination)
+                  current = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/releases/{release["id"]}'], text=True))
+                  assert current['draft'] and current['target_commitish'] == commit, 'Release changed before upload'
+                  subprocess.run(['gh', 'release', 'upload', tag, str(destination)], check=True)
+          print(f'Uploaded verified installer: {name} SHA256={sha256}')
       - uses: actions/upload-artifact@v4
+        if: inputs.release_tag == ''
         with:
           name: hongguo-windows-unsigned
           path: desktop/src-tauri/target/release/bundle/nsis/*.exe
