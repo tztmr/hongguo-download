@@ -38,6 +38,7 @@ type RawSeries = {
   hot_count?: number | null;
   collect_count?: number | null;
   like_count?: number | null;
+  comment_count?: number | null;
 };
 
 function optionalNumber(value: number | null | undefined) {
@@ -69,6 +70,7 @@ function asSeries(item: RawSeries): SeriesItem {
     hotCount: optionalNumber(item.hot_count),
     collectCount: optionalNumber(item.collect_count),
     likeCount: optionalNumber(item.like_count),
+    commentCount: optionalNumber(item.comment_count),
   };
 }
 
@@ -88,6 +90,7 @@ export async function fetchSeriesMetrics(
     hot_count?: number | null;
     collect_count?: number | null;
     like_count?: number | null;
+    comment_count?: number | null;
   }>(`/api/duanju/series-metrics?${query.toString()}`);
   return {
     seriesId: String(data.series_id || seriesId),
@@ -97,6 +100,7 @@ export async function fetchSeriesMetrics(
     hotCount: optionalNumber(data.hot_count),
     collectCount: optionalNumber(data.collect_count),
     likeCount: optionalNumber(data.like_count),
+    commentCount: optionalNumber(data.comment_count),
   };
 }
 

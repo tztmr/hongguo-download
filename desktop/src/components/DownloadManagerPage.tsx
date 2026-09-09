@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deriveBatchStatus, type DownloadBatch, type DownloadItem } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
 import { missingAiComponentIds } from "../media/aiRuntime";
@@ -15,6 +15,8 @@ import { AlertIcon, CheckIcon, ChevronLeftIcon, CloseIcon, FolderIcon, PauseIcon
 import { MergeVideoDialog } from "./MergeVideoDialog";
 import { MediaScopeDialog } from "./MediaScopeDialog";
 import { MediaJobsPanel } from "./MediaJobsPanel";
+import { BatchMergeDialog, type BatchMergeTarget } from "./BatchMergeDialog";
+import { YouTubeBatchUploadDialog, type YouTubeBatchUploadSource } from "../youtube/YouTubeBatchUploadDialog";
 
 type ManagerSection = "downloads" | "media" | "youtube";
 
@@ -31,6 +33,7 @@ type DownloadManagerPageProps = {
   onInstallComponent?: (id: string) => Promise<void>;
   youtube?: YouTubeModel;
   focusTarget?: NotificationTarget | null;
+  hidden?: boolean;
 };
 
 function formatBytes(value?: number) {
@@ -126,10 +129,23 @@ export function DownloadManagerPage({
   onInstallComponent,
   youtube,
   focusTarget,
+  hidden = false,
 }: DownloadManagerPageProps) {
   const [section, setSection] = useState<ManagerSection>("downloads");
   const [batchFilter, setBatchFilter] = useState("all");
   const [batchQuery, setBatchQuery] = useState("");
+  const [checkedBatchIds, setCheckedBatchIds] = useState(new Set<string>());
+  const [bulkMergeTargets, setBulkMergeTargets] = useState<BatchMergeTarget[] | null>(null);
+  const [bulkUploadSources, setBulkUploadSources] = useState<YouTubeBatchUploadSource[] | null>(null);
+  const [bulkPreparing, setBulkPreparing] = useState(false);
+  const bulkPreparingRef = useRef(false);
+  const [notice, setNotice] = useState<{ message: string } | null>(null);
+  const showNotice = useCallback((message: string) => setNotice({ message }), []);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const batchFilters = [
     { id: "all", label: "全部", match: (_batch: DownloadBatch) => true },
     { id: "active", label: "进行中", match: (batch: DownloadBatch) => ["running", "queued"].includes(deriveBatchStatus(batch)) },
@@ -139,23 +155,29 @@ export function DownloadManagerPage({
   ];
   const visibleBatches = manager.state.batches.filter((batch) => batchFilters.find((filter) => filter.id === batchFilter)!.match(batch)
     && batch.title.toLocaleLowerCase().includes(batchQuery.trim().toLocaleLowerCase()));
+  const checkedBatches = visibleBatches.filter((batch) => checkedBatchIds.has(batch.id));
   const [selectedBatchId, setSelectedBatchId] = useState(manager.state.batches[0]?.id || "");
   const [detailOpen, setDetailOpen] = useState(false);
   const [mergingBatchId, setMergingBatchId] = useState<string | null>(null);
-  const [mediaDialog, setMediaDialog] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; batchId: string } | null>(null);
-  const [pendingInstall, setPendingInstall] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; scope: MediaJobScope; ids: string[]; batchId: string } | null>(null);
+  const [mediaDialog, setMediaDialog] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; batchId: string; mergedPath?: string } | null>(null);
+  const [pendingInstall, setPendingInstall] = useState<{ kind: "audioSeparation" | "subtitleExtraction"; scope: MediaJobScope; ids: string[]; batchId: string; mergedPath?: string } | null>(null);
   const [installing, setInstalling] = useState(false);
   const [uploadDraft, setUploadDraft] = useState<{ batchId: string; sourcePath: string } | null>(null);
-  const [selectedHasMergedVideo, setSelectedHasMergedVideo] = useState(false);
-  const [selectedMergedVideoPath, setSelectedMergedVideoPath] = useState<string | undefined>();
+  const [mergedLookup, setMergedLookup] = useState<{ seriesRoot: string; exists: boolean; path?: string }>({ seriesRoot: "", exists: false });
   const [dismissedMediaError, setDismissedMediaError] = useState<MediaCommandError>();
+  const [actionError, setActionError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const handledFocus = useRef<NotificationTarget | null>(null);
   const selectedBatch = manager.state.batches.find((batch) => batch.id === selectedBatchId) || manager.state.batches[0];
   const mergingBatch = manager.state.batches.find((batch) => batch.id === mergingBatchId) || null;
   const mediaDialogBatch = manager.state.batches.find((batch) => batch.id === mediaDialog?.batchId) || null;
   const uploadBatch = manager.state.batches.find((batch) => batch.id === uploadDraft?.batchId) || null;
   const completedPaths = selectedBatch ? completedPathsFor(selectedBatch) : [];
-  const mergedPath = selectedBatch ? (mergedPathFor(selectedBatch, media.jobs) || selectedMergedVideoPath) : undefined;
   const selectedSeriesRoot = selectedBatch ? batchSeriesRoot(selectedBatch) : "";
+  const selectedMergedVideoPath = mergedLookup.seriesRoot === selectedSeriesRoot ? mergedLookup.path : undefined;
+  const selectedHasMergedVideo = mergedLookup.seriesRoot === selectedSeriesRoot && mergedLookup.exists;
+  const mergedPath = selectedBatch ? (mergedPathFor(selectedBatch, media.jobs) || selectedMergedVideoPath) : undefined;
   const noBackgroundPath = selectedBatch ? noBackgroundPathFor(selectedBatch, media.jobs, mergedPath) : undefined;
   const hasCompletedBackgroundSeparation = Boolean(selectedBatch && media.jobs.some((job) =>
     job.kind === "separateBackgroundMusic" && job.status === "completed"
@@ -172,28 +194,25 @@ export function DownloadManagerPage({
   useEffect(() => {
     let active = true;
     if (!selectedSeriesRoot) {
-      setSelectedHasMergedVideo(false);
-      setSelectedMergedVideoPath(undefined);
+      setMergedLookup({ seriesRoot: selectedSeriesRoot, exists: false });
       return () => { active = false; };
     }
     if (media.findMergedVideo) {
       void media.findMergedVideo(selectedSeriesRoot).then(
         (path) => {
           if (!active) return;
-          setSelectedMergedVideoPath(path || undefined);
-          setSelectedHasMergedVideo(Boolean(path));
+          setMergedLookup({ seriesRoot: selectedSeriesRoot, path: path || undefined, exists: Boolean(path) });
         },
         () => {
           if (!active) return;
-          setSelectedMergedVideoPath(undefined);
-          setSelectedHasMergedVideo(false);
+          setMergedLookup({ seriesRoot: selectedSeriesRoot, exists: false });
         },
       );
     } else {
-      setSelectedMergedVideoPath(undefined);
+
       void media.hasMergedVideo(selectedSeriesRoot).then(
-        (exists) => { if (active) setSelectedHasMergedVideo(exists); },
-        () => { if (active) setSelectedHasMergedVideo(false); },
+        (exists) => { if (active) setMergedLookup({ seriesRoot: selectedSeriesRoot, exists }); },
+        () => { if (active) setMergedLookup({ seriesRoot: selectedSeriesRoot, exists: false }); },
       );
     }
     return () => { active = false; };
@@ -203,7 +222,8 @@ export function DownloadManagerPage({
     else if (selectedBatch && selectedBatch.id !== selectedBatchId) setSelectedBatchId(selectedBatch.id);
   }, [selectedBatch, selectedBatchId]);
   useEffect(() => {
-    if (!focusTarget) return;
+    if (!focusTarget || handledFocus.current === focusTarget) return;
+    handledFocus.current = focusTarget;
     if (focusTarget.kind === "downloadBatch") {
       setSection("downloads");
       setBatchFilter("all");
@@ -223,7 +243,7 @@ export function DownloadManagerPage({
   }, [focusTarget, manager.state.batches]);
   useEffect(() => {
     if (media.error?.code !== "MEDIA_JOB_ALREADY_ACTIVE" || media.error === dismissedMediaError) return;
-    const timeout = window.setTimeout(() => setDismissedMediaError(media.error), 5_000);
+    const timeout = window.setTimeout(() => setDismissedMediaError(media.error), 3_000);
     return () => window.clearTimeout(timeout);
   }, [dismissedMediaError, media.error]);
   const visibleMediaError = media.error && media.error !== dismissedMediaError ? media.error : undefined;
@@ -237,16 +257,16 @@ export function DownloadManagerPage({
     try {
       await media.startMerge(mergingBatch, options);
       setMergingBatchId(null);
-      setSection("media");
+      showNotice(`《${mergingBatch.title}》已加入合并队列`);
     } catch {
       // Stable-code errors are shown from media.error; keep the dialog open for correction.
     }
   }
 
-  async function enqueueAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
+  async function enqueueAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope, sourcePath?: string) {
     const batch = manager.state.batches.find((item) => item.id === batchId);
     if (!batch) return;
-    const targetMergedPath = mergedPathFor(batch, media.jobs) || (selectedBatch?.id === batch.id ? selectedMergedVideoPath : undefined);
+    const targetMergedPath = sourcePath || mergedPathFor(batch, media.jobs) || (selectedBatch?.id === batch.id ? selectedMergedVideoPath : undefined);
     if (kind === "audioSeparation") {
       await media.startAudioSeparation(batch, scope, demucsModel, targetMergedPath);
     } else {
@@ -254,18 +274,24 @@ export function DownloadManagerPage({
     }
     setMediaDialog(null);
     setPendingInstall(null);
-    setSection("media");
+    showNotice(`《${batch.title}》已加入${kind === "audioSeparation" ? "背景音乐分离" : "字幕提取"}队列`);
   }
 
-  async function submitAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope) {
+  async function submitAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope, sourcePath?: string) {
+    if (submittingRef.current) return;
     const modelId = kind === "audioSeparation" ? `demucs-${demucsModel}` : `whisper-${whisperModel}`;
     const missing = missingAiComponentIds(aiComponents, modelId);
     if (missing.length) {
-      setPendingInstall({ kind, scope, ids: missing, batchId });
+      setPendingInstall({ kind, scope, ids: missing, batchId, mergedPath: sourcePath });
       setMediaDialog(null);
       return;
     }
-    await enqueueAI(batchId, kind, scope);
+    submittingRef.current = true;
+    setSubmitting(true);
+    setActionError("");
+    try { await enqueueAI(batchId, kind, scope, sourcePath); }
+    catch (error) { setActionError(error && typeof error === "object" && "message" in error ? String(error.message) : "提交失败，请重试"); }
+    finally { submittingRef.current = false; setSubmitting(false); }
   }
 
   async function installAndEnqueue() {
@@ -273,14 +299,69 @@ export function DownloadManagerPage({
     setInstalling(true);
     try {
       for (const id of pendingInstall.ids) await onInstallComponent(id);
-      await enqueueAI(pendingInstall.batchId, pendingInstall.kind, pendingInstall.scope);
+      await enqueueAI(pendingInstall.batchId, pendingInstall.kind, pendingInstall.scope, pendingInstall.mergedPath);
+    } catch (error) {
+      setActionError(error && typeof error === "object" && "message" in error ? String(error.message) : "安装或提交失败，请重试");
     } finally {
       setInstalling(false);
     }
   }
 
+  function toggleBatch(id: string, checked: boolean) {
+    setCheckedBatchIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id); else next.delete(id);
+      return next;
+    });
+  }
+
+  function removeCheckedBatches() {
+    for (const batch of checkedBatches) manager.removeBatch(batch.id);
+    const removed = new Set(checkedBatches.map((batch) => batch.id));
+    setCheckedBatchIds((current) => new Set([...current].filter((id) => !removed.has(id))));
+    showNotice(`已移除 ${removed.size} 个任务记录，正在下载的任务将在当前集结束后移除`);
+  }
+
+  async function prepareBulk(kind: "merge" | "upload") {
+    if (bulkPreparingRef.current || !checkedBatches.length) return;
+    bulkPreparingRef.current = true;
+    setBulkPreparing(true);
+    setActionError("");
+    const mergeTargets: BatchMergeTarget[] = [];
+    const uploadSources: YouTubeBatchUploadSource[] = [];
+    const skipped: string[] = [];
+    try {
+      for (const batch of checkedBatches) {
+        if (!isCompletedBatch(batch)) {
+          mergeTargets.push({ batch, reason: "下载尚未完成" });
+          skipped.push(`《${batch.title}》下载尚未完成`);
+          continue;
+        }
+        try {
+          const root = batchSeriesRoot(batch);
+          const savedMerge = mergedPathFor(batch, media.jobs) || await media.findMergedVideo?.(root) || undefined;
+          const exists = Boolean(savedMerge) || (kind === "merge" && await media.hasMergedVideo(root));
+          mergeTargets.push({ batch, reason: exists ? "已有合并视频，已跳过" : undefined });
+          if (kind === "upload") {
+            const sourcePath = noBackgroundPathFor(batch, media.jobs, savedMerge) || savedMerge;
+            if (sourcePath) uploadSources.push({ batch, sourcePath });
+            else skipped.push(`《${batch.title}》尚无合并或分离成片`);
+          }
+        } catch {
+          mergeTargets.push({ batch, reason: "无法检查成片，请重试" });
+          skipped.push(`《${batch.title}》无法检查成片`);
+        }
+      }
+      if (kind === "merge") setBulkMergeTargets(mergeTargets);
+      else {
+        if (uploadSources.length) setBulkUploadSources(uploadSources);
+        if (skipped.length) setActionError(`已跳过 ${skipped.length} 部：${skipped.join("；")}`);
+      }
+    } finally { bulkPreparingRef.current = false; setBulkPreparing(false); }
+  }
+
   return (
-    <main className="download-page">
+    <main className="download-page" hidden={hidden}>
       <header className="download-page-header">
         <div>
           <h1>下载管理</h1>
@@ -309,6 +390,7 @@ export function DownloadManagerPage({
       {media.warning ? <div className="warning-banner"><AlertIcon />{media.warning}</div> : null}
       {visibleMediaError ? <div className="warning-banner" role="alert"><AlertIcon /><span>{visibleMediaError.message}</span><button type="button" className="icon-button warning-dismiss" aria-label="关闭提示" onClick={() => setDismissedMediaError(visibleMediaError)}><CloseIcon size={14} /></button></div> : null}
       {youtube?.error ? <div className="warning-banner" role="alert"><AlertIcon />{youtube.error.message}</div> : null}
+      {actionError ? <div className="warning-banner" role="alert"><span>{actionError}</span><button type="button" className="icon-button" aria-label="关闭操作提示" onClick={() => setActionError("")}><CloseIcon size={14} /></button></div> : null}
 
       {section === "downloads" ? (
         <>
@@ -335,6 +417,16 @@ export function DownloadManagerPage({
                 <input type="search" aria-label="搜索下载任务" placeholder="搜索已添加的剧名" value={batchQuery} onChange={(event) => setBatchQuery(event.target.value)} />
                 <div className="upload-filters" role="group" aria-label="下载状态筛选">{batchFilters.map((filter) => <button type="button" key={filter.id} aria-pressed={batchFilter === filter.id} className={batchFilter === filter.id ? "active" : ""} onClick={() => setBatchFilter(filter.id)}>{filter.label}<span>{manager.state.batches.filter(filter.match).length}</span></button>)}</div>
               </div> : null}
+              {manager.state.batches.length ? <div className="bulk-task-toolbar" role="group" aria-label="下载批量操作">
+                <label><input type="checkbox" aria-label="全选当前下载任务" checked={visibleBatches.length > 0 && checkedBatches.length === visibleBatches.length}
+                  ref={(input) => { if (input) input.indeterminate = checkedBatches.length > 0 && checkedBatches.length < visibleBatches.length; }}
+                  onChange={(event) => { const checked = event.target.checked; setCheckedBatchIds((current) => { const next = new Set(current); for (const batch of visibleBatches) { if (checked) next.add(batch.id); else next.delete(batch.id); } return next; }); }} />全选当前列表</label>
+                <span>已选 {checkedBatches.length} 项</span>
+                <button type="button" className="secondary-button danger" disabled={!checkedBatches.length || bulkPreparing} onClick={removeCheckedBatches}>批量删除</button>
+                <button type="button" className="secondary-button" disabled={!checkedBatches.length || bulkPreparing} onClick={() => void prepareBulk("merge")}>批量合并</button>
+                <button type="button" className="secondary-button" disabled={!checkedBatches.length || bulkPreparing || !youtube?.credential.configured || !youtube.activeChannelId} title={!youtube?.activeChannelId ? "请先在设置中授权并选择 YouTube 频道" : undefined} onClick={() => void prepareBulk("upload")}>批量上传 YouTube</button>
+                {bulkPreparing ? <span role="status">正在检查成片…</span> : null}
+              </div> : null}
               {!manager.state.batches.length ? (
                 <div className="download-empty"><div className="empty-download-icon"><FolderIcon size={26} /></div><h3>还没有下载任务</h3><p>从首页、搜索或榜单中选择剧集加入队列</p></div>
               ) : !visibleBatches.length ? (
@@ -347,6 +439,7 @@ export function DownloadManagerPage({
                     const progress = batchProgress(batch);
                     return (
                       <article className={`batch-row ${selectedBatch?.id === batch.id ? "selected" : ""}`} data-testid="download-batch-row" data-focus-id={batch.id} key={batch.id}>
+                        <input className="task-row-checkbox" type="checkbox" aria-label={`选择下载任务 ${batch.title}`} checked={checkedBatchIds.has(batch.id)} onChange={(event) => toggleBatch(batch.id, event.target.checked)} />
                         <button type="button" className="batch-main" aria-label={`查看 ${batch.title} 任务详情`} onClick={() => { setSelectedBatchId(batch.id); setDetailOpen(true); }}>
                           <Cover src={batch.cover} title={batch.title} className="batch-cover" />
                           <div className="batch-copy">
@@ -392,9 +485,9 @@ export function DownloadManagerPage({
                       className="secondary-button"
                       disabled={!isCompletedBatch(selectedBatch) || hasCompletedBackgroundSeparation}
                       title={hasCompletedBackgroundSeparation ? "该剧已完成背景音乐分离" : undefined}
-                      onClick={() => { if (!hasCompletedBackgroundSeparation) setMediaDialog({ kind: "audioSeparation", batchId: selectedBatch.id }); }}
+                      onClick={() => { if (!hasCompletedBackgroundSeparation) setMediaDialog({ kind: "audioSeparation", batchId: selectedBatch.id, mergedPath }); }}
                     >{hasCompletedBackgroundSeparation ? "背景音乐已分离" : "分离背景音乐"}</button>
-                    <button type="button" className="secondary-button" disabled={!isCompletedBatch(selectedBatch)} onClick={() => setMediaDialog({ kind: "subtitleExtraction", batchId: selectedBatch.id })}>提取字幕</button>
+                    <button type="button" className="secondary-button" disabled={!isCompletedBatch(selectedBatch)} onClick={() => setMediaDialog({ kind: "subtitleExtraction", batchId: selectedBatch.id, mergedPath })}>提取字幕</button>
                     <button
                       type="button"
                       className="secondary-button"
@@ -430,7 +523,7 @@ export function DownloadManagerPage({
         </>
       ) : null}
 
-      {section === "media" ? (
+      <div hidden={section !== "media"} className="manager-section-content">
         <MediaJobsPanel
           media={media}
           batches={manager.state.batches}
@@ -447,14 +540,35 @@ export function DownloadManagerPage({
             const batch = batchForMediaJob(job, manager.state.batches, media.jobs);
             if (batch) setUploadDraft({ batchId: batch.id, sourcePath });
           }}
+          onNotice={showNotice}
+          separationDisabledReason={(job) => {
+            const batch = batchForMediaJob(job, manager.state.batches, media.jobs);
+            if (!batch) return "对应的下载任务已被移除";
+            if (!isCompletedBatch(batch)) return "请先完成该剧下载";
+            const exists = media.jobs.some((candidate) => candidate.kind === "separateBackgroundMusic"
+              && ["queued", "running", "paused", "completed"].includes(candidate.status)
+              && candidate.inputs.some((input) => sameFsPath(input.path, job.outputPath)));
+            return exists ? "该视频已分离或正在分离队列中" : undefined;
+          }}
+          onSeparateVideo={(job, sourcePath) => {
+            const batch = batchForMediaJob(job, manager.state.batches, media.jobs);
+            if (batch) void submitAI(batch.id, "audioSeparation", "merged", sourcePath);
+          }}
+          onBulkUploadToYouTube={(sources) => {
+            const drafts = sources.flatMap(({ job, sourcePath }) => {
+              const batch = batchForMediaJob(job, manager.state.batches, media.jobs);
+              return batch ? [{ batch, sourcePath }] : [];
+            });
+            if (drafts.length) setBulkUploadSources(drafts);
+          }}
         />
-      ) : null}
+      </div>
 
-      {section === "youtube" ? (
+      <div hidden={section !== "youtube"} className="manager-section-content">
         <section className="media-job-panel" aria-label="YouTube 上传">
-          {youtube ? <YouTubeUploadJobs model={youtube} onRevealPath={onRevealPath} focusJobId={focusTarget?.kind === "youtubeJob" ? focusTarget.id : undefined} /> : <div className="download-empty"><h3>尚无上传任务</h3></div>}
+          {youtube ? <YouTubeUploadJobs model={youtube} onRevealPath={onRevealPath} onNotice={showNotice} focusJobId={focusTarget?.kind === "youtubeJob" ? focusTarget.id : undefined} /> : <div className="download-empty"><h3>尚无上传任务</h3></div>}
         </section>
-      ) : null}
+      </div>
 
       {mergingBatch ? (
         <MergeVideoDialog
@@ -468,11 +582,12 @@ export function DownloadManagerPage({
       {mediaDialogBatch && mediaDialog ? (
         <MediaScopeDialog
           kind={mediaDialog.kind}
-          hasMergedVideo={Boolean(mergedPathFor(mediaDialogBatch, media.jobs) || (selectedBatch?.id === mediaDialogBatch.id ? selectedMergedVideoPath : undefined))}
+          busy={submitting}
+          hasMergedVideo={Boolean(mediaDialog.mergedPath || mergedPathFor(mediaDialogBatch, media.jobs) || (selectedBatch?.id === mediaDialogBatch.id ? selectedMergedVideoPath : undefined))}
           title={mediaDialogBatch.title}
           episodeCount={mediaDialogBatch.items.length}
           modelName={mediaDialog.kind === "audioSeparation" ? demucsModel : `Whisper ${whisperModel}`}
-          onSubmit={(scope) => { void submitAI(mediaDialog.batchId, mediaDialog.kind, scope); }}
+          onSubmit={(scope) => { void submitAI(mediaDialog.batchId, mediaDialog.kind, scope, mediaDialog.mergedPath); }}
           onClose={() => setMediaDialog(null)}
         />
       ) : null}
@@ -493,15 +608,18 @@ export function DownloadManagerPage({
         <YouTubeUploadDialog
           batch={uploadBatch}
           sourcePath={uploadDraft.sourcePath}
+          channelId={youtube.activeChannelId || ""}
           onClose={() => setUploadDraft(null)}
-          onSubmit={(request: YouTubeUploadIntent) => {
-            void youtube.startUpload(request).then(() => {
-              setUploadDraft(null);
-              setSection("youtube");
-            });
+          onSubmit={async (request: YouTubeUploadIntent) => {
+            await youtube.startUpload(request);
+            setUploadDraft(null);
+            showNotice(`《${uploadBatch.title}》已加入 YouTube 上传队列`);
           }}
         />
       ) : null}
+      {bulkMergeTargets ? <BatchMergeDialog targets={bulkMergeTargets} onSubmit={media.startMerge} onClose={() => setBulkMergeTargets(null)} onQueued={(count) => showNotice(`已加入 ${count} 个合并任务`)} /> : null}
+      {bulkUploadSources && youtube ? <YouTubeBatchUploadDialog sources={bulkUploadSources} channelId={youtube.activeChannelId || ""} onSubmit={youtube.startUpload} onClose={() => setBulkUploadSources(null)} onQueued={(count) => showNotice(`已加入 ${count} 个 YouTube 上传任务`)} /> : null}
+      {notice ? <div className="toast manager-toast" role="status"><span><CheckIcon size={14} /></span>{notice.message}<button type="button" aria-label="关闭消息" onClick={() => setNotice(null)}><CloseIcon size={16} /></button></div> : null}
     </main>
   );
 }

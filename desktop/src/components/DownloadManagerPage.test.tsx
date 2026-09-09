@@ -7,6 +7,8 @@ import type { MediaJobsModel } from "../media/types";
 import type { AIComponentStatus } from "../types";
 import { DownloadManagerPage } from "./DownloadManagerPage";
 
+vi.mock("../youtube/commands", () => ({ checkYouTubeUpload: vi.fn().mockResolvedValue([]) }));
+
 const state: DownloadManagerState = {
   version: 2,
   concurrency: 5,
@@ -318,7 +320,7 @@ describe("DownloadManagerPage", () => {
     expect(view.queryByRole("alert")).toBeNull();
   });
 
-  it("automatically dismisses the duplicate media task reminder after five seconds", () => {
+  it("automatically dismisses the duplicate media task reminder after three seconds", () => {
     vi.useFakeTimers();
     try {
       const media = mediaFixture({ error: { code: "MEDIA_JOB_ALREADY_ACTIVE", message: "同一媒体任务已在队列中或正在运行" } });
@@ -326,7 +328,7 @@ describe("DownloadManagerPage", () => {
         <DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />,
       );
 
-      act(() => vi.advanceTimersByTime(4_999));
+      act(() => vi.advanceTimersByTime(2_999));
       expect(view.getByRole("alert")).toBeTruthy();
       act(() => vi.advanceTimersByTime(1));
       expect(view.queryByRole("alert")).toBeNull();
@@ -382,7 +384,7 @@ describe("YouTube separated upload source", () => {
     ["same book in another directory", "merged", "completed", "book-b", "/Elsewhere", false],
   ] as const)("handles %s", async (_, scope, status, bookId, seriesRoot, enabled, retainMerge: boolean = false) => {
     const separation = {
-      ...mediaFixture().jobs[2], kind: "separateBackgroundMusic" as const, status,
+      ...mediaFixture().jobs[2], id: "separation-result", kind: "separateBackgroundMusic" as const, status,
       aiRequest: { title: "女子爱财，取之有道", scope, model: "htdemucs" as const, bookId, seriesRoot },
       inputs: [{ path: scope === "episodes" ? "/Downloads/e21.mp4" : "/Downloads/merged.mp4", sizeBytes: 100 }],
       outputPath: "/Downloads/音频分离/人声.wav",
@@ -641,4 +643,74 @@ describe("macOS post-merge media actions", () => {
       "/custom/剧目/合并视频/成片.mp4",
     ));
   });
+});
+
+describe("v0.2.0 task workflow", () => {
+  it("keeps the selected download and search after separation, with a three second toast", async () => {
+    vi.useFakeTimers();
+    const media = mediaFixture();
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    try {
+      fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), { target: { value: "女子" } });
+      fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+      fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+      await act(async () => { fireEvent.click(view.getByRole("button", { name: "开始分离" })); });
+      expect(view.getByRole("tab", { name: "下载任务" }).getAttribute("aria-selected")).toBe("true");
+      expect(view.getByRole("searchbox", { name: "搜索下载任务" }).getAttribute("value")).toBe("女子");
+      expect(within(view.getByRole("complementary", { name: "任务详情" })).getByRole("heading", { name: "女子爱财，取之有道" })).toBeTruthy();
+      expect(view.getByRole("status").textContent).toContain("已加入");
+      act(() => vi.advanceTimersByTime(2999));
+      expect(view.getByRole("status")).toBeTruthy();
+      act(() => vi.advanceTimersByTime(1));
+      expect(view.queryByRole("status")).toBeNull();
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
+  it("keeps the download selection after queuing a YouTube upload", async () => {
+    const youtube = { credential: { configured: true }, activeChannelId: "channel", channels: [], jobs: [], startUpload: vi.fn().mockResolvedValue({ id: "uploaded" }) } as unknown as YouTubeModel;
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={mediaFixture()} youtube={youtube} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    fireEvent.click(view.getByRole("button", { name: "上传 YouTube" }));
+    fireEvent.click(view.getByRole("button", { name: "确认上传" }));
+    await waitFor(() => expect(youtube.startUpload).toHaveBeenCalledTimes(1));
+    expect(view.getByRole("tab", { name: "下载任务" }).getAttribute("aria-selected")).toBe("true");
+    expect(view.queryByRole("dialog")).toBeNull();
+    expect(view.getByRole("status").textContent).toContain("YouTube");
+  });
+
+  it("bulk deletes only checked visible downloads without changing the detail selection", () => {
+    const manager = managerFixture();
+    const view = render(<DownloadManagerPage manager={manager} media={mediaFixture()} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("checkbox", { name: "选择下载任务 天下第一纨绔" }));
+    fireEvent.click(view.getByRole("checkbox", { name: "选择下载任务 女子爱财，取之有道" }));
+    fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), { target: { value: "女子" } });
+    fireEvent.click(view.getByRole("button", { name: "批量删除" }));
+    expect(manager.removeBatch).toHaveBeenCalledTimes(1);
+    expect(manager.removeBatch).toHaveBeenCalledWith("batch-b");
+    expect(within(view.getByRole("complementary", { name: "任务详情" })).getByRole("heading", { name: "天下第一纨绔" })).toBeTruthy();
+  });
+
+  it("bulk merge reviews checked dramas and skips incomplete downloads", async () => {
+    const media = mediaFixture({ jobs: [] });
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("checkbox", { name: "全选当前下载任务" }));
+    fireEvent.click(view.getByRole("button", { name: "批量合并" }));
+    const dialog = await view.findByRole("dialog", { name: "批量合并视频" });
+    expect(dialog.textContent).toContain("下载尚未完成");
+    fireEvent.click(within(dialog).getByRole("button", { name: "开始批量合并" }));
+    await waitFor(() => expect(media.startMerge).toHaveBeenCalledTimes(1));
+    expect(media.startMerge).toHaveBeenCalledWith(expect.objectContaining({id:"batch-b"}), expect.objectContaining({ outputName: "女子爱财，取之有道.mp4", mode:"auto", conflictPolicy:"failIfExists" }));
+    expect(view.getByRole("tab", { name: "下载任务" }).getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+it("never uses the previous drama's merged file while the next filesystem lookup is pending", async () => {
+  const manager = managerFixture();
+  manager.state = { ...state, batches: state.batches.map((batch, index) => ({ ...batch, items: batch.items.map((item) => ({ ...item, status: "done", path: `/Downloads/drama-${index}/${item.id}.mp4` })) })) };
+  const media = mediaFixture({ jobs: [], findMergedVideo: vi.fn((root) => root.endsWith("drama-0") ? Promise.resolve("/Downloads/drama-0/合并视频.mp4") : new Promise<string | null>(() => undefined)) });
+  const youtube = { credential: { configured: true }, activeChannelId: "channel", channels: [], jobs: [] } as unknown as YouTubeModel;
+  const view = render(<DownloadManagerPage manager={manager} media={media} youtube={youtube} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+  await waitFor(() => expect((view.getByRole("button", { name: "上传 YouTube" }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+  expect((view.getByRole("button", { name: "上传 YouTube" }) as HTMLButtonElement).disabled).toBe(true);
 });

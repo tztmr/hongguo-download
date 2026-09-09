@@ -138,6 +138,8 @@ export default function App() {
   const previewMode = new URLSearchParams(window.location.search).get("preview");
   const isPreview = previewMode === "library" || previewMode === "downloads";
   const [nav, setNav] = useState<NavId>(previewMode === "downloads" ? "queue" : "discover");
+  const [queueVisited, setQueueVisited] = useState(previewMode === "downloads");
+  useEffect(() => { if (nav === "queue") setQueueVisited(true); }, [nav]);
   const [managerFocus, setManagerFocus] = useState<NotificationTarget | null>(null);
   const [contentType, setContentType] = useState<ContentType>("drama");
   const [searchContentType, setSearchContentType] = useState<SearchContentType>("all");
@@ -523,8 +525,9 @@ export default function App() {
   return (
     <div className={`app-shell ${nav === "queue" || nav === "monitor" || nav === "settings" ? "queue-mode" : "library-mode"}`}>
       <AppRail nav={nav} pendingCount={pendingCount} unseenReleases={monitor.unseenCount} healthOk={healthOk} onNavigate={navigate} />
-      {nav === "queue" ? (
+      {nav === "queue" || queueVisited ? (
         <DownloadManagerPage
+          hidden={nav !== "queue"}
           manager={manager}
           media={media}
           saveDir={activeSettings.saveDir}
@@ -533,7 +536,7 @@ export default function App() {
           aiComponents={isPreview ? undefined : settingsModel.components}
           onInstallComponent={isPreview ? undefined : settingsModel.installComponent}
           youtube={isPreview ? previewYouTubeModel : youtube}
-          focusTarget={managerFocus}
+          focusTarget={nav === "queue" ? managerFocus : null}
           onChooseDir={() => {
             void settingsModel.chooseDirectory();
           }}
@@ -544,7 +547,8 @@ export default function App() {
             if (!isPreview) void revealPath(path).catch((nextError) => setError(String(nextError)));
           }}
         />
-      ) : nav === "monitor" ? (
+      ) : null}
+      {nav === "queue" ? null : nav === "monitor" ? (
         <NewReleasesPage model={monitor} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
       ) : nav === "settings" ? (
         <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />

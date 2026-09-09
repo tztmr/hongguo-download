@@ -33,6 +33,7 @@ use media::{
 };
 use settings::{load_settings, save_settings, AppSettings, UpdateSettings};
 use youtube::{
+    duplicates::{DuplicateMatch, DuplicateQuery},
     models::{AccountSummary, CredentialSummary, UploadIntent, YouTubeJob, YouTubeSnapshot},
     service::{YouTubeEventSink, YouTubeService},
 };
@@ -809,6 +810,26 @@ async fn api_get(state: State<'_, AppState>, path: String) -> AppResult<Value> {
 }
 
 #[tauri::command]
+async fn get_playback_url(
+    state: State<'_, AppState>,
+    item_id: String,
+    definition: String,
+) -> AppResult<String> {
+    let client = state.client.clone();
+    let api_base = state.api_base.clone();
+    let ready = state.api_ready.clone();
+    run_blocking(move || {
+        ensure_api_ready(&client, &api_base, &ready)?;
+        Ok(format!(
+            "{api_base}/api/duanju/download?item_id={}&definition={}",
+            urlencoding::encode(&item_id),
+            urlencoding::encode(&definition)
+        ))
+    })
+    .await
+}
+
+#[tauri::command]
 fn get_save_dir(state: State<AppState>) -> AppResult<String> {
     Ok(state
         .settings
@@ -1140,11 +1161,19 @@ fn remove_youtube_oauth_config(state: State<AppState>) -> AppResult<YouTubeSnaps
 }
 
 #[tauri::command]
-fn start_youtube_upload_job(
-    state: State<AppState>,
+async fn check_youtube_upload(
+    state: State<'_, AppState>,
+    query: DuplicateQuery,
+) -> AppResult<Vec<DuplicateMatch>> {
+    state.youtube.check_upload(&query).await
+}
+
+#[tauri::command]
+async fn start_youtube_upload_job(
+    state: State<'_, AppState>,
     request: UploadIntent,
 ) -> AppResult<YouTubeJob> {
-    state.youtube.start_upload(request)
+    state.youtube.start_upload(request).await
 }
 
 #[tauri::command]
@@ -1443,6 +1472,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             api_get,
+            get_playback_url,
             get_settings,
             update_settings,
             get_save_dir,
@@ -1473,6 +1503,7 @@ pub fn run() {
             set_youtube_channel,
             revoke_youtube,
             remove_youtube_oauth_config,
+            check_youtube_upload,
             start_youtube_upload_job,
             cancel_youtube_upload_job,
             delete_youtube_upload_job,

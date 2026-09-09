@@ -854,6 +854,7 @@ async def duanju_new_releases(
             'hot_count': item.get('hot_count'),
             'collect_count': item.get('collect_count'),
             'like_count': item.get('like_count'),
+            'comment_count': item.get('comment_count'),
         }
 
     try:

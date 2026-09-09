@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { previewYouTubeModel } from "../preview";
@@ -85,4 +85,96 @@ it("deletes an upload record by its stable job id", async () => {
   fireEvent.click(view.getByRole("button", { name: "删除" }));
 
   await waitFor(() => expect(removeJob).toHaveBeenCalledExactlyOnceWith("preview-upload-private"));
+});
+
+
+describe("upload list selection", () => {
+  const jobs = [
+    { ...completed.jobs[0], id: "alpha", title: "Alpha" },
+    { ...completed.jobs[0], id: "beta", title: "Beta", status: "failed" as const },
+  ];
+  const checkbox = (view: ReturnType<typeof render>, name: string) => view.getByRole("checkbox", { name }) as HTMLInputElement;
+  const bulkButton = (view: ReturnType<typeof render>) => view.getByRole("button", { name: "批量删除" }) as HTMLButtonElement;
+
+  it("retains hidden selection while deleting only selected visible records and preserving filters", async () => {
+    const removeJob = vi.fn().mockResolvedValue(undefined);
+    const onNotice = vi.fn();
+    const model = { ...completed, jobs, removeJob };
+    const view = render(<YouTubeUploadJobs model={model} onRevealPath={vi.fn()} onNotice={onNotice} />);
+    expect(bulkButton(view).disabled).toBe(true);
+    fireEvent.click(checkbox(view, "全选当前可见上传任务"));
+    fireEvent.click(within(view.getByRole("group", { name: "上传状态筛选" })).getByRole("button", { name: /已完成/ }));
+    fireEvent.change(view.getByRole("searchbox"), { target: { value: "Alpha" } });
+    expect(view.getByText("已选 1 项（当前可见），共选 2 项")).toBeTruthy();
+    fireEvent.click(bulkButton(view));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("已删除 1 项")));
+    expect(removeJob).toHaveBeenCalledExactlyOnceWith("alpha");
+    expect((view.getByRole("searchbox") as HTMLInputElement).value).toBe("Alpha");
+    expect(view.getByText("已选 0 项（当前可见），共选 1 项")).toBeTruthy();
+    fireEvent.change(view.getByRole("searchbox"), { target: { value: "" } });
+    fireEvent.click(within(view.getByRole("group", { name: "上传状态筛选" })).getByRole("button", { name: /全部/ }));
+    expect(checkbox(view, "选择上传任务：Beta").checked).toBe(true);
+    expect(checkbox(view, "选择上传任务：Alpha").checked).toBe(false);
+  });
+
+  it("selects and clears only visible rows, handles mixed/empty lists and prunes removed ids", () => {
+    const model = { ...completed, jobs };
+    const view = render(<YouTubeUploadJobs model={model} onRevealPath={vi.fn()} />);
+    fireEvent.click(checkbox(view, "选择上传任务：Alpha"));
+    expect(checkbox(view, "全选当前可见上传任务").indeterminate).toBe(true);
+    fireEvent.change(view.getByRole("searchbox"), { target: { value: "Beta" } });
+    fireEvent.click(checkbox(view, "全选当前可见上传任务"));
+    fireEvent.click(checkbox(view, "全选当前可见上传任务"));
+    expect(view.getByText("已选 0 项（当前可见），共选 1 项")).toBeTruthy();
+    fireEvent.change(view.getByRole("searchbox"), { target: { value: "missing" } });
+    expect(checkbox(view, "全选当前可见上传任务").disabled).toBe(true);
+    expect(bulkButton(view).disabled).toBe(true);
+    view.rerender(<YouTubeUploadJobs model={{ ...model, jobs: [jobs[1]] }} onRevealPath={vi.fn()} />);
+    expect(view.getByText("已选 0 项（当前可见），共选 0 项")).toBeTruthy();
+  });
+
+  it("guards overlapping deletes, deselects successes, and retains failures for retry", async () => {
+    let finish!: () => void;
+    const removeJob = vi.fn().mockImplementation((id: string) => id === "alpha"
+      ? new Promise<void>((resolve) => { finish = resolve; }) : Promise.reject({ message: "无法删除记录" }));
+    const onNotice = vi.fn();
+    const view = render(<YouTubeUploadJobs model={{ ...completed, jobs, removeJob }} onRevealPath={vi.fn()} onNotice={onNotice} />);
+    fireEvent.click(checkbox(view, "全选当前可见上传任务"));
+    fireEvent.click(bulkButton(view));
+    fireEvent.click(bulkButton(view));
+    expect(bulkButton(view).disabled).toBe(true);
+    for (const row of view.getAllByTestId("youtube-job-row")) {
+      const button = within(row).getByRole("button", { name: "删除" }) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button);
+    }
+    await act(async () => finish());
+    await waitFor(() => expect(bulkButton(view).disabled).toBe(false));
+    expect(removeJob.mock.calls).toEqual([["alpha"], ["beta"]]);
+    expect(checkbox(view, "选择上传任务：Alpha").checked).toBe(false);
+    expect(checkbox(view, "选择上传任务：Beta").checked).toBe(true);
+    expect(view.getByRole("alert").textContent).toContain("1 项删除失败");
+    expect(view.getByRole("alert").textContent).toContain("无法删除记录");
+    expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("已删除 1 项"));
+    removeJob.mockResolvedValue(undefined);
+    fireEvent.click(bulkButton(view));
+    await waitFor(() => expect(view.getByText("已选 0 项（当前可见），共选 0 项")).toBeTruthy());
+    expect(removeJob.mock.calls).toEqual([["alpha"], ["beta"], ["beta"]]);
+  });
+
+  it("blocks bulk deletion during a selected row action and notifies single deletion", async () => {
+    let finish!: () => void;
+    const pause = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+    const removeJob = vi.fn().mockResolvedValue(undefined);
+    const onNotice = vi.fn();
+    const view = render(<YouTubeUploadJobs model={{ ...completed, jobs: [{ ...jobs[0], status: "uploading" }], pause, removeJob }} onRevealPath={vi.fn()} onNotice={onNotice} />);
+    fireEvent.click(checkbox(view, "选择上传任务：Alpha"));
+    fireEvent.click(view.getByRole("button", { name: "暂停" }));
+    expect(bulkButton(view).disabled).toBe(true);
+    await act(async () => finish());
+    fireEvent.click(view.getByRole("button", { name: "删除" }));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("已删除 1 项")));
+    expect(checkbox(view, "选择上传任务：Alpha").checked).toBe(false);
+    expect(removeJob).toHaveBeenCalledExactlyOnceWith("alpha");
+  });
 });

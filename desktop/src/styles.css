@@ -394,7 +394,7 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .merge-dialog p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .merge-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
 .youtube-upload-dialog { width: min(620px, 100%); }
-.youtube-upload-dialog > label, .youtube-form-grid > label { display: flex; flex-direction: column; gap: 7px; color: var(--muted); font-size: 12px; }
+.youtube-upload-fields > label, .youtube-form-grid > label { display: flex; flex-direction: column; gap: 7px; color: var(--muted); font-size: 12px; }
 .youtube-upload-dialog input, .youtube-upload-dialog select, .youtube-upload-dialog textarea { padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: #101115; font: inherit; }
 .youtube-upload-dialog textarea { min-height: 92px; resize: vertical; }
 .youtube-form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
@@ -634,3 +634,65 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .search-result-summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 28px; color: var(--muted); border-bottom: 1px solid var(--border); font-size: 12px; }
 .youtube-job-card .upload-progress-label small { display: inline; }
 .youtube-job-card.status-videoUploadedThumbnailFailed .progress-track > span { background: #d8ad70; }
+
+.youtube-upload-fields { display: contents; }
+.youtube-duplicate-warning { padding: 12px 16px; border: 1px solid #786033; border-radius: 8px; background: #292319; color: #e5c68c; }
+.youtube-duplicate-warning ul { margin: 10px 0 0; padding-left: 20px; max-height: 180px; overflow-y: auto; }
+.youtube-duplicate-warning li { margin: 8px 0; }
+.youtube-duplicate-warning li span { display: block; overflow-wrap: anywhere; }
+.youtube-duplicate-warning a { display: inline-block; margin-top: 4px; color: var(--accent-hover); }
+
+/* Task workspaces retain their selection and scroll position between tabs. */
+[hidden] { display: none !important; }
+.manager-section-content { display: flex; flex: 1; min-height: 0; flex-direction: column; }
+.batch-row { grid-template-columns: 32px minmax(0, 1fr) auto; }
+.task-row-checkbox { width: 16px; height: 16px; margin: 0 0 0 12px; accent-color: var(--accent); cursor: pointer; }
+.bulk-task-toolbar, .bulk-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.bulk-task-toolbar label, .bulk-toolbar label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.bulk-task-toolbar input, .bulk-toolbar input { accent-color: var(--accent); }
+.bulk-task-toolbar > span, .bulk-toolbar > span { color: var(--muted); }
+.bulk-task-toolbar .secondary-button, .bulk-toolbar .secondary-button { min-height: 30px; padding: 6px 9px; font-size: 11px; }
+.manager-toast { z-index: 120; max-width: min(720px, calc(100vw - 40px)); padding-block: 8px; }
+.bulk-review-list { display: grid; gap: 8px; margin: 12px 0; padding: 0; max-height: 280px; overflow: auto; list-style: none; }
+.bulk-review-list li { display: grid; gap: 5px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.bulk-review-list small { color: var(--muted); overflow-wrap: anywhere; }
+.batch-operation-dialog { width: min(680px, calc(100vw - 40px)); }
+.batch-operation-dialog > label { display: grid; gap: 6px; margin: 12px 0; }
+.batch-operation-dialog select { border: 1px solid var(--border); border-radius: 7px; padding: 8px; color: var(--text); background: var(--surface); }
+
+/* Online viewing from the series inspector. */
+.watch-button { flex-shrink: 0; display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; margin-top: 12px; padding: 11px; color: var(--text); }
+.watch-button + .enqueue-button { margin-top: 10px; }
+.online-player { width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 18px; overflow: auto; border: 1px solid var(--border); border-radius: 14px; background: #0f1013; color: var(--text); }
+.online-player::backdrop { background: rgb(0 0 0 / 78%); }
+.online-player-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.online-player-header > div { min-width: 0; }
+.online-player-header h2 { margin: 0; font-size: 18px; overflow-wrap: anywhere; }
+.online-player-header p { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
+.online-player-header button { flex-shrink: 0; }
+.online-player-screen { display: flex; align-items: center; justify-content: center; height: min(62dvh, 620px); min-height: 180px; border-radius: 9px; background: #000; overflow: hidden; }
+.online-player-screen video { display: block; min-width: 0; min-height: 0; width: 100%; height: 100%; object-fit: contain; }
+.online-player-state { padding: 24px; text-align: center; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.online-player-state [role="alert"] { color: #ff9ca2; }
+.online-player-controls { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 14px; }
+.online-player-controls select { flex: 1; min-width: 0; max-width: 280px; padding: 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); color: var(--text); }
+.online-player-controls button { flex-shrink: 0; }
+.media-task-card { grid-template-columns: 18px 40px minmax(0, 1fr) auto; }
+.media-task-card > input, .youtube-job-card > input { width: 16px; height: 16px; accent-color: var(--accent); margin: 10px 0 0; }
+.youtube-job-card { grid-template-columns: 18px minmax(0, 1fr) auto; }
+.media-job-actions { flex-wrap: wrap; max-width: 350px; justify-content: flex-end; }
+.media-bulk-actions, .youtube-bulk-actions { justify-content: flex-start; gap: 10px; font-size: 12px; }
+.media-bulk-actions label, .youtube-bulk-actions label { display: inline-flex; align-items: center; gap: 6px; }
+.media-bulk-actions input, .youtube-bulk-actions input { accent-color: var(--accent); }
+.media-bulk-actions > span, .youtube-bulk-actions > span { color: var(--muted); }
+.youtube-batch-upload-dialog { width: min(820px, calc(100vw - 40px)); }
+.youtube-batch-review-list { display: grid; gap: 12px; }
+.youtube-batch-review-item { padding: 16px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.youtube-batch-review-item h3 { margin: 0 0 8px; font-size: 15px; }
+.youtube-batch-review-item [role="status"] { color: var(--muted); font-size: 12px; }
+@media (max-width: 1200px) {
+  .media-task-card { grid-template-columns: 18px 32px minmax(0, 1fr); gap: 12px; }
+  .media-task-card .media-task-icon { width: 32px; height: 32px; }
+  .media-task-card > .media-job-actions { grid-column: 3; max-width: none; justify-content: flex-start; }
+  .bulk-task-toolbar { gap: 6px; }
+}

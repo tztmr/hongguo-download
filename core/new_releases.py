@@ -39,6 +39,28 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def series_comment_count(series: dict) -> int | None:
+    """Use a series total, or sum comments only when every episode is present."""
+    for key in ("comment_count", "comment_cnt"):
+        total = _optional_int(series.get(key))
+        if total is not None:
+            return total
+    videos = series.get("video_list")
+    expected = _optional_int(series.get("episode_cnt"))
+    if not isinstance(videos, list) or not expected or len(videos) != expected:
+        return None
+    counts = {}
+    for video in videos:
+        if not isinstance(video, dict):
+            return None
+        vid = str(video.get("vid") or "")
+        count = _optional_int(video.get("comment_count"))
+        if not vid or vid in counts or count is None:
+            return None
+        counts[vid] = count
+    return sum(counts.values())
+
+
 def normalize_metrics(upstream: dict, series_id: str) -> dict:
     """Extract stable metric fields without turning missing values into zero."""
 
@@ -58,6 +80,7 @@ def normalize_metrics(upstream: dict, series_id: str) -> dict:
         "hot_count": _optional_int(match.get("hot_score")),
         "collect_count": _optional_int(match.get("followed_cnt")),
         "like_count": _optional_int(match.get("digg_cnt")),
+        "comment_count": series_comment_count(match),
     }
 
 

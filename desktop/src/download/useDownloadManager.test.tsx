@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { EpisodeItem, SeriesItem } from "../types";
 import type { DownloadAdapter, DownloadProgress } from "./useDownloadManager";
 import { useDownloadManager } from "./useDownloadManager";
+import { DOWNLOAD_STORAGE_KEY } from "./storage";
 
 function memoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -89,6 +90,29 @@ const manyEpisodes: EpisodeItem[] = Array.from({ length: 10 }, (_, offset) => ({
 }));
 
 describe("useDownloadManager", () => {
+  it("keeps the final episode completed when its last progress event arrives after the result", async () => {
+    vi.useFakeTimers();
+    const fake = deferredAdapter();
+    const storage = memoryStorage();
+    const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage }));
+    try {
+      act(() => result.current.enqueue(series, episodes.slice(0, 2)));
+      await act(async () => { fake.resolveAll(); });
+      expect(result.current.stats.done).toBe(2);
+
+      act(() => fake.progress({ taskId: fake.started[1], received: 100, total: 100, percent: 100 }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+      expect(result.current.stats).toEqual({ running: 0, queued: 0, done: 2, error: 0 });
+      expect(JSON.parse(storage.getItem(DOWNLOAD_STORAGE_KEY)!).batches[0].items[1]).toMatchObject({
+        status: "done", percent: 100, path: `/Downloads/${fake.started[1]}.mp4`,
+      });
+    } finally {
+      unmount();
+      vi.useRealTimers();
+    }
+  });
+
   it("starts eight downloads by default and fills a freed slot", async () => {
     const fake = deferredAdapter();
     const { result, unmount } = renderHook(() => useDownloadManager({ adapter: fake.adapter, storage: memoryStorage() }));

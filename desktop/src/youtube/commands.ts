@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { YouTubeChannel, YouTubeCommands, YouTubeCredential, YouTubeJob, YouTubeSnapshot, YouTubeUploadIntent } from "./types";
+import type { YouTubeDuplicateQuery, YouTubeDuplicateMatch, YouTubeChannel, YouTubeCommands, YouTubeCredential, YouTubeJob, YouTubeSnapshot, YouTubeUploadIntent } from "./types";
 
 export const youtubeCommands: YouTubeCommands = {
   snapshot: () => invoke<YouTubeSnapshot>("get_youtube_snapshot"),
@@ -19,3 +19,5 @@ export const youtubeCommands: YouTubeCommands = {
   markNotified: (jobId, outcome) => invoke<YouTubeJob>("mark_youtube_job_notified", { jobId, outcome }),
   subscribeProgress: async (listener) => listen<YouTubeJob>("youtube-job-progress", (event) => listener(event.payload)),
 };
+
+export const checkYouTubeUpload = (query: YouTubeDuplicateQuery) => invoke<YouTubeDuplicateMatch[]>("check_youtube_upload", { query });

@@ -52,7 +52,11 @@ export type YouTubeSnapshot = {
   jobs: YouTubeJob[];
 };
 
+export type YouTubeDuplicateQuery = { channelId: string; title: string; bookId: string; dramaTitle: string };
+export type YouTubeDuplicateMatch = { title: string; videoId: string; youtubeUrl: string; reason: "sameTitle" | "sameDrama" | "similarTitle" };
+
 export type YouTubeUploadIntent = {
+  dedup?: { channelId: string; bookId: string; dramaTitle: string; allowDuplicate: boolean };
   jobId: string;
   filePath: string;
   coverPath: string | null;

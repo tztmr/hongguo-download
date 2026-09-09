@@ -35,6 +35,7 @@ export const previewSeries: SeriesItem[] = Array.from({ length: 40 }, (_, index)
   hotCount: 25_000 + index * 113,
   collectCount: index % 5 === 0 ? undefined : 800 + index * 17,
   likeCount: 1_200 + index * 23,
+  commentCount: 320 + index * 17,
 }));
 
 export const previewEpisodes: EpisodeItem[] = Array.from({ length: 59 }, (_, index) => ({

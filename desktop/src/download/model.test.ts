@@ -183,6 +183,19 @@ describe("download model", () => {
     expect(cleared.batches).toEqual([]);
   });
 
+  it.each(["queued", "done", "error"] as const)("ignores late progress for a %s item", (status) => {
+    const state = enqueueEpisodes(createInitialState(), seriesA, [episodes[0]], "auto", ids("late"), 1000).state;
+    const item = state.batches[0].items[0];
+    item.status = status;
+    const snapshot = structuredClone(item);
+    const updated = downloadReducer(state, {
+      type: "update-progress", itemId: item.id, received: 100, total: 100, percent: 100,
+    });
+
+    expect(updated.batches[0].items[0]).toEqual(snapshot);
+    expect(getDownloadStats(updated).running).toBe(0);
+  });
+
   it("defers removal of a running batch until its active item settles", () => {
     const queued = enqueueEpisodes(createInitialState(), seriesA, episodes.slice(0, 2), "auto", ids("remove"), 1000).state;
     const first = queued.batches[0].items[0];

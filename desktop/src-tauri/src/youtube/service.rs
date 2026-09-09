@@ -1,5 +1,6 @@
 use super::{
     config::{import_private, OAuthClientConfig},
+    duplicates::{self, DuplicateMatch, DuplicateQuery, KnownVideo},
     models::{
         AccountSummary, CredentialSummary, ThumbnailState, UploadIntent, YouTubeJob,
         YouTubeJobStatus, YouTubeSnapshot,
@@ -57,6 +58,7 @@ pub struct YouTubeService {
     state: Arc<YouTubeStateStore>,
     vault: Arc<dyn TokenVault>,
     uploads: Mutex<Vec<StoredUpload>>,
+    history_lock: Mutex<()>,
     running: Mutex<HashMap<String, UploadCancellationToken>>,
     media_jobs: Arc<MediaJobService>,
     event_sink: Arc<dyn YouTubeEventSink>,
@@ -88,6 +90,7 @@ impl YouTubeService {
             state,
             vault: Arc::new(OsTokenVault),
             uploads: Mutex::new(uploads),
+            history_lock: Mutex::new(()),
             running: Mutex::new(HashMap::new()),
             media_jobs,
             event_sink,
@@ -161,8 +164,73 @@ impl YouTubeService {
         Ok(self.snapshot())
     }
 
-    pub fn start_upload(self: &Arc<Self>, intent: UploadIntent) -> Result<YouTubeJob, AppError> {
+    pub async fn check_upload(
+        &self,
+        query: &DuplicateQuery,
+    ) -> Result<Vec<DuplicateMatch>, AppError> {
+        if query.title.trim().is_empty() || query.title.chars().count() > 100 {
+            return Err(AppError::new(
+                "UPLOAD_REQUEST_INVALID",
+                "请填写有效的上传标题",
+            ));
+        }
+        self.ensure_check_channel(&query.channel_id)?;
+        let token = self
+            .oauth_service()?
+            .access_token(&query.channel_id)
+            .await?;
+        let mut videos = duplicates::channel_videos(&query.channel_id, &token).await?;
+        // Include local records while YouTube's upload list is still catching up.
+        let uploads = self.uploads.lock().map_err(state_lock_error)?;
+        for item in uploads.iter() {
+            if let Some(video_id) = &item.job.video_id {
+                videos.push(known_video(item, video_id));
+            }
+        }
+        drop(uploads);
+        let _history_guard = self.history_lock.lock().map_err(state_lock_error)?;
+        videos.extend(duplicates::read_history(&self.data_dir)?);
+        self.ensure_check_channel(&query.channel_id)?;
+        Ok(duplicates::find_matches(query, &videos))
+    }
+
+    fn ensure_check_channel(&self, channel_id: &str) -> Result<(), AppError> {
+        if self.state.snapshot().active_channel_id.as_deref() != Some(channel_id) {
+            return Err(AppError::new(
+                "YOUTUBE_CHANNEL_CHANGED",
+                "所选频道已变化，请重新检查后上传",
+            ));
+        }
+        Ok(())
+    }
+
+    fn remember_upload(&self, stored: &StoredUpload, video_id: &str) -> Result<(), AppError> {
+        let _guard = self.history_lock.lock().map_err(state_lock_error)?;
+        duplicates::remember_video(&self.data_dir, known_video(stored, video_id))
+    }
+
+    pub async fn start_upload(
+        self: &Arc<Self>,
+        intent: UploadIntent,
+    ) -> Result<YouTubeJob, AppError> {
         intent.validate()?;
+        let identity = intent.dedup.as_ref().ok_or_else(|| {
+            AppError::new("YOUTUBE_CHECK_REQUIRED", "请重新打开上传窗口完成频道查重")
+        })?;
+        let query = DuplicateQuery {
+            channel_id: identity.channel_id.clone(),
+            title: intent.title.clone(),
+            book_id: identity.book_id.clone(),
+            drama_title: identity.drama_title.clone(),
+        };
+        let matches = self.check_upload(&query).await?;
+        if !identity.allow_duplicate && !matches.is_empty() {
+            return Err(AppError::new(
+                "YOUTUBE_DUPLICATE_FOUND",
+                "频道内已有同名或相近影片，请再次点击确认上传查看重复项",
+            ));
+        }
+        self.ensure_check_channel(&identity.channel_id)?;
         if !self
             .media_jobs
             .is_validated_upload_source(&intent.file_path)
@@ -172,11 +240,7 @@ impl YouTubeService {
                 "只能上传由应用验证完成的合并视频",
             ));
         }
-        let channel_id = self
-            .state
-            .snapshot()
-            .active_channel_id
-            .ok_or_else(|| AppError::new("AUTH_REQUIRED", "请先授权并选择 YouTube 频道"))?;
+        let channel_id = identity.channel_id.clone();
         let total = fs::metadata(&intent.file_path).map_err(service_io)?.len();
         let job = YouTubeJob {
             id: intent.job_id.clone(),
@@ -205,6 +269,7 @@ impl YouTubeService {
                 ));
             }
             ensure_upload_not_duplicate(&uploads, &job)?;
+            ensure_no_local_duplicate(&uploads, &intent, &job)?;
             uploads.push(StoredUpload {
                 job: job.clone(),
                 intent,
@@ -301,6 +366,11 @@ impl YouTubeService {
         let running = self.running.lock().map_err(state_lock_error)?;
         let mut uploads = self.uploads.lock().map_err(state_lock_error)?;
         let (next, removed_id) = uploads_without_job(&uploads, job_id)?;
+        if let Some(stored) = uploads.iter().find(|item| item.job.id == job_id) {
+            if let Some(video_id) = &stored.job.video_id {
+                self.remember_upload(stored, video_id)?;
+            }
+        }
         persist_uploads(&self.data_dir, &next)?;
         *uploads = next;
         if let Some(token) = running.get(job_id) {
@@ -486,6 +556,14 @@ impl YouTubeService {
             .await;
         match result {
             Ok(result) => {
+                // Record success before thumbnail work; even deleted queue rows retain identity.
+                let history_error = self.remember_upload(&stored, &result.video_id).err();
+                let _ = self.update_job(&job_id, |job| {
+                    job.video_id = Some(result.video_id.clone());
+                    job.youtube_url = Some(result.youtube_url.clone());
+                    job.actual_privacy_status = result.privacy_status;
+                    Ok(())
+                });
                 let thumbnail_state = self
                     .publish_thumbnail(&stored, &oauth, &result.video_id)
                     .await;
@@ -498,6 +576,11 @@ impl YouTubeService {
                             job.thumbnail_state = state;
                             job.status = YouTubeJobStatus::Completed;
                             job.percent = 100.0;
+                            if let Some(error) = &history_error {
+                                job.error_code = Some(error.code.clone());
+                                job.error_message =
+                                    Some(format!("视频已上传，但{}", error.message));
+                            }
                         }
                         Err(ref error) => {
                             job.thumbnail_state = ThumbnailState::Failed;
@@ -623,7 +706,23 @@ impl Drop for ThumbnailWorkspace {
 fn restore_upload_queue(uploads: &mut [StoredUpload]) -> bool {
     let mut changed = false;
     for item in uploads {
-        if item.job.status == YouTubeJobStatus::Pausing {
+        if item.job.video_id.is_some() && is_active(item.job.status) {
+            // Upload succeeded before shutdown; only thumbnail work may remain.
+            item.job.percent = 100.0;
+            item.job.uploaded_bytes = item.job.total_bytes;
+            if item.intent.cover_path.is_some() {
+                item.job.status = YouTubeJobStatus::VideoUploadedThumbnailFailed;
+                item.job.thumbnail_state = ThumbnailState::Failed;
+                item.job.error_code = Some("THUMBNAIL_INTERRUPTED".into());
+                item.job.error_message = Some("视频已上传，封面处理被中断，请仅重试封面".into());
+            } else {
+                item.job.status = YouTubeJobStatus::Completed;
+                item.job.thumbnail_state = ThumbnailState::Skipped;
+                item.job.error_code = None;
+                item.job.error_message = None;
+            }
+            changed = true;
+        } else if item.job.status == YouTubeJobStatus::Pausing {
             item.job.status = YouTubeJobStatus::Paused;
             changed = true;
         } else if is_active(item.job.status) {
@@ -653,6 +752,52 @@ fn reserve_uploads(
         reserved.push((item.job.id.clone(), token));
     }
     reserved
+}
+
+fn known_video(stored: &StoredUpload, video_id: &str) -> KnownVideo {
+    KnownVideo {
+        channel_id: stored.job.channel_id.clone(),
+        video_id: video_id.into(),
+        title: stored.job.title.clone(),
+        book_id: stored
+            .intent
+            .dedup
+            .as_ref()
+            .map(|d| d.book_id.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn ensure_no_local_duplicate(
+    uploads: &[StoredUpload],
+    intent: &UploadIntent,
+    job: &YouTubeJob,
+) -> Result<(), AppError> {
+    let Some(identity) = &intent.dedup else {
+        return Ok(());
+    };
+    if identity.allow_duplicate {
+        return Ok(());
+    }
+    let query = DuplicateQuery {
+        channel_id: job.channel_id.clone(),
+        title: intent.title.clone(),
+        book_id: identity.book_id.clone(),
+        drama_title: identity.drama_title.clone(),
+    };
+    if uploads.iter().any(|item| {
+        item.job.id != job.id
+            && (is_active(item.job.status)
+                || item.job.status == YouTubeJobStatus::Paused
+                || item.job.video_id.is_some())
+            && duplicates::match_reason(&query, &known_video(item, "")).is_some()
+    }) {
+        return Err(AppError::new(
+            "UPLOAD_DUPLICATE_QUEUED",
+            "当前频道的上传队列中已有同名或同剧任务，请先查看上传列表",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_upload_not_duplicate(uploads: &[StoredUpload], job: &YouTubeJob) -> Result<(), AppError> {
@@ -812,6 +957,7 @@ mod tests {
             },
             intent: UploadIntent {
                 job_id: id.into(),
+                dedup: None,
                 file_path: PathBuf::from(format!("/{id}.mp4")),
                 cover_path: None,
                 title: id.into(),
@@ -1015,5 +1161,72 @@ mod tests {
         );
         drop(second);
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn local_duplicate_guard_catches_concurrent_and_recently_completed_uploads() {
+        use super::super::duplicates::UploadIdentity;
+        let mut existing = queued("first");
+        existing.intent.dedup = Some(UploadIdentity {
+            channel_id: existing.job.channel_id.clone(),
+            book_id: "book-1".into(),
+            drama_title: "同一部剧".into(),
+            allow_duplicate: false,
+        });
+        let mut incoming = queued("second");
+        incoming.intent.dedup = existing.intent.dedup.clone();
+        incoming.intent.title = "改过的标题".into();
+        assert_eq!(
+            ensure_no_local_duplicate(&[existing.clone()], &incoming.intent, &incoming.job)
+                .unwrap_err()
+                .code,
+            "UPLOAD_DUPLICATE_QUEUED"
+        );
+        existing.job.status = YouTubeJobStatus::Completed;
+        existing.job.video_id = Some("just-uploaded".into());
+        assert!(
+            ensure_no_local_duplicate(&[existing.clone()], &incoming.intent, &incoming.job)
+                .is_err()
+        );
+        incoming.job.channel_id = "other-channel".into();
+        assert!(
+            ensure_no_local_duplicate(&[existing.clone()], &incoming.intent, &incoming.job).is_ok()
+        );
+        incoming.job.channel_id = existing.job.channel_id.clone();
+        incoming.intent.dedup.as_mut().unwrap().allow_duplicate = true;
+        assert!(
+            ensure_no_local_duplicate(&[existing.clone()], &incoming.intent, &incoming.job).is_ok()
+        );
+        // An override must still not enqueue the same active source file twice.
+        existing.job.status = YouTubeJobStatus::Uploading;
+        incoming.job.source_path = existing.job.source_path.clone();
+        assert_eq!(
+            ensure_upload_not_duplicate(&[existing], &incoming.job)
+                .unwrap_err()
+                .code,
+            "UPLOAD_DUPLICATE_ACTIVE"
+        );
+    }
+    #[test]
+    fn restart_never_requeues_a_video_that_already_has_a_youtube_id() {
+        for has_cover in [false, true] {
+            let mut stored = queued("finished-video");
+            stored.job.status = YouTubeJobStatus::Processing;
+            stored.job.video_id = Some("uploaded-video".into());
+            stored.job.youtube_url = Some("https://www.youtube.com/watch?v=uploaded-video".into());
+            stored.intent.cover_path = has_cover.then(|| PathBuf::from("/cover.png"));
+            let mut uploads = vec![stored];
+            assert!(restore_upload_queue(&mut uploads));
+            assert_eq!(
+                uploads[0].job.status,
+                if has_cover {
+                    YouTubeJobStatus::VideoUploadedThumbnailFailed
+                } else {
+                    YouTubeJobStatus::Completed
+                }
+            );
+            assert_eq!(uploads[0].job.video_id.as_deref(), Some("uploaded-video"));
+            assert_eq!(uploads[0].job.percent, 100.0);
+            assert!(reserve_uploads(&uploads, &mut HashMap::new()).is_empty());
+        }
     }
 }

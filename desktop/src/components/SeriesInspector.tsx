@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type { DefinitionPreference, EpisodeItem, SeriesItem } from "../types";
 import { Cover } from "./Cover";
+import { PlayIcon } from "./icons";
+import { OnlinePlayer } from "./OnlinePlayer";
 
 type SeriesInspectorProps = {
   series: SeriesItem | null;
@@ -27,6 +29,9 @@ export function SeriesInspector({
 }: SeriesInspectorProps) {
   const [rangeStart, setRangeStart] = useState(1);
   const [rangeEnd, setRangeEnd] = useState(1);
+  const [watching, setWatching] = useState<{ seriesId: string; itemId: string } | null>(null);
+
+  useEffect(() => { setWatching(null); }, [series?.seriesId]);
 
   useEffect(() => {
     setRangeStart(episodes[0]?.index || 1);
@@ -90,7 +95,7 @@ export function SeriesInspector({
             <span data-testid="metric-play">播放量 {countLabel(series.playCount)}</span>
             <span data-testid="metric-hot">热度量 {countLabel(series.hotCount)}</span>
             <span data-testid="metric-collect">收藏量 {countLabel(series.collectCount)}</span>
-            <span data-testid="metric-like">点赞量 {countLabel(series.likeCount)}</span>
+            <span data-testid="metric-comment" title="整部剧的评论总数，数据缺失时显示 —">评论量 {countLabel(series.commentCount)}</span>
           </>
         )}
       </section>
@@ -131,10 +136,17 @@ export function SeriesInspector({
         <button type="button" className="secondary-button" onClick={applyRange} disabled={!episodes.length}>选择范围</button>
       </div>
 
+      <button type="button" className="secondary-button watch-button" disabled={loading || !episodes.length} onClick={() => {
+        const episode = episodes.find((item) => selected.has(item.itemId)) || episodes[0];
+        setWatching({ seriesId: series.seriesId, itemId: episode.itemId });
+      }}>
+        <PlayIcon size={16} />在线观看
+      </button>
       <button type="button" className="primary-button enqueue-button" onClick={onEnqueue} disabled={!selectedIds.length}>
         加入下载队列（已选 {selectedIds.length} 集）
       </button>
       <p className="inspector-footnote">重复剧集会自动跳过 · 下载记录重启后保留</p>
+      {watching?.seriesId === series.seriesId && episodes.length > 0 ? <OnlinePlayer key={`${watching.seriesId}:${watching.itemId}`} title={series.title} episodes={episodes} initialItemId={watching.itemId} definition={definition} onClose={() => setWatching(null)} /> : null}
     </aside>
   );
 }

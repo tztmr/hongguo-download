@@ -208,13 +208,18 @@ export function downloadReducer(state: DownloadManagerState, action: DownloadAct
         item.status === "queued" ? { ...item, status: "running", error: undefined } : item,
       );
     case "update-progress":
-      return updateItem(state, action.itemId, (item) => ({
-        ...item,
-        status: "running",
-        received: action.received,
-        total: action.total,
-        percent: Math.max(0, Math.min(100, action.percent)),
-      }));
+      // Progress and command results use separate IPC paths. A late event must
+      // never revive a settled download or take a queued retry out of the queue.
+      return updateItem(state, action.itemId, (item) =>
+        item.status === "running"
+          ? {
+              ...item,
+              received: action.received,
+              total: action.total,
+              percent: Math.max(0, Math.min(100, action.percent)),
+            }
+          : item,
+      );
     case "mark-done":
       return removeIdleRequestedBatches(
         updateItem(state, action.itemId, (item) => ({

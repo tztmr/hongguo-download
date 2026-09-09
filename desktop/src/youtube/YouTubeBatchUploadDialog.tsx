@@ -1,0 +1,202 @@
+import { useEffect, useRef, useState } from "react";
+import type { DownloadBatch } from "../download/model";
+import { checkYouTubeUpload } from "./commands";
+import { YouTubeVideoLink } from "./YouTubeUploadJobs";
+import type { YouTubeDuplicateMatch, YouTubePrivacy, YouTubeUploadIntent } from "./types";
+
+export type YouTubeBatchUploadSource = { batch: DownloadBatch; sourcePath: string };
+
+type Props = {
+  sources: YouTubeBatchUploadSource[];
+  channelId: string;
+  onSubmit: (request: YouTubeUploadIntent) => Promise<unknown>;
+  onClose: () => void;
+  onQueued?: (count: number) => void;
+};
+
+type ReviewItem = YouTubeBatchUploadSource & {
+  jobId: string;
+  title: string;
+  description: string;
+  tags: string;
+  status: "pending" | "checking" | "submitting" | "queued" | "duplicate" | "error";
+  matches: YouTubeDuplicateMatch[];
+  error: string;
+};
+
+function reviewItem(source: YouTubeBatchUploadSource): ReviewItem {
+  const { batch } = source;
+  const categories = batch.series.categoryTags?.length
+    ? batch.series.categoryTags
+    : batch.series.category.split(/[·,，、/|]+/);
+  const tags = categories.map((tag) => tag.trim()).filter(Boolean);
+  const dramaTitle = batch.series.title.trim() || batch.title.trim();
+  return {
+    ...source,
+    jobId: `youtube-${crypto.randomUUID()}`,
+    title: batch.title.slice(0, 100),
+    description: (batch.series.abstract || batch.title).slice(0, 5000),
+    tags: [...new Set([...(tags.length ? tags : ["短剧"]), dramaTitle].filter(Boolean))].join(", "),
+    status: "pending", matches: [], error: "",
+  };
+}
+
+export function YouTubeBatchUploadDialog(props: Props) {
+  // Equivalent parent rerenders preserve progress; a different target cancels the old session.
+  const sessionKey = JSON.stringify([props.channelId, props.sources.map(({ batch, sourcePath }) =>
+    [batch.id, batch.bookId, batch.series.title, sourcePath])]);
+  return <BatchUploadReview key={sessionKey} {...props} />;
+}
+
+function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: Props) {
+  const [items, setItems] = useState(() => sources.map(reviewItem));
+  const [privacy, setPrivacy] = useState<YouTubePrivacy>("private");
+  const [categoryId, setCategoryId] = useState("1");
+  const [madeForKids, setMadeForKids] = useState(false);
+  const [synthetic, setSynthetic] = useState(true);
+  const [audienceConfirmed, setAudienceConfirmed] = useState(true);
+  const [syntheticConfirmed, setSyntheticConfirmed] = useState(true);
+  const [publishConfirmed, setPublishConfirmed] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const active = useRef(true);
+  const inFlight = useRef(false);
+  const queuedIds = useRef(new Set<string>());
+  const confirmed = audienceConfirmed && syntheticConfirmed && publishConfirmed && !!channelId.trim();
+  const remaining = items.filter((item) => item.status === "pending" || item.status === "error").length;
+
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+
+  function close() {
+    if (!active.current) return;
+    active.current = false;
+    onClose();
+  }
+
+  function update(jobId: string, patch: Partial<ReviewItem>) {
+    setItems((current) => current.map((item) => item.jobId === jobId ? { ...item, ...patch } : item));
+  }
+
+  function edit(jobId: string, patch: Pick<Partial<ReviewItem>, "title" | "description" | "tags">) {
+    if (inFlight.current || queuedIds.current.has(jobId)) return;
+    update(jobId, { ...patch, status: "pending", matches: [], error: "" });
+  }
+
+  async function queue(overrideJobId?: string) {
+    if (!active.current || inFlight.current || !confirmed) return;
+    const targets = items.filter((item) => !queuedIds.current.has(item.jobId) && (overrideJobId
+      ? item.jobId === overrideJobId && item.status === "duplicate"
+      : item.status === "pending" || item.status === "error"));
+    if (!targets.length) return;
+    inFlight.current = true;
+    setBusy(true);
+    let queuedCount = 0;
+    try {
+      for (const item of targets) {
+        if (!active.current) break;
+        const title = item.title.trim();
+        if (!title) {
+          update(item.jobId, { status: "error", error: "请填写 YouTube 标题", matches: [] });
+          continue;
+        }
+        // Consent applies only to this explicit attempt. Every retry performs a fresh check.
+        const allowDuplicate = item.jobId === overrideJobId;
+        const request: YouTubeUploadIntent = {
+          jobId: item.jobId, filePath: item.sourcePath, coverPath: null,
+          title, description: item.description,
+          tags: item.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
+          categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
+          containsSyntheticMedia: synthetic, audienceConfirmed,
+          syntheticMediaConfirmed: syntheticConfirmed, publishConfirmed,
+          dedup: { channelId, bookId: item.batch.bookId, dramaTitle: item.batch.series.title, allowDuplicate },
+        };
+        update(item.jobId, { status: "checking", matches: [], error: "" });
+        try {
+          const matches = await checkYouTubeUpload({ channelId, title, bookId: item.batch.bookId, dramaTitle: item.batch.series.title });
+          if (!active.current) break;
+          if (matches.length && !allowDuplicate) {
+            update(item.jobId, { status: "duplicate", matches });
+            continue;
+          }
+          update(item.jobId, { status: "submitting" });
+          await onSubmit(request);
+          // Record acceptance before releasing the busy guard, even if dismissal occurred.
+          queuedIds.current.add(item.jobId);
+          queuedCount += 1;
+          if (!active.current) break;
+          update(item.jobId, { status: "queued" });
+        } catch (reason) {
+          if (!active.current) break;
+          const message = reason && typeof reason === "object" && "message" in reason
+            ? String(reason.message) : typeof reason === "string" ? reason : "查重或提交失败，请重试";
+          update(item.jobId, { status: "error", error: message, matches: [] });
+        }
+      }
+    } finally {
+      inFlight.current = false;
+      if (active.current) {
+        setBusy(false);
+        // Per-attempt count: successful items are never included again on retry.
+        if (queuedCount) onQueued?.(queuedCount);
+      }
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation">
+      <section className="merge-dialog youtube-upload-dialog youtube-batch-upload-dialog" role="dialog" aria-modal="true" aria-label="批量上传到 YouTube">
+        <header>
+          <div><span className="title-marker" /><h2>批量上传到 YouTube</h2></div>
+          <button type="button" className="icon-button" aria-label="关闭" onClick={close}>×</button>
+        </header>
+        <p>共 {items.length} 部剧。逐项检查当前频道，重复项默认跳过；失败项可修正后重新开始。</p>
+        <fieldset className="youtube-upload-fields" disabled={busy}>
+          <div className="youtube-form-grid">
+            <label>类别<select aria-label="YouTube 类别" value={categoryId} onChange={(event) => setCategoryId(event.target.value)}><option value="1">电影/动漫</option><option value="24">娱乐</option></select></label>
+            <label>可见性<select aria-label="YouTube 可见性" value={privacy} onChange={(event) => setPrivacy(event.target.value as YouTubePrivacy)}><option value="private">私享</option><option value="unlisted">不公开</option><option value="public">公开</option></select></label>
+            <label>儿童受众<select aria-label="儿童受众" value={madeForKids ? "yes" : "no"} onChange={(event) => setMadeForKids(event.target.value === "yes")}><option value="no">不是面向儿童</option><option value="yes">面向儿童</option></select></label>
+            <label>合成内容<select aria-label="合成内容" value={synthetic ? "yes" : "no"} onChange={(event) => setSynthetic(event.target.value === "yes")}><option value="no">不包含</option><option value="yes">包含 AI/合成内容</option></select></label>
+          </div>
+          <div className="upload-confirmations">
+            <label><input type="checkbox" checked={audienceConfirmed} onChange={(event) => setAudienceConfirmed(event.target.checked)} />我已确认儿童受众设置准确</label>
+            <label><input type="checkbox" checked={syntheticConfirmed} onChange={(event) => setSyntheticConfirmed(event.target.checked)} />我已确认合成内容披露准确</label>
+            <label><input type="checkbox" checked={publishConfirmed} onChange={(event) => setPublishConfirmed(event.target.checked)} />我确认将这些视频发布到所选 YouTube 频道</label>
+          </div>
+        </fieldset>
+        <div className="youtube-batch-review-list">
+          {items.map((item) => (
+            <section className="youtube-batch-review-item" role="group" aria-label={item.batch.series.title || item.batch.title} key={item.jobId}>
+              <h3>{item.batch.series.title || item.batch.title}</h3>
+              <p className="dialog-source" title={item.sourcePath}>上传文件：{item.sourcePath}</p>
+              <fieldset className="youtube-upload-fields" disabled={busy || item.status === "queued"}>
+                <label>标题<input aria-label="YouTube 标题" value={item.title} maxLength={100} onChange={(event) => edit(item.jobId, { title: event.target.value })} /></label>
+                <label>简介<textarea aria-label="YouTube 简介" value={item.description} maxLength={5000} onChange={(event) => edit(item.jobId, { description: event.target.value })} /></label>
+                <label>标签<input aria-label="YouTube 标签" value={item.tags} placeholder="多个标签用逗号分隔" onChange={(event) => edit(item.jobId, { tags: event.target.value })} /></label>
+              </fieldset>
+              <p role="status">{{ pending: "待检查", checking: "正在查重…", submitting: "正在加入上传队列…", queued: "已加入上传队列", duplicate: "已跳过重复项", error: "失败，可重试" }[item.status]}</p>
+              {item.status === "error" ? <p className="warning-banner" role="alert">{item.error}</p> : null}
+              {item.status === "duplicate" ? (
+                <div className="youtube-duplicate-warning" role="alert">
+                  <strong>发现重复或可能重复的影片，已跳过本项</strong>
+                  <ul>{item.matches.map((match, index) => <li key={`${match.videoId}-${index}`}>
+                    <span>{match.title}</span>{" · "}
+                    <span>{{ sameTitle: "标题相同", sameDrama: "同一部剧的上传记录", similarTitle: "剧名相近" }[match.reason]}</span>{" "}
+                    <YouTubeVideoLink url={match.youtubeUrl} />
+                  </li>)}</ul>
+                  <button type="button" className="secondary-button" disabled={busy || !confirmed} onClick={() => void queue(item.jobId)}>仍然上传</button>
+                </div>
+              ) : null}
+            </section>
+          ))}
+        </div>
+        <p role="status">已入队 {items.filter((item) => item.status === "queued").length} · 重复跳过 {items.filter((item) => item.status === "duplicate").length} · 失败 {items.filter((item) => item.status === "error").length}</p>
+        <footer>
+          <button type="button" className="secondary-button" onClick={close}>取消</button>
+          <button type="button" className="primary-button" disabled={busy || !confirmed || !remaining} onClick={() => void queue()}>开始批量上传</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
