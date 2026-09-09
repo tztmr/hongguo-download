@@ -48,6 +48,20 @@ function setup(selected = sources) {
 }
 
 describe("YouTubeBatchUploadDialog", () => {
+  it("requires choices for ambiguous sources and uploads each selected version", async () => {
+    const view = setup(sources.map((source) => ({ ...source, sourceOptions: [
+      { kind: "merged" as const, path: source.sourcePath },
+      { kind: "noBackgroundMusic" as const, path: source.sourcePath.replace(".mp4", "-clean.mp4") },
+    ] })));
+    expect(view.getByRole("button", { name: "开始批量上传" })).toHaveProperty("disabled", true);
+    fireEvent.click(view.row("都市归来").getByRole("radio", { name: "去背景音乐视频" }));
+    expect(view.getByRole("button", { name: "开始批量上传" })).toHaveProperty("disabled", true);
+    fireEvent.click(view.row("仙侠奇缘").getByRole("radio", { name: "合并视频（保留背景音乐）" }));
+    view.start();
+    await waitFor(() => expect(view.props.onSubmit).toHaveBeenCalledTimes(2));
+    expect(view.props.onSubmit.mock.calls.map(([request]) => request.filePath)).toEqual(["/Downloads/都市全集-clean.mp4", "/Downloads/仙侠全集.mp4"]);
+  });
+
   it("reviews every source and queues unique jobs sequentially with single-dialog defaults", async () => {
     const events: string[] = [];
     checkUpload.mockImplementation(async (query) => { events.push(`check:${query.bookId}`); return []; });

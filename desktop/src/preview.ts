@@ -197,6 +197,15 @@ export const previewMediaJobs: MediaJob[] = [
     errorMessage: null,
     completionNotifiedAt: 1,
   },
+  {
+    id: "preview-media-clean-source", dedupeKey: "preview-clean-source", kind: "separateBackgroundMusic",
+    status: "completed", stage: "completed", percent: 100,
+    aiRequest: { title: "闪婚后大佬每天都在追", scope: "merged", model: "htdemucs" },
+    inputs: [{ path: "/Users/edking/Downloads/红果下载/preview-batch-complete/合并视频/闪婚后大佬每天都在追.mp4", sizeBytes: 12 }],
+    outputPath: "/Users/edking/Downloads/红果下载/preview-batch-complete/音频分离/去背景音乐.mp4",
+    outputs: [{ episodeIndex: 1, kind: "noBackgroundMusicVideo", path: "/Users/edking/Downloads/红果下载/preview-batch-complete/音频分离/去背景音乐.mp4" }],
+    errorCode: null, errorMessage: null, completionNotifiedAt: 1,
+  },
 ];
 
 export const previewYouTubeModel: YouTubeModel = {

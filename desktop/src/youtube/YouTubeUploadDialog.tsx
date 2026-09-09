@@ -4,10 +4,13 @@ import type { DownloadBatch } from "../download/model";
 import { checkYouTubeUpload } from "./commands";
 import { YouTubeVideoLink } from "./YouTubeUploadJobs";
 import type { YouTubeDuplicateMatch, YouTubePrivacy, YouTubeUploadIntent } from "./types";
+import { UploadSourcePicker } from "./UploadSourcePicker";
+import { availableUploadSources, type UploadVideoSource } from "./uploadSources";
 
 type Props = {
   batch: DownloadBatch;
   sourcePath: string;
+  sourceOptions?: UploadVideoSource[];
   channelId: string;
   onClose: () => void;
   onSubmit: (request: YouTubeUploadIntent) => void | Promise<unknown>;
@@ -24,7 +27,11 @@ function youtubeTags(batch: DownloadBatch) {
   return [...new Set([...(tags.length ? tags : ["短剧"]), dramaTitle].filter(Boolean))];
 }
 
-export function YouTubeUploadDialog({ batch, sourcePath, channelId, onClose, onSubmit }: Props) {
+export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelId, onClose, onSubmit }: Props) {
+  const sources = availableUploadSources(sourcePath, sourceOptions);
+  const sourceKey = JSON.stringify([batch.id, sourcePath, sources]);
+  const [choice, setChoice] = useState({ key: sourceKey, path: "" });
+  const selectedSourcePath = sources.length === 1 ? sources[0].path : choice.key === sourceKey ? choice.path : "";
   const [title, setTitle] = useState(batch.title.slice(0, 100));
   const [description, setDescription] = useState((batch.series.abstract || batch.title).slice(0, 5000));
   const [tags, setTags] = useState(youtubeTags(batch).join(", "));
@@ -36,7 +43,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, channelId, onClose, onS
   const [audienceConfirmed, setAudienceConfirmed] = useState(true);
   const [syntheticConfirmed, setSyntheticConfirmed] = useState(true);
   const [publishConfirmed, setPublishConfirmed] = useState(true);
-  const canSubmit = title.trim().length > 0 && audienceConfirmed && syntheticConfirmed && publishConfirmed;
+  const canSubmit = Boolean(selectedSourcePath) && title.trim().length > 0 && audienceConfirmed && syntheticConfirmed && publishConfirmed;
 
   const [phase, setPhase] = useState<"idle" | "checking" | "submitting">("idle");
   const [matches, setMatches] = useState<YouTubeDuplicateMatch[]>([]);
@@ -51,7 +58,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, channelId, onClose, onS
     setError("");
     setPhase("idle");
     return () => { generation.current += 1; };
-  }, [title, channelId, sourcePath]);
+  }, [title, channelId, sourcePath, selectedSourcePath, sourceKey]);
 
   function close() {
     generation.current += 1;
@@ -66,7 +73,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, channelId, onClose, onS
     setPhase(allowDuplicate ? "submitting" : "checking");
     const request: YouTubeUploadIntent = {
       jobId: `youtube-${Date.now()}`,
-      filePath: sourcePath, coverPath, title: title.trim(), description,
+      filePath: selectedSourcePath, coverPath, title: title.trim(), description,
       tags: tags.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
       categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
       containsSyntheticMedia: synthetic, audienceConfirmed, syntheticMediaConfirmed: syntheticConfirmed, publishConfirmed,
@@ -99,7 +106,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, channelId, onClose, onS
     <div className="dialog-backdrop" role="presentation">
       <section className="merge-dialog youtube-upload-dialog" role="dialog" aria-modal="true" aria-label="上传到 YouTube">
         <header><div><span className="title-marker" /><h2>上传到 YouTube</h2></div><button type="button" className="icon-button" aria-label="关闭" disabled={phase === "submitting"} onClick={close}>×</button></header>
-        <p className="dialog-source">上传文件：{sourcePath}</p>
+        <UploadSourcePicker sources={sources} value={selectedSourcePath} disabled={busy} onChange={(path) => { if (!busy) setChoice({ key: sourceKey, path }); }} />
         <fieldset className="youtube-upload-fields" disabled={busy}>
         <label>标题<input aria-label="YouTube 标题" value={title} maxLength={100} onChange={(event) => setTitle(event.target.value)} /></label>
         <label>简介<textarea aria-label="YouTube 简介" value={description} maxLength={5000} onChange={(event) => setDescription(event.target.value)} /></label>

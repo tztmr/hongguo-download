@@ -374,9 +374,31 @@ describe("YouTube separated upload source", () => {
     loading: false, busy: false, startUpload: vi.fn(),
   } as unknown as YouTubeModel;
 
+  it("lets the merge-row upload choose the processed file and groups both selected tasks into one review", async () => {
+    const merge = mediaFixture().jobs[2];
+    const separation = { ...merge, id: "clean", kind: "separateBackgroundMusic" as const,
+      aiRequest: { title: "女子爱财，取之有道", scope: "merged" as const, model: "htdemucs" as const, bookId: "book-b", seriesRoot: "/Downloads" },
+      inputs: [{ path: merge.outputPath!, sizeBytes: 100 }],
+      outputs: [{ episodeIndex: 1, kind: "noBackgroundMusicVideo" as const, path: "/Downloads/音频分离/去背景音乐.mp4" }] };
+    const startUpload = vi.fn().mockResolvedValue({});
+    const view = render(<DownloadManagerPage manager={managerFixture()} media={mediaFixture({ jobs: [merge, separation] })}
+      youtube={{ ...youtube, startUpload }} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    fireEvent.click(view.getByRole("tab", { name: "媒体处理" }));
+    fireEvent.click(within(view.getAllByTestId("media-job-row")[0]).getByRole("button", { name: "上传 YouTube" }));
+    const dialog = within(view.getByRole("dialog", { name: "上传到 YouTube" }));
+    expect(dialog.getByRole("button", { name: "确认上传" })).toHaveProperty("disabled", true);
+    fireEvent.click(dialog.getByRole("radio", { name: "去背景音乐视频" }));
+    fireEvent.click(dialog.getByRole("button", { name: "确认上传" }));
+    await waitFor(() => expect(startUpload).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/Downloads/音频分离/去背景音乐.mp4" })));
+    await waitFor(() => expect(view.queryByRole("dialog")).toBeNull());
+    fireEvent.click(view.getByRole("checkbox", { name: "全选当前可见媒体任务" }));
+    fireEvent.click(view.getByRole("button", { name: "批量上传 YouTube" }));
+    expect(within(view.getByRole("dialog", { name: "批量上传到 YouTube" })).getAllByRole("radio")).toHaveLength(2);
+  });
+
   it.each([
     ["completed merged separation after merge record deletion", "merged", "completed", "book-b", "/Downloads", true],
-    ["prefers separated MP4 over the original merge", "merged", "completed", "book-b", "/Downloads", true, true],
+    ["offers both video versions when a matching merge is retained", "merged", "completed", "book-b", "/Downloads", true, true],
     ["legacy separation linked to retained merge", "merged", "completed", undefined, undefined, true, true],
     ["episode separation", "episodes", "completed", "book-b", "/Downloads", false],
     ["unfinished separation", "merged", "running", "book-b", "/Downloads", false],
@@ -397,6 +419,10 @@ describe("YouTube separated upload source", () => {
     await waitFor(() => expect(button.disabled).toBe(!enabled));
     if (enabled) {
       fireEvent.click(button);
+      if (retainMerge) {
+        expect(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByRole("button", { name: "确认上传" })).toHaveProperty("disabled", true);
+        fireEvent.click(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByRole("radio", { name: "去背景音乐视频" }));
+      }
       expect(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByText("上传文件：/Downloads/音频分离/去背景音乐.mp4")).toBeTruthy();
       expect(youtube.startUpload).not.toHaveBeenCalled();
     }

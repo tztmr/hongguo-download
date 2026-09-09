@@ -3,8 +3,10 @@ import type { DownloadBatch } from "../download/model";
 import { checkYouTubeUpload } from "./commands";
 import { YouTubeVideoLink } from "./YouTubeUploadJobs";
 import type { YouTubeDuplicateMatch, YouTubePrivacy, YouTubeUploadIntent } from "./types";
+import { UploadSourcePicker } from "./UploadSourcePicker";
+import { availableUploadSources, type UploadVideoSource } from "./uploadSources";
 
-export type YouTubeBatchUploadSource = { batch: DownloadBatch; sourcePath: string };
+export type YouTubeBatchUploadSource = { batch: DownloadBatch; sourcePath: string; sourceOptions?: UploadVideoSource[] };
 
 type Props = {
   sources: YouTubeBatchUploadSource[];
@@ -16,6 +18,7 @@ type Props = {
 
 type ReviewItem = YouTubeBatchUploadSource & {
   jobId: string;
+  selectedSourcePath: string;
   title: string;
   description: string;
   tags: string;
@@ -33,6 +36,8 @@ function reviewItem(source: YouTubeBatchUploadSource): ReviewItem {
   const dramaTitle = batch.series.title.trim() || batch.title.trim();
   return {
     ...source,
+    selectedSourcePath: availableUploadSources(source.sourcePath, source.sourceOptions).length === 1
+      ? availableUploadSources(source.sourcePath, source.sourceOptions)[0].path : "",
     jobId: `youtube-${crypto.randomUUID()}`,
     title: batch.title.slice(0, 100),
     description: (batch.series.abstract || batch.title).slice(0, 5000),
@@ -43,8 +48,8 @@ function reviewItem(source: YouTubeBatchUploadSource): ReviewItem {
 
 export function YouTubeBatchUploadDialog(props: Props) {
   // Equivalent parent rerenders preserve progress; a different target cancels the old session.
-  const sessionKey = JSON.stringify([props.channelId, props.sources.map(({ batch, sourcePath }) =>
-    [batch.id, batch.bookId, batch.series.title, sourcePath])]);
+  const sessionKey = JSON.stringify([props.channelId, props.sources.map(({ batch, sourcePath, sourceOptions }) =>
+    [batch.id, batch.bookId, batch.series.title, sourcePath, sourceOptions])]);
   return <BatchUploadReview key={sessionKey} {...props} />;
 }
 
@@ -63,6 +68,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
   const queuedIds = useRef(new Set<string>());
   const confirmed = audienceConfirmed && syntheticConfirmed && publishConfirmed && !!channelId.trim();
   const remaining = items.filter((item) => item.status === "pending" || item.status === "error").length;
+  const missingChoices = items.filter((item) => item.status !== "queued" && !item.selectedSourcePath).length;
 
   useEffect(() => {
     active.current = true;
@@ -79,17 +85,19 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
     setItems((current) => current.map((item) => item.jobId === jobId ? { ...item, ...patch } : item));
   }
 
-  function edit(jobId: string, patch: Pick<Partial<ReviewItem>, "title" | "description" | "tags">) {
+  function edit(jobId: string, patch: Pick<Partial<ReviewItem>, "title" | "description" | "tags" | "selectedSourcePath">) {
     if (inFlight.current || queuedIds.current.has(jobId)) return;
     update(jobId, { ...patch, status: "pending", matches: [], error: "" });
   }
 
   async function queue(overrideJobId?: string) {
     if (!active.current || inFlight.current || !confirmed) return;
+    if (!overrideJobId && missingChoices) return;
     const targets = items.filter((item) => !queuedIds.current.has(item.jobId) && (overrideJobId
       ? item.jobId === overrideJobId && item.status === "duplicate"
       : item.status === "pending" || item.status === "error"));
     if (!targets.length) return;
+    if (targets.some((item) => !item.selectedSourcePath)) return;
     inFlight.current = true;
     setBusy(true);
     let queuedCount = 0;
@@ -104,7 +112,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
         // Consent applies only to this explicit attempt. Every retry performs a fresh check.
         const allowDuplicate = item.jobId === overrideJobId;
         const request: YouTubeUploadIntent = {
-          jobId: item.jobId, filePath: item.sourcePath, coverPath: null,
+          jobId: item.jobId, filePath: item.selectedSourcePath, coverPath: null,
           title, description: item.description,
           tags: item.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
           categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
@@ -169,7 +177,8 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
           {items.map((item) => (
             <section className="youtube-batch-review-item" role="group" aria-label={item.batch.series.title || item.batch.title} key={item.jobId}>
               <h3>{item.batch.series.title || item.batch.title}</h3>
-              <p className="dialog-source" title={item.sourcePath}>上传文件：{item.sourcePath}</p>
+              <UploadSourcePicker sources={availableUploadSources(item.sourcePath, item.sourceOptions)} value={item.selectedSourcePath}
+                disabled={busy || item.status === "queued"} onChange={(path) => edit(item.jobId, { selectedSourcePath: path })} />
               <fieldset className="youtube-upload-fields" disabled={busy || item.status === "queued"}>
                 <label>标题<input aria-label="YouTube 标题" value={item.title} maxLength={100} onChange={(event) => edit(item.jobId, { title: event.target.value })} /></label>
                 <label>简介<textarea aria-label="YouTube 简介" value={item.description} maxLength={5000} onChange={(event) => edit(item.jobId, { description: event.target.value })} /></label>
@@ -192,9 +201,10 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
           ))}
         </div>
         <p role="status">已入队 {items.filter((item) => item.status === "queued").length} · 重复跳过 {items.filter((item) => item.status === "duplicate").length} · 失败 {items.filter((item) => item.status === "error").length}</p>
+        {missingChoices ? <p className="source-choice-required" role="status">还有 {missingChoices} 部剧需要选择上传视频版本。</p> : null}
         <footer>
           <button type="button" className="secondary-button" onClick={close}>取消</button>
-          <button type="button" className="primary-button" disabled={busy || !confirmed || !remaining} onClick={() => void queue()}>开始批量上传</button>
+          <button type="button" className="primary-button" disabled={busy || !confirmed || !remaining || Boolean(missingChoices)} onClick={() => void queue()}>开始批量上传</button>
         </footer>
       </section>
     </div>

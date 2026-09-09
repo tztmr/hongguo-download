@@ -17,6 +17,7 @@ import { MediaScopeDialog } from "./MediaScopeDialog";
 import { MediaJobsPanel } from "./MediaJobsPanel";
 import { BatchMergeDialog, type BatchMergeTarget } from "./BatchMergeDialog";
 import { YouTubeBatchUploadDialog, type YouTubeBatchUploadSource } from "../youtube/YouTubeBatchUploadDialog";
+import { getUploadSourceOptions } from "../youtube/uploadSources";
 
 type ManagerSection = "downloads" | "media" | "youtube";
 
@@ -344,7 +345,7 @@ export function DownloadManagerPage({
           mergeTargets.push({ batch, reason: exists ? "已有合并视频，已跳过" : undefined });
           if (kind === "upload") {
             const sourcePath = noBackgroundPathFor(batch, media.jobs, savedMerge) || savedMerge;
-            if (sourcePath) uploadSources.push({ batch, sourcePath });
+            if (sourcePath) uploadSources.push({ batch, sourcePath, sourceOptions: getUploadSourceOptions(sourcePath, media.jobs, savedMerge) });
             else skipped.push(`《${batch.title}》尚无合并或分离成片`);
           }
         } catch {
@@ -557,9 +558,12 @@ export function DownloadManagerPage({
           onBulkUploadToYouTube={(sources) => {
             const drafts = sources.flatMap(({ job, sourcePath }) => {
               const batch = batchForMediaJob(job, manager.state.batches, media.jobs);
-              return batch ? [{ batch, sourcePath }] : [];
+              return batch ? [{ batch, sourcePath, sourceOptions: getUploadSourceOptions(sourcePath, media.jobs) }] : [];
             });
-            if (drafts.length) setBulkUploadSources(drafts);
+            const unique = drafts.filter((draft, index) => !drafts.slice(0, index).some((earlier) => earlier.batch.id === draft.batch.id
+              && earlier.sourceOptions.length === draft.sourceOptions.length
+              && earlier.sourceOptions.every((option) => draft.sourceOptions.some((other) => sameFsPath(option.path, other.path)))));
+            if (unique.length) setBulkUploadSources(unique);
           }}
         />
       </div>
@@ -608,6 +612,8 @@ export function DownloadManagerPage({
         <YouTubeUploadDialog
           batch={uploadBatch}
           sourcePath={uploadDraft.sourcePath}
+          sourceOptions={getUploadSourceOptions(uploadDraft.sourcePath, media.jobs,
+            mergedPathFor(uploadBatch, media.jobs) || (selectedBatch?.id === uploadBatch.id ? selectedMergedVideoPath : undefined))}
           channelId={youtube.activeChannelId || ""}
           onClose={() => setUploadDraft(null)}
           onSubmit={async (request: YouTubeUploadIntent) => {

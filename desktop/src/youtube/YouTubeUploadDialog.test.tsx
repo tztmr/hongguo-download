@@ -14,6 +14,35 @@ const batch: DownloadBatch = {
 };
 
 describe("YouTubeUploadDialog", () => {
+  it("requires an explicit video version and submits the chosen file", async () => {
+    const submit = vi.fn();
+    const view = render(<YouTubeUploadDialog batch={batch} sourcePath="/Downloads/merged.mp4"
+      sourceOptions={[{ kind: "merged", path: "/Downloads/merged.mp4" }, { kind: "noBackgroundMusic", path: "/Downloads/clean.mp4" }]}
+      channelId="channel-a" onClose={vi.fn()} onSubmit={submit} />);
+    expect(view.getByRole("button", { name: "确认上传" })).toHaveProperty("disabled", true);
+    expect(view.getAllByRole("radio").every((radio) => !(radio as HTMLInputElement).checked)).toBe(true);
+    fireEvent.click(view.getByRole("radio", { name: "去背景音乐视频" }));
+    expect(view.getByText("上传文件：/Downloads/clean.mp4")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "确认上传" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/Downloads/clean.mp4" })));
+  });
+
+  it("clears a previous duplicate override when a different video is chosen", async () => {
+    checkUpload.mockResolvedValueOnce([{ title: "AI 漫剧", videoId: "existing", youtubeUrl: "https://www.youtube.com/watch?v=existing", reason: "sameDrama" }]);
+    const submit = vi.fn();
+    const view = render(<YouTubeUploadDialog batch={batch} sourcePath="/Downloads/merged.mp4"
+      sourceOptions={[{ kind: "merged", path: "/Downloads/merged.mp4" }, { kind: "noBackgroundMusic", path: "/Downloads/clean.mp4" }]}
+      channelId="channel-a" onClose={vi.fn()} onSubmit={submit} />);
+    fireEvent.click(view.getByRole("radio", { name: "去背景音乐视频" }));
+    fireEvent.click(view.getByRole("button", { name: "确认上传" }));
+    await waitFor(() => expect(view.getByRole("button", { name: "仍然上传" })).toBeTruthy());
+    fireEvent.click(view.getByRole("radio", { name: "合并视频（保留背景音乐）" }));
+    expect(view.queryByRole("button", { name: "仍然上传" })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "确认上传" }));
+    await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/Downloads/merged.mp4", dedup: expect.objectContaining({ allowDuplicate: false }) })));
+    expect(checkUpload).toHaveBeenCalledTimes(2);
+  });
+
   it("defaults to film and animation, synthetic content, and all three confirmations", async () => {
     const submit = vi.fn();
     const ordinaryBatch = {
