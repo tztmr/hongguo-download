@@ -20,6 +20,8 @@ from core.duanju_feeds import (
     build_rank_url,
     build_subscribe_url,
     parse_batch_metrics,
+    rank_selector,
+    _normalize_video,
     parse_rank_page as parse_captured_rank_page,
     parse_subscribe_page,
 )
@@ -63,13 +65,6 @@ RANK_CONTENT_TYPE_CODES = {
     'comic_series_rank': 1004,
 }
 AI_VIDEO_CATEGORY_TYPE = 'ai_video'
-# 榜单 cell 的真人剧筛选项不是业务接口里的 playlet，而是上游 selector 的 human。
-RANK_SELECTOR_TYPES = {
-    'all': 'all',
-    'playlet': 'human',
-    'comic_series_rank': 'comic_series_rank',
-    'ai_playlet': 'ai_playlet',
-}
 RANK_BOARDS = dict(CAPTURED_RANK_BOARDS)
 DOWNLOAD_TIMEOUT = 120.0
 MIN_VIDEO_BYTES = 1024
@@ -140,21 +135,7 @@ def _series_item(video: dict) -> dict:
             'label': content,
             'schema': schema,
         })
-    return {
-        'series_id': str(video.get('series_id') or ''),
-        'book_id': str(video.get('series_id') or ''),
-        'title': video.get('title') or detail.get('series_title') or '',
-        'cover': video.get('cover') or detail.get('series_cover') or '',
-        'first_vid': str(video.get('vid') or ''),
-        'episode_count': video.get('episode_cnt') or detail.get('episode_cnt') or 0,
-        'content_type': int(video.get('content_type') or detail.get('content_type') or 1),
-        'duration': video.get('duration') or 0,
-        'abstract': video.get('video_desc') or detail.get('series_intro') or '',
-        'score': video.get('score') or '',
-        'category': video.get('sub_title') or '',
-        'author': video.get('copyright') or '',
-        'rank_tags': rank_tags,
-    }
+    return {**_normalize_video(video, None), 'rank_tags': rank_tags}
 
 
 def _series_metadata_body(series_id: str, content_type: int) -> str:
@@ -423,7 +404,7 @@ async def _fetch_new_release_page(
             logger.warning('新剧指标补充暂不可用，保留榜单已知信息')
             metrics = {}
         parsed['items'] = [
-            {**item, **metrics.get(item['series_id'], {}), 'release_type': release_type}
+            {**item, **{key: value for key, value in metrics.get(item['series_id'], {}).items() if value is not None}, 'release_type': release_type}
             for item in parsed['items']
         ]
     items = parsed['items']
@@ -1318,7 +1299,7 @@ async def duanju_rank(
             preferred_device_id = str((upstream_state or {}).get('device_id') or '')
             selector_type = str(
                 (upstream_state or {}).get('selector_type')
-                or RANK_SELECTOR_TYPES[release_type]
+                or rank_selector(release_type, board)
             )
 
             parsed = await _fetch_rank_feed_page(
@@ -1352,7 +1333,7 @@ async def duanju_rank(
                     continue
                 seen.add(series_id)
                 seen_ids.append(series_id)
-                available.append({**item, 'release_type': '' if release_type == 'all' else release_type})
+                available.append({**item, 'release_type': item.get('release_type', '') if release_type == 'all' else release_type})
             upstream_state = {
                 'offset': next_offset,
                 'session_id': str(parsed.get('session_id') or ''),
@@ -1389,6 +1370,7 @@ async def duanju_rank(
         'has_more': has_more,
         'board': board,
         'board_name': RANK_BOARDS[board],
+        'source_note': ('上游暂无独立的该类型榜单，以下为综合榜中符合类型的剧目；数量以综合榜实际收录为准。' if release_type != 'all' and (upstream_state or {}).get('selector_type') == 'all' else ''),
         'release_type': release_type,
         'boards': [
             {'id': board_id, 'name': name}

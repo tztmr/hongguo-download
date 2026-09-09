@@ -15,7 +15,7 @@ export function releaseCategoryNames(item: SeriesItem) {
 
   for (const raw of source) {
     const label = raw.trim();
-    if (!label || TYPE_LABELS.has(label)) continue;
+    if (!label || TYPE_LABELS.has(label) || /^(?:(?:全|共|更新至|更新到|已更新|第)\s*)?\d+\s*(?:集|话|季)(?:全)?$/.test(label) || ["完结", "连载中"].includes(label)) continue;
     add(label);
     if (CAMPUS_ALIASES.some((alias) => label.includes(alias))) {
       add("校园");

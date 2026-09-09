@@ -200,3 +200,50 @@ class CapturedFeedProtocolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class FeedDisplayRegressionTests(unittest.TestCase):
+    def test_type_specific_rank_board_ids(self):
+        for kind, board, selected, sub in [
+            ('comic_series_rank', 'ranklist_hot_sc', 'comic_series_rank', 'comic_series_hot_rank'),
+            ('ai_playlet', 'ranklist_new_rank_sc', 'ai_playlet', 'ai_playlet_new_rank'),
+            ('human', 'ranklist_followed', 'human', 'human_followed'),
+            ('comic_series_rank', 'ranklist_followed', 'all', 'ranklist_followed'),
+        ]:
+            query = parse_qs(urlparse(build_rank_url('device', kind, board)).query)
+            self.assertEqual(query['selected_items'], [selected])
+            self.assertEqual(query['sub_selected_items'], [sub])
+
+    def test_genres_exclude_episode_counts_and_cast(self):
+        page = parse_rank_page({'data': {'cell_view': {'video_data': [{
+            'series_id': 'comic', 'content_type': 1004,
+            'sub_title': '东方仙侠·全300集·演员甲',
+            'sub_title_list': [{'content': '萌宝', 'data_type': 3}, {'content': '演员甲', 'data_type': 23}],
+        }]}}})
+        self.assertEqual(page['items'][0]['category_tags'], ['萌宝', '东方仙侠'])
+        self.assertEqual(page['items'][0]['release_type'], 'comic_series_rank')
+
+    def test_preserves_ai_type_and_known_counters(self):
+        page = parse_rank_page({'data': {'cell_view': {'video_data': [{
+            'series_id': 'ai', 'content_type': 1004, 'video_category_type': 'ai_video',
+            'hot_score': 12500, 'comment_count': 42,
+        }]}}})
+        self.assertEqual(page['items'][0]['release_type'], 'ai_playlet')
+        self.assertEqual(page['items'][0]['hot_count'], 12500)
+        self.assertEqual(page['items'][0]['comment_count'], 42)
+
+class TextMetricTests(unittest.TestCase):
+    def test_parses_heat_text_without_using_recommendation_or_play_count(self):
+        for label, expected in [('10536万热度',105360000),('2.5亿热度',250000000),('996万推荐',None),('1870万收藏',None)]:
+            page = parse_rank_page({'data': {'cell_view': {'video_data': [{
+                'series_id': 'a', 'play_cnt': 123, 'rec_text_item': {'RecommendText': label}
+            }]}}})
+            self.assertEqual(page['items'][0]['hot_count'], expected)
+
+class RecommendationGenreTests(unittest.TestCase):
+    def test_recommendation_genre_tags_exclude_promotion_tags(self):
+        from core.duanju_feeds import series_genres
+        self.assertEqual(series_genres({'rec_tags': [
+            {'content': '玄幻', 'data_type': 1, 'rec_type': 24},
+            {'content': '系统', 'data_type': 1, 'rec_type': 24},
+            {'content': '点赞破100万', 'data_type': 1, 'rec_type': 10},
+        ]}), ['玄幻', '系统'])

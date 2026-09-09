@@ -130,6 +130,7 @@ export type DiscoveryPage = {
 };
 
 export type RankPage = {
+  sourceNote?: string;
   items: SeriesItem[];
   nextCursor: string;
   hasMore: boolean;

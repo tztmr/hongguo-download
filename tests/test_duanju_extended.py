@@ -437,7 +437,7 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
                 }
             query = parse_qs(urlparse(call["url"]).query)
             self.assertEqual(query["selected_items"], ["ai_playlet"])
-            self.assertEqual(query["sub_selected_items"], ["ranklist_new_rank_sc"])
+            self.assertEqual(query["sub_selected_items"], ["ai_playlet_new_rank"])
             return {
                 "ok": True,
                 "upstream": {
@@ -844,7 +844,7 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response_json(response)["code"], 0)
         query = parse_qs(urlparse(captured[0]).query)
         self.assertEqual(query["selected_items"], ["ai_playlet"])
-        self.assertEqual(query["sub_selected_items"], ["ranklist_new_rank_sc"])
+        self.assertEqual(query["sub_selected_items"], ["ai_playlet_new_rank"])
 
     async def test_typed_new_release_falls_back_to_all_when_selector_is_empty(self):
         calls = []

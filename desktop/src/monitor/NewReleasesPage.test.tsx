@@ -7,7 +7,7 @@ import { NewReleasesPage } from "./NewReleasesPage";
 const item: SeriesItem = {
   bookId: "new-a", seriesId: "new-a", title: "今日新剧", cover: "", firstVid: "", contentTypeCode: 1,
   episodeCount: 20, abstract: "", score: "", category: "校园", author: "", rankTags: [],
-  onlineTime: Date.parse("2026-09-03T09:20:00+08:00") / 1000, playCount: 0, hotCount: 25_000, collectCount: undefined, likeCount: 8,
+  onlineTime: Date.parse("2026-09-03T09:20:00+08:00") / 1000, playCount: 0, hotCount: 25_000, collectCount: undefined, likeCount: 8, commentCount: 42,
 };
 
 function model(overrides: Partial<NewReleaseMonitor> = {}): NewReleaseMonitor {
@@ -43,8 +43,10 @@ describe("NewReleasesPage", () => {
     expect(view.getByText("上线 09:20")).toBeTruthy();
     expect(view.getByText("真人剧 · 20 集 · 校园")).toBeTruthy();
     expect(view.getByText("播放 0")).toBeTruthy();
-    expect(view.getByText("热度 2.5万")).toBeTruthy();
+    expect(view.getByText("🔥 热度 2.5万")).toBeTruthy();
     expect(view.getByText("收藏 —")).toBeTruthy();
+    expect(view.getByText("讨论 42")).toBeTruthy();
+    expect(view.queryByText("点赞 8")).toBeNull();
     fireEvent.click(view.getByRole("button", { name: "立即刷新" }));
     expect(state.refresh).toHaveBeenCalled();
   });
@@ -80,7 +82,7 @@ describe("NewReleasesPage", () => {
     expect(view.getByText("上线 2026-08-30 12:00")).toBeTruthy();
     view.rerender(<NewReleasesPage model={{ ...state, filteredItems: [{ ...item, onlineTime: Number.NaN, hotCount: Number.NaN }], refreshedAt: "invalid" }} onSelect={vi.fn()} detectOrientation={false} />);
     expect(view.getByText("上线时间未知")).toBeTruthy();
-    expect(view.getByText("热度 —")).toBeTruthy();
+    expect(view.getByText("🔥 热度 —")).toBeTruthy();
     expect(view.getByText(/尚未完成检查/)).toBeTruthy();
   });
 

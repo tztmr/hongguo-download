@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlencode
@@ -31,6 +32,27 @@ RANK_BOARDS = {
     "ranklist_must_watch": "必看榜",
     "ranklist_followed": "收藏榜",
 }
+
+
+# IDs from the upstream cell_selector, not the public API board names.
+RANK_TYPE_BOARDS = {
+    "human": dict(zip(
+        ["ranklist_hot_sc", "ranklist_hot_play_sc", "ranklist_new_rank_sc", "ranklist_hot_search_sc", "ranklist_must_watch", "ranklist_followed"],
+        ["human_hot_sc", "human_hot_play", "human_new_rank", "human_hot_search", "human_must_watch", "human_followed"],
+    )),
+    "comic_series_rank": dict(zip(
+        ["ranklist_hot_sc", "ranklist_hot_play_sc", "ranklist_new_rank_sc", "ranklist_hot_search_sc"],
+        ["comic_series_hot_rank", "comic_series_hot_play", "comic_series_new_rank", "comic_series_hot_search"],
+    )),
+    "ai_playlet": dict(zip(
+        ["ranklist_hot_sc", "ranklist_hot_play_sc", "ranklist_new_rank_sc", "ranklist_hot_search_sc", "ranklist_must_watch", "ranklist_followed"],
+        ["ai_playlet_hot_sc", "ai_playlet_hot_play", "ai_playlet_new_rank", "ai_playlet_hot_search", "ai_playlet_must_watch", "ai_playlet_followed"],
+    )),
+}
+
+def rank_selector(release_type: str, board: str) -> str:
+    selector = "human" if release_type == "playlet" else release_type
+    return selector if board in RANK_TYPE_BOARDS.get(selector, {}) else "all"
 
 
 def _business_params(device_id: str) -> dict[str, str]:
@@ -77,6 +99,8 @@ def build_rank_url(
         raise ValueError(f"不支持的榜单类型: {selected_items}")
     if board not in RANK_BOARDS:
         raise ValueError(f"不支持的榜单: {board}")
+    selected_items = rank_selector(selected_items, board)
+    upstream_board = RANK_TYPE_BOARDS.get(selected_items, {}).get(board, board)
     following = state is not None
     params: dict[str, str] = {
         **_business_params(device_id),
@@ -84,7 +108,7 @@ def build_rank_url(
         "client_template": "2",
         "cell_id": RANK_CELL_ID,
         "selected_items": selected_items,
-        "sub_selected_items": board,
+        "sub_selected_items": upstream_board,
         "panel_selected_items": "",
         "client_req_type": "2",
         "unlimited_selector_change_type": "1" if following else "2",
@@ -116,21 +140,62 @@ def _optional_int(value: Any) -> int | None:
 
 def _category_tags(*values: Any) -> list[str]:
     result: list[str] = []
-
     def add(value: Any) -> None:
         if isinstance(value, str):
-            label = value.strip()
-            if label and label not in result:
-                result.append(label)
+            for label in re.split(r"[·,，、/|]+", value):
+                label = label.strip()
+                if (label and label not in result
+                    and label not in {"短剧", "真人剧", "漫剧", "AI剧", "完结", "连载中"}
+                    and not re.fullmatch(r"(?:(?:全|共|更新至|更新到|已更新|第)\s*)?\d+\s*(?:集|话|季)(?:全)?", label)):
+                    result.append(label)
         elif isinstance(value, dict):
-            add(value.get("name") or value.get("show_name") or value.get("title"))
+            if value.get("data_type") not in (None, 3):
+                return
+            add(value.get("name") or value.get("show_name") or value.get("title") or value.get("content"))
         elif isinstance(value, list):
             for child in value:
                 add(child)
-
     for value in values:
         add(value)
     return result
+
+
+def series_genres(video: dict, wrapper: dict | None = None) -> list[str]:
+    wrapper = wrapper or {}
+    # sub_title is genre · episode status · cast; later parts are not genres.
+    subtitle = re.split(r"[·|]", str(video.get("sub_title") or ""))[0]
+    rec_genres = [tag.get("content") for tag in video.get("rec_tags") or [] if isinstance(tag, dict) and tag.get("rec_type") == 24]
+    return _category_tags(wrapper.get("sub_title_list"), wrapper.get("categories"),
+                          wrapper.get("category"), [tag for tag in video.get("sub_title_list") or [] if isinstance(tag, dict) and tag.get("data_type") == 3], rec_genres, subtitle)
+
+
+def series_release_type(video: dict) -> str:
+    detail = video.get("video_detail") or {}
+    if str(video.get("video_category_type") or detail.get("video_category_type") or "").lower() == "ai_video":
+        return "ai_playlet"
+    if int(video.get("content_type") or detail.get("content_type") or 0) in (2, 1004):
+        return "comic_series_rank"
+    return "playlet" if int(video.get("content_type") or detail.get("content_type") or 0) == 1 else ""
+
+
+def text_metric(video: dict, label: str) -> int | None:
+    texts = [(video.get("rec_text_item") or {}).get("RecommendText")]
+    texts += [tag.get("content") for key in ("sub_title_list", "secondary_info_list")
+              for tag in video.get(key) or [] if isinstance(tag, dict)]
+    for text in texts:
+        match = re.fullmatch(r"(?:🔥\s*)?(\d+(?:\.\d+)?)(万|亿)?(?:次)?" + label, str(text or "").strip())
+        if match:
+            return round(float(match[1]) * {None: 1, "万": 10000, "亿": 100000000}[match[2]])
+    return None
+
+
+def video_metric(video: dict, key: str, label: str) -> int | None:
+    detail = video.get("video_detail") or {}
+    for source in (video, detail):
+        value = _optional_int(source.get(key))
+        if value is not None:
+            return value
+    return text_metric(video, label)
 
 
 def _normalize_video(
@@ -147,12 +212,7 @@ def _normalize_video(
         or detail.get("series_id_str")
         or ""
     )
-    tags = _category_tags(
-        wrapper.get("sub_title_list"),
-        wrapper.get("categories"),
-        wrapper.get("category"),
-        video.get("sub_title"),
-    )
+    tags = series_genres(video, wrapper)
     play_count = _optional_int(detail.get("series_play_cnt"))
     if play_count is None:
         play_count = _optional_int(video.get("play_cnt"))
@@ -178,13 +238,13 @@ def _normalize_video(
         "category_tags": tags,
         "author": video.get("copyright") or "",
         "rank_tags": [],
-        "release_type": release_type or "",
+        "release_type": release_type or series_release_type(video),
         "online_time": _optional_int(wrapper.get("schedule_publish_time")),
         "play_count": play_count,
-        "hot_count": None,
-        "collect_count": _optional_int(detail.get("followed_cnt")),
+        "hot_count": video_metric(video, "hot_score", "热度"),
+        "collect_count": video_metric(video, "followed_cnt", "收藏"),
         "like_count": None,
-        "comment_count": None,
+        "comment_count": series_comment_count(video) if series_comment_count(video) is not None else series_comment_count(detail),
     }
 
 

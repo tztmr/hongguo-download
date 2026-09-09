@@ -341,6 +341,7 @@ export async function fetchRank(args: { board?: string; type?: RankReleaseType; 
     has_more: boolean;
     board: string;
     board_name: string;
+    source_note?: string;
     release_type?: RankReleaseType;
     boards?: Array<{ id: string; name: string }>;
   }>(`/api/duanju/rank?${query.toString()}`);
@@ -350,6 +351,7 @@ export async function fetchRank(args: { board?: string; type?: RankReleaseType; 
     hasMore: Boolean(data.has_more),
     board: data.board || "ranklist_hot_sc",
     boardName: data.board_name || "",
+    sourceNote: data.source_note || "",
     releaseType: data.release_type || args.type || "all",
     boards: data.boards || [],
   };

@@ -144,9 +144,9 @@ describe("SeriesInspector", () => {
     expect(view.getByText(/720p/)).toBeTruthy();
     expect(view.getByTestId("metric-online").textContent).toContain("上线时间");
     expect(view.getByTestId("metric-play").textContent).toBe("播放量 0");
-    expect(view.getByTestId("metric-hot").textContent).toBe("热度量 2.5万");
+    expect(view.getByTestId("metric-hot").textContent).toBe("🔥 热度量 2.5万");
     expect(view.getByTestId("metric-collect").textContent).toBe("收藏量 —");
-    expect(view.getByTestId("metric-comment").textContent).toBe("评论量 8");
+    expect(view.getByTestId("metric-comment").textContent).toBe("讨论量 8");
   });
 
   it("distinguishes metric loading and request failure from missing values", () => {

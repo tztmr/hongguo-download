@@ -135,7 +135,35 @@ describe("App feed and search controls", () => {
     expect(apiMocks.fetchCatalog).toHaveBeenCalledWith("book-888");
     fireEvent.click(within(view.container.querySelector(".content-segment") as HTMLElement).getByRole("button", { name: "漫剧" }));
     await waitFor(() => expect(apiMocks.fetchDiscovery).toHaveBeenLastCalledWith("manju"));
-    expect(view.queryByRole("heading", { name: "分类浏览" })).toBeNull();
+    expect(view.getByRole("heading", { name: "分类浏览" })).toBeTruthy();
+  });
+
+  it("labels 1004 comics and shows heat on home cards", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage([{ ...series(777, "真实漫剧"), contentTypeCode: 1004, category: "", hotCount: 12500 }], 0, false));
+    const view = render(<App />);
+    await waitFor(() => expect(view.container.querySelector(".poster-copy")?.textContent).toContain("漫剧"));
+    expect(view.container.querySelector(".poster-copy")?.textContent).toContain("🔥 热度 1.3万");
+  });
+
+  it("opens AI recommendations and keeps category browsing available", async () => {
+    apiMocks.fetchRank.mockResolvedValue(rankPage([{ ...series(778, "AI推荐剧"), releaseType: "ai_playlet", category: "科幻末世" }], 0, false));
+    const view = render(<App />);
+    fireEvent.click(within(view.container.querySelector(".content-segment") as HTMLElement).getByRole("button", { name: "AI剧" }));
+    await waitFor(() => expect(view.getAllByText("AI推荐剧").length).toBeGreaterThan(0));
+    fireEvent.click(view.getByRole("button", { name: "分类浏览" }));
+    await waitFor(() => expect(view.getByRole("button", { name: "科幻末世" })).toBeTruthy());
+    expect(view.getByRole("heading", { name: "分类浏览" })).toBeTruthy();
+  });
+
+  it("restores search type selection after leaving AI home", async () => {
+    const view = render(<App />);
+    const types = within(view.container.querySelector(".content-segment") as HTMLElement);
+    fireEvent.click(types.getByRole("button", { name: "AI剧" }));
+    await waitFor(() => expect(view.container.querySelector(".category-browser .poster-card")).not.toBeNull());
+    await act(async () => {
+      fireEvent.click(within(view.getByRole("navigation", { name: "主导航" })).getByRole("button", { name: "搜索" }));
+    });
+    expect(types.getByRole("button", { name: "全部" }).getAttribute("aria-pressed")).toBe("true");
   });
 
   it("shows search modes and keeps only an exact title in matching mode", async () => {
@@ -157,7 +185,7 @@ describe("App feed and search controls", () => {
     expect(within(contentSegment as HTMLElement).getByRole("button", { name: "真人剧" })).toBeTruthy();
     expect(within(contentSegment as HTMLElement).getByRole("button", { name: "漫剧" })).toBeTruthy();
     expect(within(contentSegment as HTMLElement).getByRole("button", { name: "全部" })).toBeTruthy();
-    expect(within(contentSegment as HTMLElement).getByRole("button", { name: "AI剧" })).toHaveProperty("disabled", true);
+    expect(within(contentSegment as HTMLElement).getByRole("button", { name: "AI剧" })).toHaveProperty("disabled", false);
     fireEvent.click(search.getByRole("button", { name: "匹配识别" }));
     fireEvent.change(search.getByRole("textbox", { name: "搜索短剧或漫剧" }), { target: { value: "天下第一纨绔" } });
     fireEvent.click(search.getByRole("button", { name: "搜索" }));

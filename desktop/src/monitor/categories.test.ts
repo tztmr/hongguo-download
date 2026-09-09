@@ -10,6 +10,9 @@ function item(id: string, category: string, categoryTags?: string[]): SeriesItem
 }
 
 describe("monitor secondary categories", () => {
+  it("ignores episode status in stored category tags", () => {
+    expect(releaseCategoryNames(item("a", "", ["历史古代", "全58集", "更新至129集", "第2季", "完结"]))).toEqual(["历史古代", "古风"]);
+  });
   it("keeps original labels alongside campus and ancient aggregations", () => {
     expect(releaseCategoryNames(item("a", "青春校园 · 古装仙侠 · 都市日常")))
       .toEqual(["青春校园", "校园", "古装仙侠", "古风", "都市日常"]);

@@ -1,3 +1,5 @@
+import { seriesTypeLabel, metricLabel } from "./seriesPresentation";
+import { AIRecommendations } from "./components/AIRecommendations";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type FormEvent, type UIEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -130,11 +132,7 @@ function filterSearchItems(items: SeriesItem[], keyword: string, mode: SearchMod
   return items.filter((item) => normalizeSearchTitle(item.title) === expected);
 }
 
-function rankTypeLabel(type: RankReleaseType) {
-  if (type === "comic_series_rank") return "漫剧";
-  if (type === "ai_playlet") return "AI剧";
-  return "真人剧";
-}
+
 
 export default function App() {
   const previewMode = new URLSearchParams(window.location.search).get("preview");
@@ -168,6 +166,8 @@ export default function App() {
   const [selectedCategory, setSelectedCategory] = useState("");
   const [categoryGroups, setCategoryGroups] = useState<CategoryGroup[]>([]);
   const [browseCategories, setBrowseCategories] = useState(false);
+  const [homeAI, setHomeAI] = useState(false);
+  const webCategories = browseCategories && searchContentType === "drama" && !homeAI;
   const [rankPage, setRankPage] = useState<RankPage | null>(null);
   const [rankBoard, setRankBoard] = useState("ranklist_hot_sc");
   const [rankType, setRankType] = useState<RankReleaseType>("all");
@@ -289,7 +289,7 @@ export default function App() {
       if (requestId !== catalogRequestRef.current) return;
       setSelected((current) =>
         current?.seriesId === item.seriesId && current.contentTypeCode === item.contentTypeCode
-          ? { ...current, ...metrics }
+          ? { ...current, ...Object.fromEntries(Object.entries(metrics).filter(([, value]) => value !== undefined)) }
           : current,
       );
     }).catch((reason) => {
@@ -456,7 +456,7 @@ export default function App() {
   useEffect(() => {
     loadMoreInFlightRef.current = false;
     setLoading(false);
-    if (nav === "discover" && browseCategories) {
+    if (nav === "discover" && (webCategories || homeAI)) {
       return () => { pageRequestRef.current += 1; };
     }
     if (nav === "search") {
@@ -472,7 +472,7 @@ export default function App() {
     return () => { pageRequestRef.current += 1; };
     // Load from the submitted keyword, never from an unsubmitted input draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nav, contentType, searchContentType, selectedCategory, rankBoard, rankType, isPreview, submittedQuery, searchMode, searchRevision, browseCategories]);
+  }, [nav, contentType, searchContentType, selectedCategory, rankBoard, rankType, isPreview, submittedQuery, searchMode, searchRevision, browseCategories, homeAI, webCategories]);
 
   useEffect(() => {
     if (nav === "search") searchInput.current?.focus();
@@ -482,13 +482,15 @@ export default function App() {
     event.preventDefault();
     if (!query.trim()) return;
     setMonitorDetailOpen(false);
+    setHomeAI(false);
     setSubmittedQuery(query.trim());
     setSearchRevision((value) => value + 1);
     setNav("search");
   }
 
   function selectContentType(type: SearchContentType) {
-    if (type !== "drama") setBrowseCategories(false);
+    setHomeAI(false);
+    if (type === "all") setBrowseCategories(false);
     setSearchContentType(type);
     if (type !== "all") setContentType(type);
     setSelectedCategory("");
@@ -573,17 +575,12 @@ export default function App() {
                   <button type="button" className={rankType === "comic_series_rank" ? "active" : ""} onClick={() => setRankType("comic_series_rank")}>漫剧</button>
                   <button type="button" className={rankType === "ai_playlet" ? "active" : ""} onClick={() => setRankType("ai_playlet")}>AI剧</button>
                 </>
-              ) : nav === "discover" && browseCategories ? (
-                <>
-                  <button type="button" className="active" aria-pressed="true">真人剧</button>
-                  <button type="button" onClick={() => selectContentType("manju")} title="使用漫剧视频源的推荐和分类">漫剧</button>
-                </>
               ) : (
                 <>
-                  <button type="button" className={searchContentType === "all" ? "active" : ""} aria-pressed={searchContentType === "all"} onClick={() => selectContentType("all")} title="全部真人剧和漫剧">全部</button>
-                  <button type="button" className={searchContentType === "drama" ? "active" : ""} aria-pressed={searchContentType === "drama"} onClick={() => selectContentType("drama")}>真人剧</button>
-                  <button type="button" className={searchContentType === "manju" ? "active" : ""} aria-pressed={searchContentType === "manju"} onClick={() => selectContentType("manju")}>漫剧</button>
-                  <button type="button" className="content-type-unavailable" disabled title="AI剧暂不支持关键词搜索">AI剧</button>
+                  <button type="button" className={(nav !== "discover" || !homeAI) && searchContentType === "all" ? "active" : ""} aria-pressed={(nav !== "discover" || !homeAI) && searchContentType === "all"} onClick={() => selectContentType("all")} title="全部真人剧和漫剧">全部</button>
+                  <button type="button" className={(nav !== "discover" || !homeAI) && searchContentType === "drama" ? "active" : ""} aria-pressed={(nav !== "discover" || !homeAI) && searchContentType === "drama"} onClick={() => selectContentType("drama")}>真人剧</button>
+                  <button type="button" className={(nav !== "discover" || !homeAI) && searchContentType === "manju" ? "active" : ""} aria-pressed={(nav !== "discover" || !homeAI) && searchContentType === "manju"} onClick={() => selectContentType("manju")}>漫剧</button>
+                  <button type="button" className={nav === "discover" && homeAI ? "active" : ""} aria-pressed={nav === "discover" && homeAI} disabled={nav === "search"} title={nav === "search" ? "AI剧暂不支持关键词搜索" : "AI剧推荐与题材浏览"} onClick={() => { setHomeAI(true); setSelectedCategory(""); }}>AI剧</button>
                 </>
               )}
             </div>
@@ -594,10 +591,10 @@ export default function App() {
             <section className="filter-strip">
               <div className="home-source-row" role="group" aria-label="首页浏览方式">
                 <button type="button" className={`filter-chip ${!browseCategories ? "active" : ""}`} aria-pressed={!browseCategories} onClick={() => setBrowseCategories(false)}>推荐</button>
-                <button type="button" className={`filter-chip ${browseCategories ? "active" : ""}`} aria-pressed={browseCategories} onClick={() => { setSelectedCategory(""); setContentType("drama"); setBrowseCategories(true); }}>分类浏览</button>
-                <span>{browseCategories ? "真人剧 · 多个条件可组合" : searchContentType === "manju" ? "漫剧视频 · 单选分类" : "发现剧目，也可按分类筛选"}</span>
+                <button type="button" className={`filter-chip ${browseCategories ? "active" : ""}`} aria-pressed={browseCategories} onClick={() => { setSelectedCategory(""); if (searchContentType === "all" && !homeAI) { setSearchContentType("drama"); setContentType("drama"); } setBrowseCategories(true); }}>分类浏览</button>
+                <span>{homeAI ? "AI剧 · 推荐与题材浏览" : webCategories ? "真人剧 · 多个条件可组合" : searchContentType === "manju" ? "漫剧视频 · 单选分类" : "发现剧目，也可按分类筛选"}</span>
               </div>
-              {!browseCategories && searchContentType === "manju" ? <CategoryFilter groups={categoryGroups} selectedId={selectedCategory || "all"} onSelect={(id) => setSelectedCategory(id === "all" ? "" : id)} /> : null}
+              {(nav !== "discover" || !homeAI) && searchContentType === "manju" ? <CategoryFilter groups={categoryGroups} selectedId={selectedCategory || "all"} onSelect={(id) => setSelectedCategory(id === "all" ? "" : id)} /> : null}
             </section>
           ) : null}
 
@@ -608,14 +605,15 @@ export default function App() {
           ) : null}
 
           <section className="library-workspace">
-            <div className="library-main" onScroll={nav === "discover" && browseCategories ? undefined : onLibraryScroll}>
+            <div className="library-main" onScroll={nav === "discover" && (webCategories || homeAI) ? undefined : onLibraryScroll}>
               {catalogError ? <div className="inline-error">{catalogError}</div> : null}
-              {nav === "discover" && browseCategories ? <CategoryBrowser selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
+              {nav === "discover" && homeAI ? <AIRecommendations categoryMode={browseCategories} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} /> : nav === "discover" && webCategories ? <CategoryBrowser selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
                 catalogRequestRef.current += 1;
                 setSelected(null); setEpisodes([]); setSelectedEpisodeIds([]);
                 setCatalogError(""); setMetricsError(""); setCatalogLoading(false); setMetricsLoading(false);
               }} /> : <>
               {error ? <div className="inline-error">{error}</div> : null}
+              {nav === "rank" && rankPage?.sourceNote ? <p className="monitor-refreshed">{rankPage.sourceNote}</p> : null}
               {loading ? <div className="library-loading-overlay" role="status" aria-label="正在加载内容"><span className="loading-spinner" aria-hidden="true" />正在加载内容…</div> : null}
               {!loading && !items.length ? <div className="empty-library"><h2>{nav === "search" && !submittedQuery ? "搜索你想看的剧" : "没有找到短剧"}</h2><p>{nav === "search" && !submittedQuery ? "输入剧名，默认搜索全部真人剧和漫剧" : "换一个关键词或分类试试"}</p></div> : null}
               <div className="poster-grid">
@@ -629,7 +627,7 @@ export default function App() {
                       </div>
                       {item.rankTags[0]?.label ? <span className="rank-label">{item.rankTags[0].label}</span> : null}
                     </div>
-                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || (nav === "rank" ? rankTypeLabel(rankType) : item.contentTypeCode === 2 ? "漫剧" : "真人剧")}{item.score ? ` · ${item.score}分` : ""}</p></div>
+                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {seriesTypeLabel(item)}{item.category && !["真人剧", "漫剧", "AI剧"].includes(item.category) ? ` · ${item.category}` : ""}{item.score ? ` · ${item.score}分` : ""}</p><p>🔥 热度 {metricLabel(item.hotCount)}</p></div>
                   </button>
                 ))}
               </div>
