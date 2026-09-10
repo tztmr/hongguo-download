@@ -792,3 +792,5 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .platform-videos-header h1 { margin: 0; font-size: 25px; }
 .platform-videos-header p { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
 .platform-videos-page > .youtube-management { flex: 1; }
+.nav-item > span:last-of-type { white-space: nowrap; }
+.nav-item .nav-label-long { font-size: 11px; letter-spacing: -.25px; }

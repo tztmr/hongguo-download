@@ -36,7 +36,7 @@ export function AppRail({ nav, pendingCount, unseenReleases, healthOk, onNavigat
               onClick={() => onNavigate(entry.id)}
             >
               <span className="nav-icon"><EntryIcon /></span>
-              <span>{entry.label}</span>
+              <span className={entry.id === "platformVideos" ? "nav-label-long" : undefined}>{entry.label}</span>
               {entry.id === "queue" && pendingCount ? <b className="nav-badge">{pendingCount > 99 ? "99+" : pendingCount}</b> : null}
               {entry.id === "monitor" && unseenReleases ? <b className="nav-badge">{unseenReleases > 99 ? "99+" : unseenReleases}</b> : null}
             </button>
