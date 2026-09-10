@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyticsCommands, type AnalyticsCommands, type AnalyticsReport, type ChannelAnalyticsSnapshot } from "../youtube/analyticsCommands";
 import { YouTubeVideoLink } from "../youtube/YouTubeUploadJobs";
 import type { YouTubeModel } from "../youtube/types";
@@ -57,7 +57,7 @@ function errorMessage(reason: unknown): string {
   return typeof reason === "string" ? reason : "读取 YouTube 统计失败，请稍后重试";
 }
 
-export function DataAnalyticsPage({ youtube, commands = analyticsCommands }: DataAnalyticsPageProps) {
+export const DataAnalyticsPage = memo(function DataAnalyticsPage({ youtube, commands = analyticsCommands }: DataAnalyticsPageProps) {
   const channelId = youtube.activeChannelId;
   const channel = youtube.channels.find((item) => item.channelId === channelId);
   const today = useMemo(() => pacificDate(), []);
@@ -167,4 +167,4 @@ export function DataAnalyticsPage({ youtube, commands = analyticsCommands }: Dat
       </> : loading ? <div className="analytics-no-data">正在读取 YouTube 统计…</div> : <div className="analytics-no-data">暂无统计数据。</div>}
     </section>
   </main>;
-}
+});

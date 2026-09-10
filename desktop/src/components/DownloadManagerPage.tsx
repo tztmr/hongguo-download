@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deriveBatchStatus, type DownloadBatch, type DownloadItem } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
 import { missingAiComponentIds } from "../media/aiRuntime";
@@ -121,7 +121,7 @@ function batchForMediaJob(job: MediaJob, batches: DownloadBatch[], jobs: MediaJo
   return batches.find((batch) => batch.items.some((item) => item.path && includesPath(paths, item.path)));
 }
 
-export function DownloadManagerPage({
+function DownloadManagerPageView({
   manager,
   media,
   saveDir,
@@ -663,3 +663,10 @@ export function DownloadManagerPage({
     </main>
   );
 }
+
+export const DownloadManagerPage = memo(DownloadManagerPageView, (previous, next) => {
+  // Keep the mounted queue state while another page is visible, but ignore
+  // high-frequency media progress updates until the queue becomes visible.
+  if (previous.hidden && next.hidden) return true;
+  return false;
+});
