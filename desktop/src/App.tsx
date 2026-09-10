@@ -143,6 +143,8 @@ export default function App() {
   const previewMode = new URLSearchParams(window.location.search).get("preview");
   const isPreview = previewMode === "library" || previewMode === "downloads";
   const [nav, setNav] = useState<NavId>(previewMode === "downloads" ? "queue" : "discover");
+  const [platformVisited, setPlatformVisited] = useState(false);
+  const [analyticsVisited, setAnalyticsVisited] = useState(false);
   const [queueVisited, setQueueVisited] = useState(previewMode === "downloads");
   useEffect(() => { if (nav === "queue") setQueueVisited(true); }, [nav]);
   const [managerFocus, setManagerFocus] = useState<NotificationTarget | null>(null);
@@ -531,6 +533,8 @@ export default function App() {
   const navigate = (next: NavId) => {
     setMonitorDetailOpen(false);
     setNav(next);
+    if (next === "platformVideos") setPlatformVisited(true);
+    if (next === "analytics") setAnalyticsVisited(true);
     if (next === "monitor") monitor.clearUnseen();
   };
 
@@ -562,11 +566,9 @@ export default function App() {
           }}
         />
       ) : null}
-      {nav === "queue" ? null : nav === "platformVideos" ? (
-        <PlatformVideosPage youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewManagementCommands : undefined} />
-      ) : nav === "analytics" ? (
-        <DataAnalyticsPage youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewAnalyticsCommands : undefined} />
-      ) : nav === "monitor" ? (
+      {platformVisited && <PlatformVideosPage hidden={nav !== "platformVideos"} youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewManagementCommands : undefined} />}
+      {analyticsVisited && <DataAnalyticsPage hidden={nav !== "analytics"} youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewAnalyticsCommands : undefined} />}
+      {nav === "queue" || nav === "platformVideos" || nav === "analytics" ? null : nav === "monitor" ? (
         <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
       ) : nav === "settings" ? (
         <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />

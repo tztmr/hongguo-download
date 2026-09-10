@@ -21,6 +21,21 @@ describe("App preview workflow", () => {
     expect(view.getByRole("heading", { name: "设置" })).toBeTruthy();
     expect(view.queryByRole("heading", { name: "视频管理" })).toBeNull();
   });
+  it("retains video filters and analytics range when navigating away and back", async () => {
+    window.history.replaceState({}, "", "/?preview=downloads");
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "视频管理" }));
+    await view.findByText("频道暂无可管理的视频");
+    const search = view.getByRole("searchbox", { name: "搜索频道视频" });
+    fireEvent.change(search, { target: { value: "保留筛选" } });
+    fireEvent.click(view.getByRole("button", { name: "数据分析" }));
+    fireEvent.click(view.getByRole("button", { name: "7 天" }));
+    fireEvent.click(view.getByRole("button", { name: "视频管理" }));
+    expect(view.getByRole("searchbox", { name: "搜索频道视频" })).toBe(search);
+    expect((search as HTMLInputElement).value).toBe("保留筛选");
+    fireEvent.click(view.getByRole("button", { name: "数据分析" }));
+    expect(view.getByRole("button", { name: "7 天" }).className).toContain("active");
+  });
   it("preserves the chosen download and filter after leaving and returning to download management", async () => {
     window.history.replaceState({}, "", "/?preview=library");
     const view = render(<App />);

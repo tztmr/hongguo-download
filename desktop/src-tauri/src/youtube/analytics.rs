@@ -94,6 +94,35 @@ fn metric(row: &[Value], header_names: &[String], name: &str) -> f64 {
         .unwrap_or_default()
 }
 
+fn classify_api_error(status: u16, reason: &str) -> (&'static str, &'static str) {
+    match (status, reason) {
+        (401, _) | (_, "insufficientPermissions") => (
+            "YOUTUBE_ANALYTICS_AUTH_REQUIRED",
+            "需要统计权限，请在设置中重新授权 YouTube 频道",
+        ),
+        (_, "quotaExceeded" | "dailyLimitExceeded") => (
+            "YOUTUBE_QUOTA_EXCEEDED",
+            "YouTube 接口配额已用完，请稍后重试",
+        ),
+        (403, "accessNotConfigured" | "serviceDisabled") => (
+            "YOUTUBE_ANALYTICS_API_NOT_ENABLED",
+            "请在凭证所属的 Google Cloud 项目启用 YouTube Analytics API，然后刷新数据（无需再次授权）",
+        ),
+        (403, "forbidden") => (
+            "YOUTUBE_ANALYTICS_CHANNEL_FORBIDDEN",
+            "当前 Google 账号无法读取该频道的 Analytics，请确认授权的是频道所有者账号",
+        ),
+        (403, _) => (
+            "YOUTUBE_ANALYTICS_FORBIDDEN",
+            "YouTube 拒绝了统计请求，请检查频道权限和 API 配置",
+        ),
+        _ => (
+            "YOUTUBE_ANALYTICS_FAILED",
+            "读取 YouTube 统计失败，请稍后刷新重试",
+        ),
+    }
+}
+
 fn validate_dates(start_date: &str, end_date: &str) -> Result<(), AppError> {
     let start = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")
         .map_err(|_| error("YOUTUBE_ANALYTICS_INVALID_DATE", "统计日期格式无效"))?;
@@ -151,24 +180,7 @@ impl AnalyticsApi {
             return Ok(data);
         }
         let reason = field(&data, "/error/errors/0/reason");
-        let (code, message) = match (status.as_u16(), reason.as_str()) {
-            (401, _) | (_, "insufficientPermissions") => (
-                "YOUTUBE_ANALYTICS_AUTH_REQUIRED",
-                "需要统计权限，请在设置中重新授权 YouTube 频道",
-            ),
-            (_, "quotaExceeded" | "dailyLimitExceeded") => (
-                "YOUTUBE_QUOTA_EXCEEDED",
-                "YouTube 接口配额已用完，请稍后重试",
-            ),
-            (403, _) => (
-                "YOUTUBE_ANALYTICS_FORBIDDEN",
-                "YouTube 拒绝了统计请求，请检查频道权限和 API 配置",
-            ),
-            _ => (
-                "YOUTUBE_ANALYTICS_FAILED",
-                "读取 YouTube 统计失败，请稍后刷新重试",
-            ),
-        };
+        let (code, message) = classify_api_error(status.as_u16(), &reason);
         Err(error(code, message))
     }
 
@@ -296,6 +308,23 @@ impl AnalyticsApi {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn classifies_analytics_service_configuration_errors_separately() {
+        let (code, message) = classify_api_error(403, "serviceDisabled");
+
+        assert_eq!(code, "YOUTUBE_ANALYTICS_API_NOT_ENABLED");
+        assert!(message.contains("YouTube Analytics API"));
+        assert!(message.contains("无需再次授权"));
+    }
+
+    #[test]
+    fn keeps_missing_analytics_scope_as_reauthorization_error() {
+        let (code, message) = classify_api_error(403, "insufficientPermissions");
+
+        assert_eq!(code, "YOUTUBE_ANALYTICS_AUTH_REQUIRED");
+        assert!(message.contains("重新授权"));
+    }
 
     #[test]
     fn rejects_invalid_or_too_wide_ranges() {

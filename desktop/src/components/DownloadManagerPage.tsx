@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { deriveBatchStatus, type DownloadBatch, type DownloadItem } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
 import { missingAiComponentIds } from "../media/aiRuntime";
-import { completedMergeInputs, isCompletedBatch, pathIsWithin, sameFsPath, seriesRootFromInputs } from "../media/paths";
+import { completedMergeInputs, createPathMatcher, isCompletedBatch, pathIsWithin, sameFsPath, seriesRootFromInputs } from "../media/paths";
 import type { MediaCommandError, MediaJob, MediaJobsModel, MergeSubmitOptions } from "../media/types";
 import type { MediaJobScope } from "../media/types";
 import type { AIComponentStatus, DemucsModel, WhisperModel } from "../types";
@@ -82,11 +82,11 @@ function matchesBatchSeries(batch: DownloadBatch, bookId?: string, seriesRoot?: 
 }
 
 function mergedPathFor(batch: DownloadBatch, jobs: MediaJob[]) {
-  const completedPaths = completedPathsFor(batch);
+  const matchesCompletedPath = createPathMatcher(completedPathsFor(batch));
   const seriesRoot = batchSeriesRoot(batch);
   return jobs.slice().reverse().find((job) =>
     job.kind === "merge" && job.status === "completed" && Boolean(job.outputPath)
-      && (job.inputs.some((input) => includesPath(completedPaths, input.path))
+      && (job.inputs.some((input) => matchesCompletedPath(input.path))
         || matchesBatchSeries(batch, job.mergeRequest?.bookId, job.mergeRequest?.seriesRoot)
         || (Boolean(job.mergeRequest?.bookId) && job.mergeRequest?.bookId === batch.bookId && pathIsWithin(seriesRoot, job.outputPath))))?.outputPath || undefined;
 }
@@ -118,7 +118,8 @@ function batchForMediaJob(job: MediaJob, batches: DownloadBatch[], jobs: MediaJo
       for (const input of merge.inputs) paths.push(input.path);
     }
   }
-  return batches.find((batch) => batch.items.some((item) => item.path && includesPath(paths, item.path)));
+  const matchesPath = createPathMatcher(paths);
+  return batches.find((batch) => batch.items.some((item) => matchesPath(item.path)));
 }
 
 function DownloadManagerPageView({
@@ -184,6 +185,7 @@ function DownloadManagerPageView({
   const mediaDialogBatch = manager.state.batches.find((batch) => batch.id === mediaDialog?.batchId) || null;
   const uploadBatch = manager.state.batches.find((batch) => batch.id === uploadDraft?.batchId) || null;
   const completedPaths = selectedBatch ? completedPathsFor(selectedBatch) : [];
+  const matchesCompletedPath = useMemo(() => createPathMatcher(completedPaths), [selectedBatch]);
   const selectedSeriesRoot = selectedBatch ? batchSeriesRoot(selectedBatch) : "";
   const mergedLookupKey = useMemo(
     () => media.jobs
@@ -200,7 +202,7 @@ function DownloadManagerPageView({
     job.kind === "separateBackgroundMusic" && job.status === "completed"
       && (job.aiRequest?.bookId && job.aiRequest.seriesRoot
         ? job.aiRequest.bookId === selectedBatch.bookId && sameFsPath(job.aiRequest.seriesRoot, selectedSeriesRoot)
-        : job.inputs.some((input) => includesPath(completedPaths, input.path) || sameFsPath(input.path, mergedPath)))
+        : job.inputs.some((input) => matchesCompletedPath(input.path) || sameFsPath(input.path, mergedPath)))
   ));
   const uploadSourcePath = noBackgroundPath || mergedPath;
   const uploadDisabledReason = !uploadSourcePath

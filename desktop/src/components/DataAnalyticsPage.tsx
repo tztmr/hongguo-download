@@ -7,6 +7,7 @@ type RangePreset = 7 | 28 | 90 | "custom";
 
 type DataAnalyticsPageProps = {
   youtube: YouTubeModel;
+  hidden?: boolean;
   commands?: AnalyticsCommands;
 };
 
@@ -57,13 +58,24 @@ function errorMessage(reason: unknown): string {
   return typeof reason === "string" ? reason : "读取 YouTube 统计失败，请稍后重试";
 }
 
-export const DataAnalyticsPage = memo(function DataAnalyticsPage({ youtube, commands = analyticsCommands }: DataAnalyticsPageProps) {
+export const DataAnalyticsPage = memo(function DataAnalyticsPage(props: DataAnalyticsPageProps) {
+  return <ChannelAnalyticsPage key={props.youtube.activeChannelId ?? "disconnected"} {...props} />;
+}, (a, b) => a.hidden === b.hidden && a.commands === b.commands
+  && a.youtube.activeChannelId === b.youtube.activeChannelId && a.youtube.channels === b.youtube.channels
+  && a.youtube.busy === b.youtube.busy && a.youtube.authorize === b.youtube.authorize);
+
+function ChannelAnalyticsPage({ youtube, commands = analyticsCommands, hidden = false }: DataAnalyticsPageProps) {
   const channelId = youtube.activeChannelId;
   const channel = youtube.channels.find((item) => item.channelId === channelId);
   const today = useMemo(() => pacificDate(), []);
   const [preset, setPreset] = useState<RangePreset>(28);
   const [startDate, setStartDate] = useState(() => moveDate(today, -27));
   const [endDate, setEndDate] = useState(today);
+  const [draftStart, setDraftStart] = useState(startDate);
+  const [draftEnd, setDraftEnd] = useState(endDate);
+  const [authorizing, setAuthorizing] = useState(false);
+  const [errorCodes, setErrorCodes] = useState<string[]>([]);
+  const inFlight = useRef(false);
   const [snapshot, setSnapshot] = useState<ChannelAnalyticsSnapshot | null>(null);
   const [report, setReport] = useState<AnalyticsReport | null>(null);
   const [loading, setLoading] = useState(false);
@@ -82,31 +94,42 @@ export const DataAnalyticsPage = memo(function DataAnalyticsPage({ youtube, comm
     if (showLoading) setLoading(true);
     else setRefreshing(true);
     setError("");
-    setReport(null);
-    const [snapshotResult, reportResult] = await Promise.allSettled([
-      commands.snapshot(channelId),
-      commands.report(channelId, startDate, endDate),
+    inFlight.current = true;
+    setErrorCodes([]);
+    const failures: string[] = [];
+    const codes: string[] = [];
+    const failed = (reason: unknown) => {
+      if (currentRequest !== requestId.current) return;
+      failures.push(errorMessage(reason));
+      if (reason && typeof reason === "object" && "code" in reason) codes.push(String(reason.code));
+      setError(failures.join("；"));
+      setErrorCodes([...codes]);
+    };
+    await Promise.allSettled([
+      commands.snapshot(channelId).then(value => {
+        if (currentRequest === requestId.current) setSnapshot(value);
+      }).catch(failed),
+      commands.report(channelId, startDate, endDate).then(value => {
+        if (currentRequest === requestId.current) setReport(value);
+      }).catch(failed),
     ]);
     if (currentRequest !== requestId.current) return;
-    if (snapshotResult.status === "fulfilled") setSnapshot(snapshotResult.value);
-    else setSnapshot(null);
-    if (reportResult.status === "fulfilled") setReport(reportResult.value);
-    const failures = [snapshotResult, reportResult].filter((result) => result.status === "rejected") as PromiseRejectedResult[];
-    setError(failures.length ? failures.map((failure) => errorMessage(failure.reason)).join("；") : "");
+    inFlight.current = false;
     setLoading(false);
     setRefreshing(false);
   }, [channelId, commands, endDate, startDate]);
 
   useEffect(() => {
+    setReport(null);
     void load();
-    return () => { requestId.current += 1; };
+    return () => { requestId.current += 1; inFlight.current = false; };
   }, [load]);
 
   useEffect(() => {
-    if (!channelId) return undefined;
-    const timer = window.setInterval(() => { void load(false); }, 5 * 60 * 1000);
+    if (!channelId || hidden) return undefined;
+    const timer = window.setInterval(() => { if (!inFlight.current) void load(false); }, 5 * 60 * 1000);
     return () => window.clearInterval(timer);
-  }, [channelId, load]);
+  }, [channelId, hidden, load]);
 
   function selectPreset(next: RangePreset) {
     setPreset(next);
@@ -116,28 +139,30 @@ export const DataAnalyticsPage = memo(function DataAnalyticsPage({ youtube, comm
   }
 
   async function reauthorize() {
+    if (authorizing || youtube.busy) return;
+    setAuthorizing(true);
     setError("");
     try {
       await youtube.authorize();
       void load();
     } catch (reason) {
       setError(errorMessage(reason));
-    }
+    } finally { setAuthorizing(false); }
   }
 
   const reportNote = report?.returnedEndDate && report.returnedEndDate < endDate
     ? `YouTube 当前只返回到 ${readableDate(report.returnedEndDate)}，最近日期可能仍在处理。`
     : "YouTube Analytics 数据按美国太平洋时间归日，最近日期可能有延迟。";
-  const authRequired = error.includes("需要统计权限") || error.includes("重新授权");
+  const authRequired = errorCodes.includes("YOUTUBE_ANALYTICS_AUTH_REQUIRED") || error.includes("需要统计权限") || error.includes("重新授权");
 
   if (!channelId) {
-    return <main className="platform-videos-page analytics-page">
+    return <main hidden={hidden} className="platform-videos-page analytics-page">
       <header className="platform-videos-header"><h1>数据分析</h1><p>YouTube · 观看次数、观看时长和平均观看时长</p></header>
       <section className="analytics-empty"><h2>请先在设置中授权 YouTube 频道</h2><p>授权后可以读取频道累计观看量和已处理的历史统计。</p></section>
     </main>;
   }
 
-  return <main className="platform-videos-page analytics-page">
+  return <main hidden={hidden} className="platform-videos-page analytics-page">
     <header className="platform-videos-header analytics-header">
       <div><h1>数据分析</h1><p>{channel?.title || "YouTube 频道"} · 统计日期按美国太平洋时间计算</p></div>
       <div className="analytics-header-actions">
@@ -145,7 +170,8 @@ export const DataAnalyticsPage = memo(function DataAnalyticsPage({ youtube, comm
         <button type="button" className="secondary-button" disabled={loading || refreshing} onClick={() => void load(false)}>{refreshing ? "刷新中…" : "刷新数据"}</button>
       </div>
     </header>
-    {error ? <div className="analytics-alert" role="alert"><span>{error}</span>{authRequired ? <button type="button" className="secondary-button compact" onClick={() => void reauthorize()}>重新授权统计权限</button> : null}</div> : null}
+    {authorizing && <p role="status">请在浏览器完成统计权限授权，应用正在等待返回。</p>}
+    {error ? <div className="analytics-alert" role="alert"><span>{error}</span>{authRequired ? <button type="button" className="secondary-button compact" disabled={authorizing || youtube.busy} onClick={() => void reauthorize()}>{authorizing ? "等待浏览器授权…" : "重新授权统计权限"}</button> : null}{errorCodes.includes("YOUTUBE_ANALYTICS_API_NOT_ENABLED") && <YouTubeVideoLink url="https://console.cloud.google.com/apis/library/youtubeanalytics.googleapis.com" label="前往启用 Analytics API" />}</div> : null}
     <section className="analytics-live-card">
       <div><span className="analytics-eyebrow">频道累计观看次数</span><strong>{snapshot ? formatInteger(snapshot.viewCount) : loading ? "读取中…" : "—"}</strong><p>{snapshot ? `最近刷新：${new Date(snapshot.fetchedAt).toLocaleString("zh-CN")}` : "可手动刷新；实时细分请查看 YouTube Studio"}</p></div>
       <div className="analytics-live-status"><span className="analytics-live-dot" />累计数据</div>
@@ -153,9 +179,9 @@ export const DataAnalyticsPage = memo(function DataAnalyticsPage({ youtube, comm
     <section className="analytics-panel">
       <div className="analytics-panel-heading"><div><h2>历史统计</h2><p>{reportNote}</p></div><div className="analytics-range-controls" role="group" aria-label="统计日期范围">
         {[7, 28, 90].map((days) => <button key={days} type="button" className={preset === days ? "active" : ""} onClick={() => selectPreset(days as RangePreset)}>{days} 天</button>)}
-        <button type="button" className={preset === "custom" ? "active" : ""} onClick={() => setPreset("custom")}>自定义</button>
+        <button type="button" className={preset === "custom" ? "active" : ""} onClick={() => { setDraftStart(startDate); setDraftEnd(endDate); setPreset("custom"); }}>自定义</button>
       </div></div>
-      {preset === "custom" ? <div className="analytics-custom-range"><label>开始日期<input type="date" value={startDate} max={endDate} onChange={(event) => setStartDate(event.target.value)} /></label><span>至</span><label>结束日期<input type="date" value={endDate} min={startDate} max={today} onChange={(event) => setEndDate(event.target.value)} /></label><button type="button" className="primary-button compact" onClick={() => void load()}>查询</button></div> : null}
+      {preset === "custom" ? <div className="analytics-custom-range"><label>开始日期<input type="date" value={draftStart} max={draftEnd} onChange={(event) => setDraftStart(event.target.value)} /></label><span>至</span><label>结束日期<input type="date" value={draftEnd} min={draftStart} max={today} onChange={(event) => setDraftEnd(event.target.value)} /></label><button type="button" className="primary-button compact" disabled={!draftStart || !draftEnd || draftStart > draftEnd || draftEnd > today} onClick={() => { if (draftStart === startDate && draftEnd === endDate) void load(false); else { setStartDate(draftStart); setEndDate(draftEnd); } }}>查询</button></div> : null}
       {report ? <>
         <div className="analytics-metrics">
           <div><span>观看次数</span><strong>{formatInteger(report.views)}</strong></div>
@@ -167,4 +193,4 @@ export const DataAnalyticsPage = memo(function DataAnalyticsPage({ youtube, comm
       </> : loading ? <div className="analytics-no-data">正在读取 YouTube 统计…</div> : <div className="analytics-no-data">暂无统计数据。</div>}
     </section>
   </main>;
-});
+}

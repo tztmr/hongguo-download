@@ -1,3 +1,4 @@
+import { createPathMatcher } from "./paths";
 import { describe, expect, it } from "vitest";
 import { normalizeFsPath, pathIsWithin, sameFsPath } from "./paths";
 
@@ -57,4 +58,12 @@ describe("pathIsWithin", () => {
     expect(pathIsWithin("/foo/bar", "/foo/barbecue/merged.mp4")).toBe(false);
     expect(pathIsWithin("/tmp/foo", "/private/tmp/foo/合并视频/merged.mp4")).toBe(true);
   });
+});
+
+it("indexes file paths while preserving Windows aliases and POSIX case sensitivity", () => {
+  const matches = createPathMatcher(["C:/Series/Episode.mp4", "/private/tmp/Episode.mp4", null, ""]);
+  expect(matches("c:\\series\\episode.mp4")).toBe(true);
+  expect(matches("/tmp/Episode.mp4")).toBe(true);
+  expect(matches("/tmp/episode.mp4")).toBe(false);
+  expect(matches(undefined)).toBe(false);
 });

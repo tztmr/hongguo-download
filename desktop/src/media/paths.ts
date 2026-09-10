@@ -82,3 +82,19 @@ export function pathIsWithin(root?: string | null, candidate?: string | null): b
     : [parent, child];
   return right === left || right.startsWith(`${left}/`);
 }
+
+export function createPathMatcher(paths: Array<string | null | undefined>) {
+  const exact = new Set<string>();
+  const windows = new Set<string>();
+  for (const path of paths) {
+    if (!path) continue;
+    const normalized = normalizeFsPath(path);
+    exact.add(normalized);
+    if (isWindowsLikePath(normalized)) windows.add(normalized.toLowerCase());
+  }
+  return (candidate?: string | null) => {
+    if (!candidate) return false;
+    const normalized = normalizeFsPath(candidate);
+    return exact.has(normalized) || windows.has(normalized.toLowerCase());
+  };
+}
