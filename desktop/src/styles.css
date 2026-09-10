@@ -743,3 +743,52 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .media-concurrency-field { border: 0; padding: 0; margin: 0; min-width: 0; }
 .media-concurrency-field:empty { display: none; }
 .media-queue-reason { margin: 8px 0 14px; color: var(--muted); font-size: 13px; }
+
+/* Existing channel video management inside Download Manager. */
+.youtube-management { display: flex; flex-direction: column; min-height: 0; width: 100%; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: auto; }
+.yt-management-heading, .yt-management-toolbar, .yt-management-footer { display: flex; align-items: center; gap: 16px; padding: 18px 22px; flex-wrap: wrap; }
+.yt-management-heading { justify-content: space-between; }
+.yt-management-heading h2, .yt-edit-dialog h2 { margin: 0; font-size: 18px; }
+.yt-management-heading p, .yt-edit-dialog header p { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
+.yt-management-toolbar { border-block: 1px solid var(--border); padding-block: 12px; }
+.yt-management-toolbar input { flex: 1; min-width: 200px; }
+.yt-management-toolbar span, .yt-management-footer, .yt-video-meta { font-size: 12px; color: var(--muted); }
+.yt-management-toolbar input, .yt-management-toolbar select, .yt-editor-fields input, .yt-editor-fields textarea, .yt-editor-fields select { border: 1px solid var(--border-strong); border-radius: 7px; padding: 9px 11px; font: inherit; background: var(--surface); color: var(--text); }
+.yt-video-list { flex: 1; }
+.yt-video-row { display: flex; align-items: center; gap: 18px; padding: 20px 22px; border-bottom: 1px solid var(--border); }
+.yt-video-cover { width: 150px; height: 84px; object-fit: cover; border-radius: 8px; flex: 0 0 auto; background: var(--border); }
+.yt-video-copy { min-width: 0; flex: 1; }
+.yt-video-copy h3 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+.yt-video-copy p { color: var(--muted); font-size: 12px; margin: 8px 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.yt-video-meta { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.yt-video-meta a, .yt-edit-dialog a { color: var(--accent-hover); }
+.yt-privacy { border-radius: 5px; background: var(--surface-3); padding: 3px 8px; color: var(--muted); }
+.yt-privacy-public { background: rgba(111, 196, 134, .12); color: var(--success); }
+.yt-privacy-unlisted { background: rgba(214, 160, 88, .12); color: var(--warning); }
+.yt-management-footer { justify-content: center; }
+.yt-edit-dialog { width: min(800px, calc(100vw - 48px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; background: var(--surface); border-radius: 16px; box-shadow: 0 24px 80px #15244330; outline: none; }
+.yt-edit-dialog header, .yt-edit-dialog footer { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; gap: 16px; }
+.yt-edit-dialog header { border-bottom: 1px solid var(--border); }
+.yt-edit-dialog footer { border-top: 1px solid var(--border); font-size: 13px; }
+.yt-editor-body { overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 20px; }
+.yt-editor-fields { display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--border); border-radius: 10px; padding: 16px; min-width: 0; margin: 0; }
+.yt-editor-fields legend { font-weight: 600; font-size: 14px; padding: 0 6px; }
+.yt-editor-fields label { display: flex; flex-direction: column; gap: 7px; font-size: 13px; }
+.yt-editor-fields textarea { min-height: 110px; resize: vertical; }
+.yt-editor-fields small, .yt-editor-fields p { color: var(--muted); font-size: 12px; margin: 0; overflow-wrap: anywhere; }
+.yt-editor-fields > button { align-self: flex-start; }
+.yt-cover-edit, .yt-inline-actions, .yt-playlist-row, .yt-new-playlist { display: flex; align-items: center; gap: 12px; }
+.yt-cover-edit > div { min-width: 0; }
+.yt-inline-actions { flex-wrap: wrap; margin-top: 10px; }
+.yt-playlist-row { justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--border); }
+.yt-playlist-row strong { font-size: 13px; }
+.yt-playlist-row small { display: block; margin-top: 5px; }
+.yt-new-playlist { flex-wrap: wrap; }
+.yt-new-playlist input { flex: 1; min-width: 140px; }
+.yt-save-notice { padding: 12px; border-radius: 8px; background: rgba(111, 196, 134, .12); color: var(--success); font-size: 13px; }
+@media (max-width: 900px) { .yt-video-cover { width: 112px; height: 63px; } .yt-video-row { gap: 12px; } .yt-cover-edit { align-items: flex-start; flex-wrap: wrap; } }
+
+.platform-videos-page { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 27px 28px 24px; gap: 22px; overflow: hidden; }
+.platform-videos-header h1 { margin: 0; font-size: 25px; }
+.platform-videos-header p { margin: 10px 0 0; color: var(--muted); font-size: 13px; }
+.platform-videos-page > .youtube-management { flex: 1; }

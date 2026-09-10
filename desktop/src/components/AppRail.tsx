@@ -1,5 +1,5 @@
 import type { NavId } from "../types";
-import { BellIcon, ChartIcon, DownloadIcon, HomeIcon, SearchIcon, SettingsIcon } from "./icons";
+import { BellIcon, ChartIcon, DownloadIcon, HomeIcon, SearchIcon, SettingsIcon, PlayIcon } from "./icons";
 import packageJson from "../../package.json";
 
 type AppRailProps = {
@@ -16,6 +16,7 @@ const entries: Array<{ id: NavId; label: string; icon: typeof HomeIcon }> = [
   { id: "rank", label: "榜单", icon: ChartIcon },
   { id: "monitor", label: "新剧监听", icon: BellIcon },
   { id: "queue", label: "下载管理", icon: DownloadIcon },
+  { id: "platformVideos", label: "平台视频管理", icon: PlayIcon },
   { id: "settings", label: "设置", icon: SettingsIcon },
 ];
 

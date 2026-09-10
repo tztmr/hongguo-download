@@ -1,8 +1,23 @@
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import App from "./App";
 
+vi.mock("./youtube/managementCommands", () => ({ managementCommands: { list: vi.fn().mockResolvedValue({ items: [], nextPageToken: null }) } }));
+
 describe("App preview workflow", () => {
+  it("opens platform video management from the sidebar instead of download tabs", async () => {
+    window.history.replaceState({}, "", "/?preview=downloads");
+    const view = render(<App />);
+    expect(view.queryByRole("tab", { name: /Youtube管理|平台视频管理/ })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "平台视频管理" }));
+    expect(view.getByRole("heading", { name: "平台视频管理" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "平台视频管理" }).getAttribute("aria-current")).toBe("page");
+    expect(view.queryByRole("heading", { name: "下载管理" })).toBeNull();
+    await view.findByText("频道暂无可管理的视频");
+    fireEvent.click(view.getByRole("button", { name: "设置" }));
+    expect(view.getByRole("heading", { name: "设置" })).toBeTruthy();
+    expect(view.queryByRole("heading", { name: "平台视频管理" })).toBeNull();
+  });
   it("preserves the chosen download and filter after leaving and returning to download management", async () => {
     window.history.replaceState({}, "", "/?preview=library");
     const view = render(<App />);

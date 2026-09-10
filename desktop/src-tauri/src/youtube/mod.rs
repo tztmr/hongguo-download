@@ -9,3 +9,5 @@ pub mod upload;
 pub mod vault;
 
 pub mod subtitles;
+
+pub mod management;

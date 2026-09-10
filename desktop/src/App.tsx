@@ -24,6 +24,7 @@ import { CategoryFilter } from "./components/CategoryFilter";
 import { CategoryBrowser } from "./components/CategoryBrowser";
 import { Cover } from "./components/Cover";
 import { VideoOrientationBadge } from "./components/VideoOrientationBadge";
+import { PlatformVideosPage } from "./components/PlatformVideosPage";
 import { DownloadManagerPage } from "./components/DownloadManagerPage";
 import { CheckIcon, CloseIcon, SearchIcon } from "./components/icons";
 import { SeriesInspector } from "./components/SeriesInspector";
@@ -531,7 +532,7 @@ export default function App() {
   };
 
   return (
-    <div className={`app-shell ${nav === "queue" || nav === "monitor" || nav === "settings" ? "queue-mode" : "library-mode"}`}>
+    <div className={`app-shell ${nav === "queue" || nav === "monitor" || nav === "settings" || nav === "platformVideos" ? "queue-mode" : "library-mode"}`}>
       <AppRail nav={nav} pendingCount={pendingCount} unseenReleases={monitor.unseenCount} healthOk={healthOk} onNavigate={navigate} />
       {nav === "queue" || queueVisited ? (
         <DownloadManagerPage
@@ -558,7 +559,9 @@ export default function App() {
           }}
         />
       ) : null}
-      {nav === "queue" ? null : nav === "monitor" ? (
+      {nav === "queue" ? null : nav === "platformVideos" ? (
+        <PlatformVideosPage youtube={isPreview ? previewYouTubeModel : youtube} />
+      ) : nav === "monitor" ? (
         <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
       ) : nav === "settings" ? (
         <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />

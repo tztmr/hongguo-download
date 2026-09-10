@@ -165,6 +165,119 @@ impl YouTubeService {
         Ok(self.snapshot())
     }
 
+    async fn management_api(
+        &self,
+        channel_id: &str,
+    ) -> Result<super::management::ManagementApi, AppError> {
+        self.ensure_check_channel(channel_id)?;
+        let token = self.oauth_service()?.access_token(channel_id).await?;
+        self.ensure_check_channel(channel_id)?;
+        super::management::ManagementApi::new(channel_id, token)
+    }
+
+    pub async fn channel_video(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+    ) -> Result<super::management::ManagedVideo, AppError> {
+        self.management_api(channel_id)
+            .await?
+            .detail(video_id)
+            .await
+    }
+
+    pub async fn list_channel_videos(
+        &self,
+        channel_id: &str,
+        page_token: &str,
+    ) -> Result<super::management::VideoPage, AppError> {
+        self.management_api(channel_id)
+            .await?
+            .list(page_token)
+            .await
+    }
+    pub async fn update_channel_video(
+        &self,
+        request: &super::management::VideoUpdate,
+    ) -> Result<super::management::ManagedVideo, AppError> {
+        let video = self
+            .management_api(&request.channel_id)
+            .await?
+            .update(request)
+            .await?;
+        // Keep local upload rows consistent with the confirmed remote metadata.
+        let mut uploads = self.uploads.lock().map_err(state_lock_error)?;
+        for stored in uploads.iter_mut().filter(|u| {
+            u.job.channel_id == request.channel_id
+                && u.job.video_id.as_deref() == Some(&request.video_id)
+        }) {
+            stored.job.title = video.title.clone();
+            stored.intent.title = video.title.clone();
+            stored.intent.description = video.description.clone();
+            let privacy = serde_json::from_value(serde_json::json!(video.privacy_status))
+                .map_err(|_| AppError::new("YOUTUBE_MANAGEMENT_RESPONSE", "YouTube 可见性无效"))?;
+            stored.job.actual_privacy_status = Some(privacy);
+            stored.intent.privacy_status = privacy;
+            self.event_sink.emit(stored.job.clone());
+        }
+        persist_uploads(&self.data_dir, &uploads)?;
+        Ok(video)
+    }
+    pub async fn channel_video_playlists(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+    ) -> Result<Vec<super::management::ManagedPlaylist>, AppError> {
+        self.management_api(channel_id)
+            .await?
+            .playlists(video_id)
+            .await
+    }
+    pub async fn set_channel_video_playlist(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+        playlist_id: &str,
+        included: bool,
+    ) -> Result<(), AppError> {
+        self.management_api(channel_id)
+            .await?
+            .set_membership(video_id, playlist_id, included)
+            .await
+    }
+    pub async fn create_channel_playlist(
+        &self,
+        channel_id: &str,
+        title: &str,
+        privacy: &str,
+    ) -> Result<super::management::ManagedPlaylist, AppError> {
+        self.management_api(channel_id)
+            .await?
+            .create_playlist(title, privacy)
+            .await
+    }
+    pub async fn set_channel_video_thumbnail(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+        path: &Path,
+    ) -> Result<(), AppError> {
+        self.management_api(channel_id)
+            .await?
+            .video(video_id)
+            .await?;
+        let temp = ThumbnailWorkspace::create(&self.data_dir)?;
+        let executable = std::env::current_exe().map_err(service_io)?;
+        let tools = executable
+            .parent()
+            .ok_or_else(|| AppError::new("MEDIA_TOOL_MISSING", "无法定位媒体工具"))
+            .and_then(MediaTools::from_resource_root)?;
+        let prepared = prepare_thumbnail(path, &tools, &temp.0)?;
+        let token = self.oauth_service()?.access_token(channel_id).await?;
+        self.ensure_check_channel(channel_id)?;
+        set_thumbnail(&reqwest::Client::new(), video_id, &prepared, &token).await
+    }
+
     pub async fn check_upload(
         &self,
         query: &DuplicateQuery,

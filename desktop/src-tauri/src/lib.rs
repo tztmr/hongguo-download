@@ -1271,6 +1271,82 @@ fn remove_youtube_oauth_config(state: State<AppState>) -> AppResult<YouTubeSnaps
 }
 
 #[tauri::command]
+async fn get_youtube_channel_video(
+    state: State<'_, AppState>,
+    channel_id: String,
+    video_id: String,
+) -> AppResult<youtube::management::ManagedVideo> {
+    state.youtube.channel_video(&channel_id, &video_id).await
+}
+
+#[tauri::command]
+async fn list_youtube_channel_videos(
+    state: State<'_, AppState>,
+    channel_id: String,
+    page_token: Option<String>,
+) -> AppResult<youtube::management::VideoPage> {
+    state
+        .youtube
+        .list_channel_videos(&channel_id, page_token.as_deref().unwrap_or(""))
+        .await
+}
+#[tauri::command]
+async fn update_youtube_channel_video(
+    state: State<'_, AppState>,
+    request: youtube::management::VideoUpdate,
+) -> AppResult<youtube::management::ManagedVideo> {
+    state.youtube.update_channel_video(&request).await
+}
+#[tauri::command]
+async fn list_youtube_video_playlists(
+    state: State<'_, AppState>,
+    channel_id: String,
+    video_id: String,
+) -> AppResult<Vec<youtube::management::ManagedPlaylist>> {
+    state
+        .youtube
+        .channel_video_playlists(&channel_id, &video_id)
+        .await
+}
+#[tauri::command]
+async fn set_youtube_video_playlist(
+    state: State<'_, AppState>,
+    channel_id: String,
+    video_id: String,
+    playlist_id: String,
+    included: bool,
+) -> AppResult<()> {
+    state
+        .youtube
+        .set_channel_video_playlist(&channel_id, &video_id, &playlist_id, included)
+        .await
+}
+#[tauri::command]
+async fn create_youtube_playlist(
+    state: State<'_, AppState>,
+    channel_id: String,
+    title: String,
+    privacy: String,
+) -> AppResult<youtube::management::ManagedPlaylist> {
+    state
+        .youtube
+        .create_channel_playlist(&channel_id, &title, &privacy)
+        .await
+}
+#[tauri::command]
+async fn set_youtube_video_thumbnail(
+    state: State<'_, AppState>,
+    channel_id: String,
+    video_id: String,
+    path: String,
+) -> AppResult<()> {
+    state
+        .youtube
+        .set_channel_video_thumbnail(&channel_id, &video_id, Path::new(&path))
+        .await
+}
+
+#[tauri::command]
 async fn check_youtube_upload(
     state: State<'_, AppState>,
     query: DuplicateQuery,
@@ -1636,6 +1712,13 @@ pub fn run() {
             set_youtube_channel,
             revoke_youtube,
             remove_youtube_oauth_config,
+            get_youtube_channel_video,
+            list_youtube_channel_videos,
+            update_youtube_channel_video,
+            list_youtube_video_playlists,
+            set_youtube_video_playlist,
+            create_youtube_playlist,
+            set_youtube_video_thumbnail,
             check_youtube_upload,
             start_youtube_upload_job,
             cancel_youtube_upload_job,
