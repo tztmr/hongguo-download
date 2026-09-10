@@ -175,6 +175,35 @@ impl YouTubeService {
         super::management::ManagementApi::new(channel_id, token)
     }
 
+    async fn analytics_api(
+        &self,
+        channel_id: &str,
+    ) -> Result<super::analytics::AnalyticsApi, AppError> {
+        self.ensure_check_channel(channel_id)?;
+        let token = self.oauth_service()?.access_token(channel_id).await?;
+        self.ensure_check_channel(channel_id)?;
+        super::analytics::AnalyticsApi::new(channel_id, token)
+    }
+
+    pub async fn channel_analytics_snapshot(
+        &self,
+        channel_id: &str,
+    ) -> Result<super::analytics::ChannelAnalyticsSnapshot, AppError> {
+        self.analytics_api(channel_id).await?.snapshot().await
+    }
+
+    pub async fn channel_analytics_report(
+        &self,
+        channel_id: &str,
+        start_date: &str,
+        end_date: &str,
+    ) -> Result<super::analytics::AnalyticsReport, AppError> {
+        self.analytics_api(channel_id)
+            .await?
+            .report_range(start_date, end_date)
+            .await
+    }
+
     pub async fn channel_video(
         &self,
         channel_id: &str,

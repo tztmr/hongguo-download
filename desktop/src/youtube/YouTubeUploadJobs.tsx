@@ -23,7 +23,7 @@ function statusCopy(job: YouTubeJob) {
   }[job.status];
 }
 
-export function YouTubeVideoLink({ url }: { url: string }) {
+export function YouTubeVideoLink({ url, label = "打开 YouTube 视频" }: { url: string; label?: string }) {
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState("");
   return <>
@@ -43,7 +43,7 @@ export function YouTubeVideoLink({ url }: { url: string }) {
       } finally {
         setOpening(false);
       }
-    }}>{opening ? "正在打开…" : "打开 YouTube 视频"}</a>
+    }}>{opening ? "正在打开…" : label}</a>
     {error ? <small className="error-copy" role="alert">{error}</small> : null}
   </>;
 }

@@ -25,6 +25,7 @@ import { CategoryBrowser } from "./components/CategoryBrowser";
 import { Cover } from "./components/Cover";
 import { VideoOrientationBadge } from "./components/VideoOrientationBadge";
 import { PlatformVideosPage } from "./components/PlatformVideosPage";
+import { DataAnalyticsPage } from "./components/DataAnalyticsPage";
 import { DownloadManagerPage } from "./components/DownloadManagerPage";
 import { CheckIcon, CloseIcon, SearchIcon } from "./components/icons";
 import { SeriesInspector } from "./components/SeriesInspector";
@@ -48,6 +49,8 @@ import {
   previewEpisodes,
   previewMediaCommands,
   previewMediaJobs,
+  previewManagementCommands,
+  previewAnalyticsCommands,
   previewSeries,
   previewYouTubeModel,
 } from "./preview";
@@ -532,7 +535,7 @@ export default function App() {
   };
 
   return (
-    <div className={`app-shell ${nav === "queue" || nav === "monitor" || nav === "settings" || nav === "platformVideos" ? "queue-mode" : "library-mode"}`}>
+    <div className={`app-shell ${nav === "queue" || nav === "monitor" || nav === "settings" || nav === "platformVideos" || nav === "analytics" ? "queue-mode" : "library-mode"}`}>
       <AppRail nav={nav} pendingCount={pendingCount} unseenReleases={monitor.unseenCount} healthOk={healthOk} onNavigate={navigate} />
       {nav === "queue" || queueVisited ? (
         <DownloadManagerPage
@@ -560,7 +563,9 @@ export default function App() {
         />
       ) : null}
       {nav === "queue" ? null : nav === "platformVideos" ? (
-        <PlatformVideosPage youtube={isPreview ? previewYouTubeModel : youtube} />
+        <PlatformVideosPage youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewManagementCommands : undefined} />
+      ) : nav === "analytics" ? (
+        <DataAnalyticsPage youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewAnalyticsCommands : undefined} />
       ) : nav === "monitor" ? (
         <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
       ) : nav === "settings" ? (

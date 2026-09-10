@@ -16,10 +16,12 @@ describe("AppRail", () => {
     expect(view.getByRole("button", { name: /新剧监听 3/ })).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: /新剧监听/ }));
     expect(onNavigate).toHaveBeenCalledWith("monitor");
-    const platform = view.getByRole("button", { name: "平台视频管理" });
-    expect(platform.nextElementSibling?.textContent).toBe("设置");
+    const platform = view.getByRole("button", { name: "视频管理" });
+    expect(platform.nextElementSibling?.textContent).toBe("数据分析");
     fireEvent.click(platform);
     expect(onNavigate).toHaveBeenCalledWith("platformVideos");
+    fireEvent.click(view.getByRole("button", { name: "数据分析" }));
+    expect(onNavigate).toHaveBeenCalledWith("analytics");
     fireEvent.click(view.getByRole("button", { name: "设置" }));
     expect(onNavigate).toHaveBeenCalledWith("settings");
   });

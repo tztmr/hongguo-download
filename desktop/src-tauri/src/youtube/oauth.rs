@@ -21,6 +21,7 @@ use url::Url;
 pub const YOUTUBE_UPLOAD_SCOPE: &str = "https://www.googleapis.com/auth/youtube.upload";
 pub const YOUTUBE_CAPTIONS_SCOPE: &str = "https://www.googleapis.com/auth/youtube.force-ssl";
 pub const YOUTUBE_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/youtube.readonly";
+pub const YOUTUBE_ANALYTICS_SCOPE: &str = "https://www.googleapis.com/auth/yt-analytics.readonly";
 const CHANNELS_URL: &str = "https://www.googleapis.com/youtube/v3/channels";
 const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 const CALLBACK_LIMIT: usize = 8 * 1024;
@@ -76,7 +77,7 @@ fn build_authorization_request(
         .append_pair("response_type", "code")
         .append_pair(
             "scope",
-            &format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE} {YOUTUBE_CAPTIONS_SCOPE}"),
+            &format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE} {YOUTUBE_CAPTIONS_SCOPE} {YOUTUBE_ANALYTICS_SCOPE}"),
         )
         .append_pair("state", state)
         .append_pair("code_challenge", &challenge)
@@ -545,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn authorization_url_uses_pkce_state_loopback_and_upload_and_readonly_scopes() {
+    fn authorization_url_uses_pkce_state_loopback_and_all_youtube_scopes() {
         let config = OAuthClientConfig::from_json(r#"{"installed":{"client_id":"synthetic.apps.googleusercontent.com","client_secret":"secret","auth_uri":"https://accounts.google.com/o/oauth2/auth","token_uri":"https://oauth2.googleapis.com/token","redirect_uris":["http://127.0.0.1"]}}"#).unwrap();
         let request =
             build_authorization_request(&config, 49152, "state-value", "verifier-value").unwrap();
@@ -556,7 +557,7 @@ mod tests {
         assert_eq!(
             query.get("scope").map(|value| value.as_ref()),
             Some(
-                format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE} {YOUTUBE_CAPTIONS_SCOPE}")
+                format!("{YOUTUBE_UPLOAD_SCOPE} {YOUTUBE_READONLY_SCOPE} {YOUTUBE_CAPTIONS_SCOPE} {YOUTUBE_ANALYTICS_SCOPE}")
                     .as_str()
             )
         );

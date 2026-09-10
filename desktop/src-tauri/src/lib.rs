@@ -1347,6 +1347,27 @@ async fn set_youtube_video_thumbnail(
 }
 
 #[tauri::command]
+async fn get_youtube_channel_analytics_snapshot(
+    state: State<'_, AppState>,
+    channel_id: String,
+) -> AppResult<youtube::analytics::ChannelAnalyticsSnapshot> {
+    state.youtube.channel_analytics_snapshot(&channel_id).await
+}
+
+#[tauri::command]
+async fn get_youtube_channel_analytics_report(
+    state: State<'_, AppState>,
+    channel_id: String,
+    start_date: String,
+    end_date: String,
+) -> AppResult<youtube::analytics::AnalyticsReport> {
+    state
+        .youtube
+        .channel_analytics_report(&channel_id, &start_date, &end_date)
+        .await
+}
+
+#[tauri::command]
 async fn check_youtube_upload(
     state: State<'_, AppState>,
     query: DuplicateQuery,
@@ -1719,6 +1740,8 @@ pub fn run() {
             set_youtube_video_playlist,
             create_youtube_playlist,
             set_youtube_video_thumbnail,
+            get_youtube_channel_analytics_snapshot,
+            get_youtube_channel_analytics_report,
             check_youtube_upload,
             start_youtube_upload_job,
             cancel_youtube_upload_job,

@@ -39,7 +39,7 @@ function ChannelManagement({ channelId, channelTitle, commands }: { channelId: s
   }
   useEffect(() => { void load(); return () => { generation.current++; loadingRef.current = false; }; }, [channelId, commands]);
   const visible = videos.filter((video) => (privacy === "all" || video.privacyStatus === privacy) && `${video.title} ${video.id}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  return <section className="youtube-management" aria-label="平台视频管理">
+  return <section className="youtube-management" aria-label="视频管理">
     <div className="yt-management-heading"><div><h2>频道视频</h2><p>{channelTitle || channelId} · 管理已上传到 YouTube 的视频</p></div><button type="button" className="secondary-button" disabled={loading || !!editing} onClick={() => void load()}>刷新频道视频</button></div>
     <div className="yt-management-toolbar"><input type="search" aria-label="搜索频道视频" placeholder="搜索已加载的视频标题或 ID" value={query} onChange={(e) => setQuery(e.target.value)} /><select aria-label="筛选视频可见性" value={privacy} onChange={(e) => setPrivacy(e.target.value)}><option value="all">全部可见性</option><PrivacyOptions /></select><span>已加载 {videos.length} 个 · 显示 {visible.length} 个{next ? " · 还有更多" : ""}</span></div>
     {error && <div className="warning-banner" role="alert">{error}</div>}

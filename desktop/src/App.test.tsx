@@ -5,18 +5,21 @@ import App from "./App";
 vi.mock("./youtube/managementCommands", () => ({ managementCommands: { list: vi.fn().mockResolvedValue({ items: [], nextPageToken: null }) } }));
 
 describe("App preview workflow", () => {
-  it("opens platform video management from the sidebar instead of download tabs", async () => {
+  it("opens video management and analytics from the sidebar instead of download tabs", async () => {
     window.history.replaceState({}, "", "/?preview=downloads");
     const view = render(<App />);
     expect(view.queryByRole("tab", { name: /Youtube管理|平台视频管理/ })).toBeNull();
-    fireEvent.click(view.getByRole("button", { name: "平台视频管理" }));
-    expect(view.getByRole("heading", { name: "平台视频管理" })).toBeTruthy();
-    expect(view.getByRole("button", { name: "平台视频管理" }).getAttribute("aria-current")).toBe("page");
+    fireEvent.click(view.getByRole("button", { name: "视频管理" }));
+    expect(view.getByRole("heading", { name: "视频管理" })).toBeTruthy();
+    expect(view.getByRole("button", { name: "视频管理" }).getAttribute("aria-current")).toBe("page");
     expect(view.queryByRole("heading", { name: "下载管理" })).toBeNull();
     await view.findByText("频道暂无可管理的视频");
+    fireEvent.click(view.getByRole("button", { name: "数据分析" }));
+    expect(view.getByRole("heading", { name: "数据分析" })).toBeTruthy();
+    expect(view.getByText("频道累计观看次数")).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: "设置" }));
     expect(view.getByRole("heading", { name: "设置" })).toBeTruthy();
-    expect(view.queryByRole("heading", { name: "平台视频管理" })).toBeNull();
+    expect(view.queryByRole("heading", { name: "视频管理" })).toBeNull();
   });
   it("preserves the chosen download and filter after leaving and returning to download management", async () => {
     window.history.replaceState({}, "", "/?preview=library");

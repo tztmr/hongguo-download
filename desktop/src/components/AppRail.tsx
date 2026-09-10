@@ -16,7 +16,8 @@ const entries: Array<{ id: NavId; label: string; icon: typeof HomeIcon }> = [
   { id: "rank", label: "榜单", icon: ChartIcon },
   { id: "monitor", label: "新剧监听", icon: BellIcon },
   { id: "queue", label: "下载管理", icon: DownloadIcon },
-  { id: "platformVideos", label: "平台视频管理", icon: PlayIcon },
+  { id: "platformVideos", label: "视频管理", icon: PlayIcon },
+  { id: "analytics", label: "数据分析", icon: ChartIcon },
   { id: "settings", label: "设置", icon: SettingsIcon },
 ];
 
@@ -36,7 +37,7 @@ export function AppRail({ nav, pendingCount, unseenReleases, healthOk, onNavigat
               onClick={() => onNavigate(entry.id)}
             >
               <span className="nav-icon"><EntryIcon /></span>
-              <span className={entry.id === "platformVideos" ? "nav-label-long" : undefined}>{entry.label}</span>
+              <span>{entry.label}</span>
               {entry.id === "queue" && pendingCount ? <b className="nav-badge">{pendingCount > 99 ? "99+" : pendingCount}</b> : null}
               {entry.id === "monitor" && unseenReleases ? <b className="nav-badge">{unseenReleases > 99 ? "99+" : unseenReleases}</b> : null}
             </button>

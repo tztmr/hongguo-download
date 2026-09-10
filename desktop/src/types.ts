@@ -1,7 +1,7 @@
 export type ContentType = "drama" | "manju";
 export type SearchContentType = "all" | ContentType;
 export type RankReleaseType = "all" | NewReleaseType;
-export type NavId = "discover" | "search" | "rank" | "monitor" | "queue" | "platformVideos" | "settings";
+export type NavId = "discover" | "search" | "rank" | "monitor" | "queue" | "platformVideos" | "analytics" | "settings";
 export type DefinitionPreference = "auto" | "1080p" | "720p";
 export type DemucsModel = "htdemucs" | "htdemucs_ft";
 export type WhisperModel = "small" | "medium";

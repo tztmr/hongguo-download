@@ -3,6 +3,8 @@ import type { DownloadBatch, DownloadItem, DownloadItemStatus, DownloadManagerSt
 import type { MediaCommands, MediaJob } from "./media/types";
 import type { AIComponentStatus, EpisodeItem, SeriesItem } from "./types";
 import type { YouTubeModel } from "./youtube/types";
+import type { AnalyticsCommands } from "./youtube/analyticsCommands";
+import type { ManagementCommands } from "./youtube/managementCommands";
 
 const names = [
   "天下第一纨绔",
@@ -245,6 +247,25 @@ export const previewYouTubeModel: YouTubeModel = {
   uploadSubtitle: async () => undefined,
   removeJob: async () => undefined,
   markNotified: async () => undefined,
+};
+
+export const previewManagementCommands: ManagementCommands = {
+  detail: async () => ({ id: "", etag: "", title: "", description: "", privacyStatus: "private", thumbnailUrl: "", publishedAt: "" }),
+  list: async () => ({ items: [], nextPageToken: null }),
+  update: async () => ({ id: "", etag: "", title: "", description: "", privacyStatus: "private", thumbnailUrl: "", publishedAt: "" }),
+  thumbnail: async () => undefined,
+  playlists: async () => [],
+  membership: async () => undefined,
+  createPlaylist: async () => ({ id: "", title: "", privacyStatus: "private", itemIds: [] }),
+};
+
+export const previewAnalyticsCommands: AnalyticsCommands = {
+  snapshot: async (channelId) => ({ channelId, viewCount: "123456", fetchedAt: "2026-09-10T10:00:00Z" }),
+  report: async (channelId, startDate, endDate) => ({
+    channelId, startDate, endDate, returnedEndDate: "2026-09-09", views: 3210,
+    estimatedMinutesWatched: 987.5, averageViewDuration: 42, fetchedAt: "2026-09-10T10:00:00Z",
+    timezone: "America/Los_Angeles", rows: [{ date: "2026-09-09", views: 3210, estimatedMinutesWatched: 987.5, averageViewDuration: 42 }],
+  }),
 };
 
 export const previewMediaCommands: MediaCommands = {
