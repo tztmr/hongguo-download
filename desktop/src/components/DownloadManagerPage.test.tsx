@@ -671,6 +671,28 @@ describe("macOS post-merge media actions", () => {
   });
 });
 
+it("does not rescan the selected series when media progress updates", async () => {
+  const findMergedVideo = vi.fn().mockResolvedValue(null);
+  const mediaJobs = mediaFixture().jobs;
+  const media = mediaFixture({ jobs: mediaJobs, findMergedVideo });
+  const props = {
+    manager: managerFixture(),
+    media,
+    saveDir: "/Downloads",
+    onOpenDir: vi.fn(),
+    onChooseDir: vi.fn(),
+    onRevealPath: vi.fn(),
+  };
+  const view = render(<DownloadManagerPage {...props} />);
+  fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+  await waitFor(() => expect(findMergedVideo).toHaveBeenCalledWith("/Downloads"));
+  const lookupCount = findMergedVideo.mock.calls.length;
+
+  view.rerender(<DownloadManagerPage {...props} media={{ ...media, jobs: mediaJobs.map((job) => job.id === "media-running" ? { ...job, percent: 43 } : job) }} />);
+
+  expect(findMergedVideo).toHaveBeenCalledTimes(lookupCount);
+});
+
 describe("v0.2.0 task workflow", () => {
   it("keeps the selected download and search after separation, with a three second toast", async () => {
     vi.useFakeTimers();

@@ -185,6 +185,13 @@ export function DownloadManagerPage({
   const uploadBatch = manager.state.batches.find((batch) => batch.id === uploadDraft?.batchId) || null;
   const completedPaths = selectedBatch ? completedPathsFor(selectedBatch) : [];
   const selectedSeriesRoot = selectedBatch ? batchSeriesRoot(selectedBatch) : "";
+  const mergedLookupKey = useMemo(
+    () => media.jobs
+      .filter((job) => job.kind === "merge")
+      .map((job) => `${job.id}:${job.status}:${job.outputPath || ""}`)
+      .join("|"),
+    [media.jobs],
+  );
   const selectedMergedVideoPath = mergedLookup.seriesRoot === selectedSeriesRoot ? mergedLookup.path : undefined;
   const selectedHasMergedVideo = mergedLookup.seriesRoot === selectedSeriesRoot && mergedLookup.exists;
   const mergedPath = selectedBatch ? (mergedPathFor(selectedBatch, media.jobs) || selectedMergedVideoPath) : undefined;
@@ -226,7 +233,10 @@ export function DownloadManagerPage({
       );
     }
     return () => { active = false; };
-  }, [media.findMergedVideo, media.hasMergedVideo, media.jobs, selectedSeriesRoot]);
+  // A media progress event changes `media.jobs` every few hundred milliseconds.
+  // Re-check the filesystem only when a merge changes status or output path; a
+  // percentage update cannot change whether a completed merge already exists.
+  }, [media.findMergedVideo, media.hasMergedVideo, mergedLookupKey, selectedSeriesRoot]);
   useEffect(() => {
     if (!selectedBatch && selectedBatchId) setSelectedBatchId("");
     else if (selectedBatch && selectedBatch.id !== selectedBatchId) setSelectedBatchId(selectedBatch.id);
