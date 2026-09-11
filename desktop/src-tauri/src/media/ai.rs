@@ -756,6 +756,16 @@ fn run_worker(
             .ok_or_else(|| AppError::new("AI_REQUEST_INVALID", "AI 请求选项无效"))?
             .insert("device".into(), json!("cpu"));
     }
+    if invocation.operation == "separate" && cfg!(target_os = "macos") {
+        // Demucs 4.0.1's MPS convolution path consistently fails on Apple Silicon
+        // with "Output channels > 65536 not supported at the MPS device". Keep the
+        // v4 worker usable for existing installs by selecting CPU before launch,
+        // instead of waiting for an MPS failure and a late retry at 10% progress.
+        options
+            .as_object_mut()
+            .ok_or_else(|| AppError::new("AI_REQUEST_INVALID", "AI 请求选项无效"))?
+            .insert("device".into(), json!("cpu"));
+    }
     let request = json!({
         "version": 1,
         "jobId": invocation.job_id,
@@ -1225,6 +1235,41 @@ echo '{"type":"result","outputs":{"ok":true}}'
         assert_eq!(result.unwrap(), serde_json::json!({"ok": true}));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn separation_uses_cpu_with_the_existing_macos_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temp, runtime) = worker_fixture("");
+        std::fs::write(
+            &runtime,
+            r#"#!/bin/sh
+request=$(/bin/cat)
+case "$request" in
+  *'"device":"cpu"'*) ;;
+  *) exit 25 ;;
+esac
+echo '{"type":"result","outputs":{"ok":true}}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let result = super::run_worker(
+            super::WorkerInvocation {
+                runtime: &runtime,
+                args: &[],
+                ffmpeg: None,
+                job_id: "test",
+                operation: "separate",
+                input: &runtime,
+                output: &temp.output,
+                options: serde_json::json!({"device":"auto", "model":"htdemucs"}),
+            },
+            &super::CancellationToken::default(),
+            &mut |_, _| {},
+        );
+        assert_eq!(result.unwrap(), serde_json::json!({"ok": true}));
+    }
+
     #[test]
     #[ignore = "requires explicit installed runtime/model and a local speech WAV"]
     fn installed_runtime_transcribes_local_speech_through_native_command() {
@@ -1563,7 +1608,7 @@ sys.stdout.buffer.write((json.dumps(event, ensure_ascii=False) + '\n').encode('g
                     path: input,
                 }],
                 model: "htdemucs".into(),
-                device: "cpu".into(),
+                device: "auto".into(),
             },
             MediaJobKind::SeparateBackgroundMusic,
         )
