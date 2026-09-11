@@ -1,0 +1,35 @@
+name: Publish verified Windows AI runtimes
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful Build Windows AI runtimes run ID
+        required: true
+        type: string
+      tag:
+        description: New component release tag
+        required: true
+        default: windows-components-v4
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate artifacts and publish component archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ inputs.run_id }}
+          COMPONENT_TAG: ${{ inputs.tag }}
+        run: python scripts/publish-windows-components.py
