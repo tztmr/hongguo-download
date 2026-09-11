@@ -1007,6 +1007,32 @@ struct MediaWorkerContext {
     queue_reason: Arc<Mutex<String>>,
 }
 
+fn reap_finished_workers(
+    workers: &mut HashMap<String, JoinHandle<()>>,
+    running: &RunningJobs,
+    finished_receiver: &mpsc::Receiver<String>,
+) {
+    // Completion is sent after execute_job returns, before the wakeup.
+    // is_finished alone can still be false at that wakeup, losing the
+    // notification and leaving the next queued job waiting for the poll.
+    let mut finished: HashSet<_> = finished_receiver.try_iter().collect();
+    finished.extend(
+        workers
+            .iter()
+            .filter(|(_, worker)| worker.is_finished())
+            .map(|(id, _)| id.clone()),
+    );
+    for id in finished {
+        if let Some(worker) = workers.remove(&id) {
+            let _ = worker.join();
+        }
+        running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+    }
+}
+
 fn worker_loop(
     context: MediaWorkerContext,
     wake_receiver: mpsc::Receiver<()>,
@@ -1014,24 +1040,11 @@ fn worker_loop(
     mut probe: scheduling::ResourceProbe,
 ) {
     let mut workers: HashMap<String, JoinHandle<()>> = HashMap::new();
+    let (finished_sender, finished_receiver) = mpsc::channel::<String>();
     loop {
         // Reap before admission: paused tasks still occupy their slots, and a
         // terminal event is fully published before that slot can be reused.
-        let finished: Vec<_> = workers
-            .iter()
-            .filter(|(_, worker)| worker.is_finished())
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in finished {
-            if let Some(worker) = workers.remove(&id) {
-                let _ = worker.join();
-            }
-            context
-                .running
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .remove(&id);
-        }
+        reap_finished_workers(&mut workers, &context.running, &finished_receiver);
         if context.shutting_down.load(AtomicOrdering::Acquire) {
             break;
         }
@@ -1141,12 +1154,15 @@ fn worker_loop(
             let id = job.id.clone();
             let worker_context = context.clone();
             let notify = completion_sender.clone();
+            let finished_notify = finished_sender.clone();
+            let finished_id = id.clone();
             // Publish Running in FIFO order before the worker can emit progress.
             safe_emit(&context.event_sink, job.clone());
             match thread::Builder::new()
                 .name(format!("media-job-{id}"))
                 .spawn(move || {
                     execute_job(worker_context, job, token, budget);
+                    let _ = finished_notify.send(finished_id);
                     let _ = notify.send(());
                 }) {
                 Ok(worker) => {
@@ -2709,6 +2725,51 @@ mod tests {
     }
 
     #[test]
+    fn completion_before_thread_exit_is_joined_before_releasing_its_slot() {
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (reaped_tx, reaped_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            finished_tx.send("finished".to_string()).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        ready_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(!worker.is_finished());
+        let mut workers = HashMap::from([("finished".to_string(), worker)]);
+        let running: RunningJobs = Arc::new(Mutex::new(HashMap::from([(
+            "finished".to_string(),
+            RunningJob {
+                token: CancellationToken::new(),
+                kind: MediaJobKind::Merge,
+                budget: scheduling::ExecutionBudget {
+                    cpu_threads: 1,
+                    memory: 0,
+                    gpu_memory: 0,
+                },
+            },
+        )])));
+        let retained = running.clone();
+        let reaper = thread::spawn(move || {
+            reap_finished_workers(&mut workers, &running, &finished_rx);
+            reaped_tx
+                .send((workers.len(), running.lock().unwrap().len()))
+                .unwrap();
+        });
+        // A completion notice must be consumed even while JoinHandle reports
+        // false, but its resource slot must stay reserved until join finishes.
+        assert!(reaped_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert_eq!(retained.lock().unwrap().len(), 1);
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            reaped_rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            (0, 0)
+        );
+        reaper.join().unwrap();
+    }
+
+    #[test]
     fn worker_executes_two_jobs_oldest_first_without_overlap() {
         // Production mutation caught: spawning per-job workers or claiming a later queued job first.
         let fixture = MergeFixture::new();
@@ -2721,10 +2782,17 @@ mod tests {
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
         });
-        let service = MediaJobService::new(
+        let service = MediaJobService::with_resource_probe(
             manager,
             executor.clone(),
+            Arc::new(UnavailableAIExecutor),
             Arc::new(RecordingSink::default()),
+            Box::new(|| scheduling::Resources {
+                cores: 8,
+                cpu_usage: Some(0.0),
+                available_memory: Some(16 * scheduling::GIB),
+                gpu: None,
+            }),
         );
         let first = service
             .start_merge(fixture.request("first", vec![fixture.write_input("first.mp4", b"first")]))
