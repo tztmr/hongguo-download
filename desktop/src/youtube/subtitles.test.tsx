@@ -83,7 +83,7 @@ it("retries only subtitles on the existing video job", async () => {
   const model = { ...previewYouTubeModel, uploadSubtitle, startUpload, retry,
     jobs: [{ ...previewYouTubeModel.jobs[1], status: "videoUploadedSubtitleFailed" as const, subtitleState: "failed" as const, subtitleError: "请重新授权" }] };
   const view = render(<YouTubeUploadJobs model={model} onRevealPath={vi.fn()} />);
-  fireEvent.click(view.getByRole("button", { name: "仅重试字幕" }));
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "仅重试字幕" })); });
   await waitFor(() => expect(uploadSubtitle).toHaveBeenCalledExactlyOnceWith(model.jobs[0].id, null));
   expect(startUpload).not.toHaveBeenCalled(); expect(retry).not.toHaveBeenCalled();
   fireEvent.click(view.getByRole("button", { name: "上传字幕" }));

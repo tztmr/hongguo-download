@@ -12,6 +12,14 @@ spec.loader.exec_module(publisher)
 
 
 class PublisherGuardsTests(unittest.TestCase):
+    def test_powershell_sizes_become_json_integers_without_truncation(self):
+        size = publisher.byte_count(6028999054.0)
+        self.assertIs(type(size), int)
+        self.assertEqual(json.dumps(size), "6028999054")
+        for invalid in (True, "123", 0, -1, 1.5, float("inf"), float("nan")):
+            with self.subTest(value=invalid), self.assertRaises(AssertionError):
+                publisher.byte_count(invalid)
+
     def test_rejects_failed_foreign_or_wrong_workflow_builds_before_publication(self):
         valid = {"status": "completed", "conclusion": "success", "path": ".github/workflows/windows-components.yml", "head_repository": {"full_name": "owner/repo"}}
         for override in ({"conclusion": "failure"}, {"status": "in_progress"},

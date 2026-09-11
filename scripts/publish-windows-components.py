@@ -14,6 +14,14 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def byte_count(value):
+    # PowerShell Measure-Object serializes integral totals as 123.0. The
+    # desktop manifest deserializes u64 and requires JSON integers.
+    assert type(value) in (int, float) and 0 < value < 2**53
+    assert int(value) == value, "Byte count must be integral"
+    return int(value)
+
+
 def main():
     repo, run_id, tag = (os.environ[name] for name in ("GH_REPO", "SOURCE_RUN_ID", "COMPONENT_TAG"))
     assert re.fullmatch(r"[0-9]+", run_id)
@@ -61,7 +69,8 @@ def main():
             metadata = json.loads((root / f"{stem}.json").read_text(encoding="utf-8-sig"))
             assert metadata["Flavor"] == flavor and archive.is_file()
             assert digest(archive) == metadata["Sha256"] and archive.stat().st_size == metadata["DownloadBytes"], "Archive checksum mismatch"
-            assert metadata["InstalledBytes"] > 0
+            metadata["DownloadBytes"] = byte_count(metadata["DownloadBytes"])
+            metadata["InstalledBytes"] = byte_count(metadata["InstalledBytes"])
             url = f"https://github.com/{repo}/releases/download/{tag}/{archive.name}"
             item = next(item for item in manifest["components"] if item["id"] == f"runtime-{flavor}")
             item.update(version=version, url=url, sha256=metadata["Sha256"], downloadBytes=metadata["DownloadBytes"], installedBytes=metadata["InstalledBytes"])

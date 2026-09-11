@@ -32,7 +32,7 @@ try {
         Archive = (Resolve-Path $Archive).Path
         Sha256 = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
         DownloadBytes = (Get-Item $Archive).Length
-        InstalledBytes = (Get-ChildItem (Join-Path $Temporary "dist/hongguo-ai-worker") -File -Recurse | Measure-Object Length -Sum).Sum
+        InstalledBytes = [long](Get-ChildItem (Join-Path $Temporary "dist/hongguo-ai-worker") -File -Recurse | Measure-Object Length -Sum).Sum
     } | ConvertTo-Json
     $Metadata | Set-Content -Encoding utf8 (Join-Path $OutputDirectory "hongguo-ai-runtime-windows-$Flavor.json")
     $Metadata
