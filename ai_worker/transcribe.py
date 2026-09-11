@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import math
 import os
+import importlib
+import sys
 import wave
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping
 
 from ai_worker.model_package import validate_whisper_package
@@ -12,6 +16,40 @@ from ai_worker.devices import select_device
 
 
 SUPPORTED_MODELS = {"small", "medium"}
+
+
+class TranscriptionProgress:
+    """Adapt Whisper's decoded-frame cursor to our flushed JSON event stream."""
+
+    def __init__(self, total: int, emit: Callable[[dict], None], **_kwargs):
+        self.total = max(1, total)
+        self.frames = 0
+        self.emit = emit
+
+    def __enter__(self):
+        self.report()
+        return self
+
+    def update(self, frames: int):
+        current = min(self.total, max(self.frames, self.frames + frames))
+        if current != self.frames:
+            self.frames = current
+            self.report()
+
+    def report(self):
+        # Whisper mel frames are 10 ms (HOP_LENGTH / SAMPLE_RATE).
+        def clock(frames):
+            seconds = int(frames / 100)
+            return f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+
+        self.emit(progress(
+            f"识别字幕 · 已处理 {clock(self.frames)} / {clock(self.total)}",
+            10 + 75 * self.frames / self.total,
+        ))
+
+    def __exit__(self, *_args):
+        # A failed decode must not fabricate completion.
+        return False
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -67,24 +105,42 @@ def _whisper_transcriber(
     device: str,
     language: str | None,
     model_root: Path | None,
+    emit: Callable[[dict], None],
 ) -> Mapping[str, Any]:
+    emit(progress("loadingSubtitleModel", 2))
     import whisper
+
+    protocol_stdout = sys.stdout
+
+    def report(event):
+        with redirect_stdout(protocol_stdout):
+            emit(event)
 
     kwargs: dict[str, Any] = {"device": device}
     if model_root is not None:
         kwargs["download_root"] = str(model_root)
-    loaded = whisper.load_model(model, **kwargs)
-    return loaded.transcribe(
-        str(source),
-        language=language,
-        fp16=device != "cpu",
-        verbose=False,
-    )
+    # Each worker runs one request. Replace only transcribe's local tqdm binding,
+    # leaving model downloads and other libraries' progress reporters untouched.
+    module = importlib.import_module("whisper.transcribe")
+    original = module.tqdm
+    module.tqdm = SimpleNamespace(tqdm=lambda **kwargs: TranscriptionProgress(emit=report, **kwargs))
+    try:
+        with redirect_stdout(sys.stderr):
+            loaded = whisper.load_model(model, **kwargs)
+            report(progress("preparingSubtitleAudio", 5))
+            return loaded.transcribe(
+                str(source),
+                language=language,
+                fp16=device != "cpu",
+                verbose=False,
+            )
+    finally:
+        module.tqdm = original
 
 
 def transcribe_audio(
     request: WorkerRequest,
-    transcriber: Callable[[Path, str, str, str | None, Path | None], Mapping[str, Any]] = _whisper_transcriber,
+    transcriber: Callable[..., Mapping[str, Any]] = _whisper_transcriber,
     emit: Callable[[dict], None] = lambda _event: None,
 ) -> dict[str, Any]:
     options = request.options
@@ -93,6 +149,7 @@ def transcribe_audio(
     model = options.get("model", "small")
     if model not in SUPPORTED_MODELS:
         raise WorkerError("AI_MODEL_UNSUPPORTED", "不支持所选 Whisper 模型")
+    emit(progress("preparingSubtitleAudio", 0))
     device = select_device(options.get("device", "auto"))
     language = options.get("language")
     if language is not None and (not isinstance(language, str) or len(language) > 16):
@@ -108,14 +165,13 @@ def transcribe_audio(
             raise WorkerError("AI_REQUEST_INVALID", "Whisper 模型目录无效")
         validate_whisper_package(model_root, model)
     duration = _wav_duration(request.input_path)
-    emit(progress("transcribing", 10))
     try:
-        recognition = transcriber(request.input_path, model, device, language, model_root)
+        recognition = transcriber(request.input_path, model, device, language, model_root, emit)
     except WorkerError:
         raise
     except BaseException as error:
         raise WorkerError("AI_TRANSCRIPTION_FAILED", "语音转写执行失败") from error
-    emit(progress("rendering", 85))
+    emit(progress("renderingSubtitles", 90))
     segments = recognition.get("segments") if isinstance(recognition, Mapping) else None
     if not isinstance(segments, list):
         raise WorkerError("AI_TRANSCRIPTION_FAILED", "语音转写结果无效")

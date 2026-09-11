@@ -91,6 +91,18 @@ describe("SettingsPage", () => {
     expect(deletes.every((button) => (button as HTMLButtonElement).disabled)).toBe(true);
   });
 
+  it("offers a runtime update without requiring model downloads again", async () => {
+    const settings = model({ components: [{ id: "runtime", version: "4", installed: false,
+      installedVersion: "2", installedPath: null, downloadBytes: 1024, installedBytes: 2048, inUse: false }] });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = render(<SettingsPage model={settings} />);
+    expect(view.getByText("待更新")).toBeTruthy();
+    expect(view.getByText(/已有识别模型无需重新下载/)).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "更新" }));
+    await waitFor(() => expect(settings.installComponent).toHaveBeenCalledWith("runtime"));
+    confirm.mockRestore();
+  });
+
   it("saves proxy and mainland mirror settings", () => {
     const settings = model();
     const view = render(<SettingsPage model={settings} />);

@@ -1,10 +1,16 @@
 import tempfile
 import unittest
 import wave
+import io
+import json
+import sys
+from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from ai_worker.protocol import WorkerError, WorkerRequest
-from ai_worker.transcribe import segments_to_srt, transcribe_audio
+from ai_worker.protocol import WorkerError, WorkerRequest, emit_event
+from ai_worker.transcribe import segments_to_srt, transcribe_audio, _whisper_transcriber
 
 
 def write_silence(path: Path, seconds: float = 2.0):
@@ -52,7 +58,7 @@ class TranscriptionTests(unittest.TestCase):
             request = self.request(Path(directory))
             events = []
 
-            def fake_transcriber(source, model, device, language, model_root):
+            def fake_transcriber(source, model, device, language, model_root, emit):
                 self.assertEqual((source, model, device), (request.input_path, "small", "cpu"))
                 self.assertIsNone(language)
                 self.assertIsNone(model_root)
@@ -94,6 +100,49 @@ class TranscriptionTests(unittest.TestCase):
                 transcribe_audio(request, transcriber=failed)
             self.assertNotIn("/Users/private", raised.exception.message)
 
+    def test_whisper_cursor_streams_json_before_recognition_finishes(self):
+        output, diagnostics = io.StringIO(), io.StringIO()
+        original = object()
+        module = SimpleNamespace(tqdm=original)
+
+        def recognize(*_args, **kwargs):
+            self.assertFalse(kwargs["verbose"])
+            print("Detecting language")
+            with module.tqdm.tqdm(total=9000, unit="frames", disable=False) as cursor:
+                for expected in (35, 60, 85):
+                    cursor.update(3000)
+                    events = [json.loads(line) for line in output.getvalue().splitlines()]
+                    self.assertEqual(events[-1]["percent"], expected)
+            return {"language": "zh", "segments": []}
+
+        whisper = SimpleNamespace(load_model=lambda *_args, **_kwargs: SimpleNamespace(transcribe=recognize))
+        with patch.dict(sys.modules, {"whisper": whisper, "whisper.transcribe": module}), \
+                redirect_stdout(output), redirect_stderr(diagnostics):
+            _whisper_transcriber(Path("audio.wav"), "small", "cpu", "zh", None, emit_event)
+        events = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([event["percent"] for event in events], [2, 5, 10, 35, 60, 85])
+        self.assertIn("00:01:30 / 00:01:30", events[-1]["stage"])
+        self.assertIn("Detecting language", diagnostics.getvalue())
+        self.assertIs(module.tqdm, original)
+
+    def test_failed_decode_restores_reporter_without_faking_completion(self):
+        events = []
+        original = object()
+        module = SimpleNamespace(tqdm=original)
+
+        def fail(*_args, **_kwargs):
+            with module.tqdm.tqdm(total=9000) as cursor:
+                cursor.update(3000)
+                cursor.update(-100)
+                raise RuntimeError("decode failed")
+
+        whisper = SimpleNamespace(load_model=lambda *_args, **_kwargs: SimpleNamespace(transcribe=fail))
+        with patch.dict(sys.modules, {"whisper": whisper, "whisper.transcribe": module}):
+            with self.assertRaises(RuntimeError):
+                _whisper_transcriber(Path("audio.wav"), "small", "cpu", "zh", None, events.append)
+        self.assertEqual(events[-1]["percent"], 35)
+        self.assertIs(module.tqdm, original)
+
     def test_packaged_model_root_requires_the_selected_offline_checkpoint(self):
         # Production mutation caught: allowing Whisper to download a missing model at
         # task runtime instead of rejecting an incomplete signed component package.
@@ -115,7 +164,7 @@ class TranscriptionTests(unittest.TestCase):
 
             (model_root / "small.pt").write_bytes(b"weights")
 
-            def packaged_transcriber(_source, model, _device, _language, received_root):
+            def packaged_transcriber(_source, model, _device, _language, received_root, _emit):
                 self.assertEqual(model, "small")
                 self.assertEqual(received_root, model_root.resolve())
                 return {

@@ -10,6 +10,7 @@ const stages: Record<string, string> = {
   "stream-copy": "无损合并", "audio-normalizing": "保留画面 · 校正音轨", normalizing: "统一视频规格", "hardware-transcode": "硬件转码",
   "software-fallback": "软件转码", validating: "校验成片时间轴",
   transcribing: "识别字幕", exportingSubtitle: "导出字幕", completed: "处理完成", failed: "处理失败", cancelled: "已取消", interrupted: "任务中断",
+  loadingSubtitleModel: "加载字幕模型", preparingSubtitleAudio: "准备识别音频", renderingSubtitles: "保存字幕文件",
 };
 const outputKinds = { vocals: "人声", backgroundMusic: "背景音乐", noBackgroundMusicVideo: "去背景音乐视频", subtitles: "SRT 字幕" };
 type Filter = "all" | "active" | "completed" | "attention";

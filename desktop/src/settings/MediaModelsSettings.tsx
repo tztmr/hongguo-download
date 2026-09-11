@@ -94,14 +94,16 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
       <div className="component-library">
         {model.components.map((item) => {
           const busy = isInstalling(item) || pendingIds.includes(item.id);
+          const updateAvailable = !!item.installedVersion && item.installedVersion !== item.version;
           const percent = Math.round(Number.isFinite(item.percent) ? Math.max(0, Math.min(100, item.percent!)) : 0);
           return <article className="component-library-card" key={item.id}>
             <div className="component-library-row">
               <label className="component-library-select"><input type="checkbox" aria-label={`选择 ${item.id} 下载`} checked={selectedIds.includes(item.id)} disabled={!!pendingIds.length || busy || item.inUse} onChange={() => setSelectedIds((ids) => ids.includes(item.id) ? ids.filter((id) => id !== item.id) : [...ids, item.id])} /><span><strong>{componentNames[item.id] || item.id}</strong><small>{item.id} · v{item.version}</small></span></label>
-              <span className={`component-state ${item.stage === "failed" ? "failed" : item.installed ? "ready" : ""}`}>{busy ? (stageNames[item.stage || ""] || "等待安装") : item.inUse ? "使用中" : item.stage === "failed" ? "安装失败" : item.installed ? "已安装" : "未安装"}</span>
-              <div className="component-library-actions"><button type="button" className="secondary-button" disabled={!!pendingIds.length || busy || item.inUse} onClick={() => void install([item])}>{busy ? "安装中…" : item.installed ? "重新下载" : "下载"}</button><button type="button" className="text-action" aria-label="删除模型" title={item.inUse ? "任务正在使用此组件" : "删除本机组件"} disabled={item.inUse || !item.installed || busy || !!pendingIds.length} onClick={() => void model.removeComponent(item.id)}>删除模型</button></div>
+              <span className={`component-state ${item.stage === "failed" ? "failed" : item.installed ? "ready" : ""}`}>{busy ? (stageNames[item.stage || ""] || "等待安装") : item.inUse ? "使用中" : item.stage === "failed" ? "安装失败" : item.installed ? "已安装" : updateAvailable ? "待更新" : "未安装"}</span>
+              <div className="component-library-actions"><button type="button" className="secondary-button" disabled={!!pendingIds.length || busy || item.inUse} onClick={() => void install([item])}>{busy ? "安装中…" : item.installed ? "重新下载" : updateAvailable ? "更新" : "下载"}</button><button type="button" className="text-action" aria-label="删除模型" title={item.inUse ? "任务正在使用此组件" : "删除本机组件"} disabled={item.inUse || !item.installed || busy || !!pendingIds.length} onClick={() => void model.removeComponent(item.id)}>删除模型</button></div>
             </div>
             <div className="component-size-row"><span>下载 <strong>{formatBytes(item.downloadBytes)}</strong></span><span>安装占用 <strong>{formatBytes(item.installedBytes)}</strong></span>{item.id.startsWith("runtime") ? <span>AI 任务运行环境</span> : null}</div>
+            {updateAvailable ? <p>已安装 v{item.installedVersion}，请更新到 v{item.version} 后再开始新任务。已有识别模型无需重新下载。</p> : null}
             {item.stage && item.stage !== "installed" ? <div className={`component-install-progress ${item.stage === "failed" ? "failed" : ""}`}><div className="progress-track" role="progressbar" aria-label={`${item.id} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><span style={{ width: `${percent}%` }} /></div><small>{stageNames[item.stage] || "处理中"} · {percent}%</small></div> : null}
             {item.installedPath ? <details className="component-location"><summary>安装位置{item.installedVersion ? ` · v${item.installedVersion}` : ""}</summary><code>{item.installedPath}</code></details> : null}
           </article>;

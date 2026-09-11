@@ -31,6 +31,15 @@ function separated(id: string, overrides: Partial<MediaJob> = {}) {
 }
 
 describe("media list selection", () => {
+  it("renders subtitle model stages and advances decoded-audio progress", () => {
+    const subtitle = job("字幕识别", { kind: "extractSubtitles", status: "running", stage: "第 1 集 · loadingSubtitleModel", percent: 2 });
+    const view = render(<MediaJobsPanel {...baseProps} media={model([subtitle])} />);
+    expect(view.getByText("第 1 集 · 加载字幕模型")).toBeTruthy();
+    view.rerender(<MediaJobsPanel {...baseProps} media={model([{ ...subtitle, stage: "第 1 集 · 识别字幕 · 已处理 00:00:30 / 00:01:30", percent: 35 }])} />);
+    expect(view.getByRole("progressbar", { name: "提取字幕进度" }).getAttribute("aria-valuenow")).toBe("35");
+    expect(view.getByText(/已处理 00:00:30 \/ 00:01:30/)).toBeTruthy();
+  });
+
   it("keeps hidden selection and deletes only selected visible rows without clearing filters", async () => {
     const media = model([job("Alpha"), job("Beta", { status: "failed" })]);
     const onNotice = vi.fn();

@@ -4,12 +4,12 @@
   "components": [
     {
       "id": "runtime",
-      "version": "2",
+      "version": "4",
       "platform": "aarch64-apple-darwin",
-      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/ai-components-v2/hongguo-ai-runtime-aarch64-apple-darwin.tar.gz",
-      "sha256": "073f20bff4da0e2739b1dff46076d900ffd82981c1d392da81125cdfc93b132b",
-      "downloadBytes": 156922102,
-      "installedBytes": 510405736,
+      "url": "https://github.com/tztmr/apihongguoai-address/releases/download/ai-components-v4/hongguo-ai-runtime-aarch64-apple-darwin.tar.gz",
+      "sha256": "d478ace4fcffb7bd38350952e2b1ea56daa52e1dc44be635fdc7f59183caee4e",
+      "downloadBytes": 156944063,
+      "installedBytes": 510417016,
       "entrypoint": "hongguo-ai-worker/hongguo-ai-worker"
     },
     {
