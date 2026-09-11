@@ -1,4 +1,4 @@
-# 番茄短剧纯算 API 服务
+# 纯算 API 服务
 
 使用**纯 Python 算法**生成签名头 (X-Gorgon, X-Khronos, x-ladon, x-argus),**无需任何 SO 文件**。仅保留短剧全套能力:加密短剧和 PSeries 无签名短剧。
 
