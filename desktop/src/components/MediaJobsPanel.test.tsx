@@ -31,6 +31,51 @@ function separated(id: string, overrides: Partial<MediaJob> = {}) {
 }
 
 describe("media list selection", () => {
+  it("groups merge, background music, and subtitle tasks with type filters", () => {
+    const jobs = [
+      job("Merged", { status: "completed" }),
+      job("Queued merge", { status: "queued", stage: "queued", percent: 0 }),
+      separated("Cleaned"),
+      job("Subtitles", { kind: "extractSubtitles", outputPath: "/output/Subtitles.srt", aiRequest: { title: "Subtitles", scope: "merged", model: "small" } }),
+    ];
+    const view = render(<MediaJobsPanel {...baseProps} media={model(jobs)} />);
+    expect(view.getByRole("button", { name: /合并成功.*1/ })).toBeTruthy();
+    expect(view.getByRole("button", { name: /分离背景音乐.*1/ })).toBeTruthy();
+    expect(view.getByRole("button", { name: /提取字幕.*1/ })).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: /分离背景音乐.*1/ }));
+    expect(view.getAllByTestId("media-job-row")).toHaveLength(1);
+    expect(view.getByText("Cleaned")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: /提取字幕.*1/ }));
+    expect(view.getAllByTestId("media-job-row")).toHaveLength(1);
+    expect(view.getByText("Subtitles")).toBeTruthy();
+  });
+
+  it("pauses and resumes only eligible selected visible tasks in bulk", async () => {
+    const queued = job("Queued", { status: "queued", stage: "queued", percent: 0 });
+    const running = job("Running", { status: "running", stage: "running", percent: 35 });
+    const paused = job("Paused", { status: "paused", stage: "paused", percent: 35 });
+    const completed = job("Completed");
+    const media = model([queued, running, paused, completed]);
+    const onNotice = vi.fn();
+    const view = render(<MediaJobsPanel {...baseProps} media={media} onNotice={onNotice} />);
+    fireEvent.click(view.getByRole("checkbox", { name: "全选当前可见媒体任务" }));
+    expect(disabled(view.getByRole("button", { name: /批量暂停/ }))).toBe(false);
+    expect(disabled(view.getByRole("button", { name: /批量开启/ }))).toBe(false);
+    fireEvent.click(view.getByRole("button", { name: /批量暂停/ }));
+    await waitFor(() => {
+      expect(media.pause).toHaveBeenCalledTimes(2);
+      expect(media.pause).toHaveBeenCalledWith("Queued");
+      expect(media.pause).toHaveBeenCalledWith("Running");
+    });
+    expect(onNotice).toHaveBeenCalledWith("已暂停 2 项媒体任务");
+    fireEvent.click(view.getByRole("button", { name: /批量开启/ }));
+    await waitFor(() => {
+      expect(media.resume).toHaveBeenCalledTimes(1);
+      expect(media.resume).toHaveBeenCalledWith("Paused");
+    });
+    expect(onNotice).toHaveBeenCalledWith("已开启 1 项媒体任务");
+  });
+
   it("renders subtitle model stages and advances decoded-audio progress", () => {
     const subtitle = job("字幕识别", { kind: "extractSubtitles", status: "running", stage: "第 1 集 · loadingSubtitleModel", percent: 2 });
     const view = render(<MediaJobsPanel {...baseProps} media={model([subtitle])} />);
