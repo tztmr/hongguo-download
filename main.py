@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 def _runtime_arguments():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--health-probe", action="store_true")
+    parser.add_argument("--build-info", action="store_true")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--data-dir")
@@ -13,6 +14,18 @@ def _runtime_arguments():
 
 
 _RUNTIME_ARGUMENTS = _runtime_arguments()
+if _RUNTIME_ARGUMENTS is not None and _RUNTIME_ARGUMENTS.build_info:
+    import json
+    import sys
+    from pathlib import Path
+
+    if getattr(sys, "frozen", False):
+        print((Path(sys._MEIPASS) / "api-build.json").read_text(encoding="utf-8"))
+    else:
+        from scripts.api_source_manifest import source_manifest
+        print(json.dumps(source_manifest(Path(__file__).resolve().parent)))
+    raise SystemExit(0)
+
 if _RUNTIME_ARGUMENTS is not None and _RUNTIME_ARGUMENTS.data_dir:
     os.environ["HONGGUO_DATA_DIR"] = _RUNTIME_ARGUMENTS.data_dir
 

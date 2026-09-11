@@ -18,11 +18,15 @@ venv_python="$temporary_dir/venv/bin/python"
   -r "$project_root/requirements.txt" \
   -r "$project_root/requirements-build.txt"
 
+"$venv_python" "$project_root/scripts/api_source_manifest.py" "$temporary_dir/api-build.json"
+
 "$venv_python" -m PyInstaller \
   --clean \
   --noconfirm \
   --onefile \
   --name hongguo-api \
+  --paths "$project_root" \
+  --add-data "$temporary_dir/api-build.json:." \
   --distpath "$temporary_dir/dist" \
   --workpath "$temporary_dir/work" \
   --specpath "$temporary_dir/spec" \
@@ -42,6 +46,7 @@ fi
 probe_data_dir="$temporary_dir/probe-data"
 mkdir -p "$probe_data_dir"
 HONGGUO_DATA_DIR="$probe_data_dir" "$built_sidecar" --health-probe
+node "$project_root/scripts/verify-api-sidecar.mjs" "$built_sidecar"
 
 mkdir -p "$destination_dir"
 staged="$destination_dir/.hongguo-api-aarch64-apple-darwin.$$"

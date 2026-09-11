@@ -148,6 +148,8 @@ curl "http://localhost:8000/api/device/cleanup"
 
 ## macOS 桌面应用
 
+API 源码修改后，先执行 `./scripts/build-api-sidecar.sh`（Windows 执行 `scripts/build-api-sidecar-windows.ps1`），再运行 Tauri 打包。构建脚本将源码 SHA-256 清单嵌入 API；Tauri 打包前会运行 `node scripts/verify-api-sidecar.mjs` 对照当前源码，旧 API 或缺少版本清单时会拒绝打包。两端构建需要 Node.js。可用 `node scripts/verify-api-sidecar.mjs <已解包的 API 程序路径>` 检查安装包中的实际 API。
+
 `desktop/` 提供下载队列、视频合并、可选 AI 音频/字幕处理、YouTube OAuth/可恢复上传和分类型系统通知。开发、隐私边界、AI 模型安装、Google Cloud 前置条件及发布验证说明见 [`desktop/README.md`](desktop/README.md)。
 
 完整 ARM64 发布使用 `scripts/build-release.sh`，并由 `scripts/verify-release.sh` 对 `.app`/`.dmg` 做失败即停止的资源、架构、健康探针、许可证和敏感数据扫描。FFmpeg/ffprobe 与 AI 清单的真实发布地址和 SHA-256 未提供时，不应把现有包描述为完整、自包含的发布版本。第三方许可说明见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。

@@ -23,6 +23,8 @@
 
 ## 榜单与新剧监听
 
+热度只来自上游的 `hot_score` 或明确标注“热度”的文本（包含 `rec_text`、`rec_text_item.RecommendText` 及副标题），不使用推荐次数、播放量代替。2026-09-11 排查发现 v0.3.0 旧安装包中的 API 未包含已提交的热度解析：同一首页响应在旧程序中缺少 `hot_count`，当前源码可解析出数值。已重建 API，并增加打包前源码哈希检查。新 DMG 的独立实测中，真人首页 6/6、漫剧首页 6/9、推荐榜 20/20、热播榜 19/20 条返回有效热度；上游未提供热度的剧目继续保留未知状态。
+
 榜单来自 `/reading/bookapi/bookmall/cell/change/v:version/`。项目接口为：
 
 - `GET /api/duanju/rank?board=...&type=...&cursor=...&limit=20`
