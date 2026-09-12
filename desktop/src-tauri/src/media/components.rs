@@ -340,10 +340,13 @@ impl ComponentManager {
         let _guard = InstallGuard {
             flag: &self.installing,
         };
-        let outcome = self.install_command_path(id, progress);
-        if let Err(error) = &outcome {
-            emit(progress, id, "failed", 100.0);
-            let _ = error;
+        let mut last_percent = 0.0;
+        let outcome = self.install_command_path(id, &mut |event| {
+            last_percent = event.percent;
+            progress(event);
+        });
+        if outcome.is_err() {
+            emit(progress, id, "failed", last_percent);
         }
         outcome
     }
@@ -2097,6 +2100,20 @@ mod tests {
         assert_eq!(server.request_count(), 0);
         assert!(stages.iter().any(|stage| stage == "checking"));
         assert!(stages.iter().any(|stage| stage == "failed"));
+    }
+
+    #[test]
+    fn failure_preserves_actual_install_progress() {
+        let fixture = Fixture::new();
+        let manager = fixture.manager(&"a".repeat(64));
+        manager.set_min_free_bytes(Some(0));
+        let mut events = Vec::new();
+        assert!(manager
+            .install("runtime", |event| events.push(event))
+            .is_err());
+        let failed = events.last().unwrap();
+        assert_eq!(failed.stage, "failed");
+        assert_eq!(failed.percent, 5.0);
     }
 
     #[test]

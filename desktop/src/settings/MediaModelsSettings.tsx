@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import type { AIComponentStatus } from "../types";
-import type { UseAppSettingsResult } from "./useAppSettings";
+import { errorMessage, type UseAppSettingsResult } from "./useAppSettings";
 import { MediaConcurrencyControl } from "../components/MediaConcurrencyControl";
 import { DownloadIcon, QueueIcon } from "../components/icons";
 
@@ -24,6 +24,7 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [pendingIds, setPendingIds] = useState<string[]>([]);
   const [error, setError] = useState("");
+  const [errorId, setErrorId] = useState("");
   const installLock = useRef(false);
   const settings = model.settings!;
   const selected = model.components.filter((item) => selectedIds.includes(item.id) && !isInstalling(item) && !item.inUse);
@@ -46,10 +47,11 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
     });
     try {
       for (const item of items) {
+        setErrorId(item.id);
         await model.installComponent(item.id);
         setSelectedIds((ids) => ids.filter((id) => id !== item.id));
       }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "组件安装失败，请重试"); }
+    } catch (reason) { setError(errorMessage(reason)); }
     finally { installLock.current = false; setPendingIds([]); }
   }
   const ready = (id: string) => model.components.some((item) => item.id === id && item.installed);
@@ -105,12 +107,12 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
             <div className="component-size-row"><span>下载 <strong>{formatBytes(item.downloadBytes)}</strong></span><span>安装占用 <strong>{formatBytes(item.installedBytes)}</strong></span>{item.id.startsWith("runtime") ? <span>AI 任务运行环境</span> : null}</div>
             {updateAvailable ? <p>已安装 v{item.installedVersion}，请更新到 v{item.version} 后再开始新任务。{item.id.startsWith("runtime") ? "已有识别模型无需重新下载。" : ""}</p> : null}
             {item.stage && item.stage !== "installed" ? <div className={`component-install-progress ${item.stage === "failed" ? "failed" : ""}`}><div className="progress-track" role="progressbar" aria-label={`${item.id} 下载进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}><span style={{ width: `${percent}%` }} /></div><small>{stageNames[item.stage] || "处理中"} · {percent}%</small></div> : null}
+            {error && errorId === item.id ? <p className="warning-banner" role="alert">{error}</p> : null}
             {item.installedPath ? <details className="component-location"><summary>安装位置{item.installedVersion ? ` · v${item.installedVersion}` : ""}</summary><code>{item.installedPath}</code></details> : null}
           </article>;
         })}
         {!model.components.length ? <div className="component-empty"><DownloadIcon size={24} /><strong>暂无可下载的组件</strong><p>尚未配置可安装的媒体组件清单</p></div> : null}
       </div>
-      {error ? <p className="warning-banner" role="alert">{error}</p> : null}
       <div className="component-download-bar"><div aria-live="polite"><strong>{selected.length ? `已选择 ${selected.length} 个组件` : "选择需要安装的组件"}</strong><small>{selected.length ? `下载 ${formatBytes(totalDownload)} · 安装后占用 ${formatBytes(totalInstalled)}` : "AI 组件按需下载，不包含在基础安装包中"}</small></div><button type="button" className="primary-button" disabled={!selected.length || !!pendingIds.length} onClick={() => void install(selected)}><DownloadIcon size={16} />{pendingIds.length ? "下载中…" : `下载选中组件${selected.length ? `（${selected.length}）` : ""}`}</button></div>
     </section>
   );

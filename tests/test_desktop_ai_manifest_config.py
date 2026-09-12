@@ -48,7 +48,7 @@ class DesktopAIManifestConfigTest(unittest.TestCase):
                 self.assertGreater(item["installedBytes"], item["downloadBytes"])
                 self.assertEqual(item["version"], "4")
                 self.assertIn(
-                    "/releases/download/windows-components-v4/", item["url"]
+                    "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v4/", item["url"]
                 )
                 parts = item.get("parts") or []
                 github_file_limit = 2_000_000_000
@@ -61,7 +61,7 @@ class DesktopAIManifestConfigTest(unittest.TestCase):
                         self.assertGreater(part["bytes"], 0)
                         self.assertLessEqual(part["bytes"], github_file_limit)
                         self.assertIn(
-                            "/releases/download/windows-components-v4/",
+                            "https://github.com/tztmr/apihongguoai-address/releases/download/windows-components-v4/",
                             part["url"],
                         )
                         self.assertTrue(

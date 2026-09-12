@@ -69,7 +69,7 @@ function readErrorMessage(error: unknown, seen = new Set<unknown>()): string | u
   return undefined;
 }
 
-function errorMessage(error: unknown) {
+export function errorMessage(error: unknown) {
   return readErrorMessage(error) || "操作失败，请重试";
 }
 
@@ -193,7 +193,7 @@ export function useAppSettings(
       });
     } catch (error) {
       setComponents((current) => current.map((item) => (
-        item.id === id ? { ...item, stage: "failed", percent: 100 } : item
+        item.id === id ? { ...item, stage: "failed" } : item
       )));
       setWarning(errorMessage(error));
       throw error;
