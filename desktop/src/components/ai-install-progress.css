@@ -1,0 +1,7 @@
+.ai-install-progress-list { display: grid; gap: 16px; margin: 20px 0; }
+.ai-install-progress-label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 12px; }
+.ai-install-progress-label strong { overflow-wrap: anywhere; }
+.ai-install-progress-label span { flex-shrink: 0; color: var(--muted); }
+.ai-install-progress-list .progress-track { height: 6px; }
+.ai-install-progress-list > small { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.ai-install-progress-item.failed .ai-install-progress-label span { color: var(--accent); }

@@ -5,7 +5,7 @@ import logging
 import random
 import time
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -15,6 +15,21 @@ from core.device_register import register_device_and_key
 
 logger = logging.getLogger("fanqie.client")
 UA = "com.dragon.read"
+
+
+def _with_device_identity(url: str, device: DeviceEntry) -> str:
+    """Make the request identity match the device used for signing/failover."""
+
+    parsed = urlparse(url)
+    params = parse_qsl(parsed.query, keep_blank_values=True)
+    identity = {
+        "device_id": str(device.device_id),
+        "iid": str(device.install_id),
+    }
+    for key, value in identity.items():
+        params = [(existing_key, existing_value) for existing_key, existing_value in params if existing_key != key]
+        params.append((key, value))
+    return urlunparse(parsed._replace(query=urlencode(params)))
 
 
 def _trigger_ensure_pool() -> None:
@@ -100,8 +115,15 @@ class PureSignedClient:
         result.update(extra)
         return result
 
-    async def signed_get(self, url: str, aid: int = 1967) -> httpx.Response:
+    async def signed_get(
+        self,
+        url: str,
+        aid: int = 1967,
+        device: DeviceEntry | None = None,
+    ) -> httpx.Response:
 
+        if device is not None:
+            url = _with_device_identity(url, device)
         parsed = urlparse(url)
         query_string = parsed.query or ""
         sign_headers = self._make_headers(query_string, aid=aid)
@@ -110,8 +132,11 @@ class PureSignedClient:
 
     async def signed_post(self, url: str, data: str = "",
                           content_type: str = "application/x-www-form-urlencoded",
-                          aid: int = 1967) -> httpx.Response:
+                          aid: int = 1967,
+                          device: DeviceEntry | None = None) -> httpx.Response:
 
+        if device is not None:
+            url = _with_device_identity(url, device)
         parsed = urlparse(url)
         query_string = parsed.query or ""
         body_bytes = data.encode("utf-8") if isinstance(data, str) else data
@@ -177,7 +202,9 @@ class PureSignedClient:
 
             # 3. 发起请求
             url = url_builder(device_id)
-            result = await self._do_call(url, method, data, aid, content_type=content_type)
+            result = await self._do_call(
+                url, method, data, aid, content_type=content_type, device=entry,
+            )
 
             if result["ok"]:
                 device_pool.report_success(device_id)
@@ -203,17 +230,18 @@ class PureSignedClient:
 
     async def _do_call(self, url: str, method: str, data: str, aid: int,
                        _retry: int = 1,
-                       content_type: str = "application/x-www-form-urlencoded") -> dict:
+                       content_type: str = "application/x-www-form-urlencoded",
+                       device: DeviceEntry | None = None) -> dict:
 
         last_err = ""
         for attempt in range(_retry + 1):
             try:
                 if method.upper() == "POST":
                     resp = await self.signed_post(
-                        url, data, content_type=content_type, aid=aid
+                        url, data, content_type=content_type, aid=aid, device=device,
                     )
                 else:
-                    resp = await self.signed_get(url, aid=aid)
+                    resp = await self.signed_get(url, aid=aid, device=device)
 
                 if resp.status_code >= 500:
                     last_err = f"上游 HTTP {resp.status_code}"

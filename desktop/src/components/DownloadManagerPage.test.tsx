@@ -546,6 +546,31 @@ describe("Windows post-merge media actions", () => {
     expect(view.queryByRole("dialog", { name: "安装 AI 组件" })).toBeNull();
   });
 
+  it("shows live installation progress and retains failures inside the install dialog", async () => {
+    const media = mediaFixture();
+    let rejectInstall!: (error: Error) => void;
+    const install = vi.fn(() => new Promise<void>((_, reject) => { rejectInstall = reject; }));
+    const props = { manager: managerFixture(), media, onInstallComponent: install, saveDir: "/Downloads", onOpenDir: vi.fn(), onChooseDir: vi.fn(), onRevealPath: vi.fn() };
+    const catalog = [aiComponent("runtime-modern", false), aiComponent("demucs-htdemucs", true)];
+    const view = render(<DownloadManagerPage {...props} aiComponents={catalog} />);
+    fireEvent.click(view.getByRole("button", { name: "查看 女子爱财，取之有道 任务详情" }));
+    fireEvent.click(view.getByRole("button", { name: "分离背景音乐" }));
+    fireEvent.click(view.getByRole("button", { name: "开始分离" }));
+    const dialog = within(view.getByRole("dialog", { name: "安装 AI 组件" }));
+    expect(dialog.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("0");
+    fireEvent.click(dialog.getByRole("button", { name: "确认安装并继续" }));
+    for (const [stage, percent, text] of [["downloading", 32, "正在下载"], ["verifying", 50, "校验文件"], ["extracting", 70, "解压组件"], ["selfTesting", 90, "运行自检"]] as const) {
+      view.rerender(<DownloadManagerPage {...props} aiComponents={[{ ...catalog[0], stage, percent }, catalog[1]]} />);
+      expect(dialog.getByRole("progressbar").getAttribute("aria-valuenow")).toBe(String(percent));
+      expect(dialog.getByRole("progressbar").getAttribute("aria-valuetext")).toContain(text);
+      expect(media.startAudioSeparation).not.toHaveBeenCalled();
+    }
+    await act(async () => rejectInstall(new Error("下载连接中断")));
+    expect(dialog.getByRole("alert").textContent).toBe("下载连接中断");
+    expect((dialog.getByRole("button", { name: "确认安装并继续" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(install).toHaveBeenCalledTimes(1);
+  });
+
   it("asks Windows catalogs to install runtime-modern instead of an unconfigured runtime", async () => {
     const media = mediaFixture();
     const view = render(

@@ -75,20 +75,23 @@ class VideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, b'backup' * 1024)
         self.assertTrue(closed.is_set())
 
-    async def test_continuously_trickling_primary_uses_faster_backup(self):
+    async def test_sustained_low_rate_does_not_download_duplicate_copy(self):
+        requested = []
         class TrickleStream(httpx.AsyncByteStream):
             async def __aiter__(self):
-                while True:
-                    yield b'v'
+                for _ in range(40):
+                    yield b'v' * 128
                     await asyncio.sleep(.002)
         async def handle(request):
+            requested.append(request.url.host)
             if request.url.host == 'a.test':
                 return httpx.Response(200, stream=TrickleStream())
             return httpx.Response(200, content=b'backup' * 1024)
-        with patch('core.video_download.SLOW_WINDOW', .03):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-                result = await asyncio.wait_for(download_video(['https://a.test/v', 'https://b.test/v'], client), 1)
-        self.assertEqual(result, b'backup' * 1024)
+        # Speed alone cannot distinguish a poor CDN from shared network capacity.
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            result = await asyncio.wait_for(download_video(['https://a.test/v', 'https://b.test/v'], client), 1)
+        self.assertEqual(result, b'v' * 5120)
+        self.assertEqual(requested, ['a.test'])
 
     async def test_healthy_stream_beyond_first_byte_deadline_never_hedges(self):
         requested = []
@@ -100,7 +103,7 @@ class VideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         async def handle(request):
             requested.append(request.url.host)
             return httpx.Response(200, stream=HealthyStream())
-        with patch('core.video_download.FIRST_BYTE_WAIT', .01), patch('core.video_download.SLOW_WINDOW', .03):
+        with patch('core.video_download.FIRST_BYTE_WAIT', .01):
             async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
                 result = await download_video(['https://a.test/v', 'https://b.test/v'], client)
         self.assertEqual(len(result), 12 * 65536)

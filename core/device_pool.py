@@ -31,6 +31,15 @@ class DeviceEntry:
 
         return (time.time() - self.created_at) > DEVICE_TTL
 
+    def has_valid_identity(self) -> bool:
+        return bool(
+            self.device_id
+            and self.device_id != "0"
+            and self.install_id
+            and self.install_id != "0"
+            and self.secret_key
+        )
+
     def to_dict(self) -> dict:
         return {
             "device_id": self.device_id,
@@ -109,9 +118,13 @@ class DevicePool:
 
             candidates = []
             for d in self._devices:
-                if d.status == "active":
+                if d.status == "active" and d.has_valid_identity():
                     candidates.append(d)
-                elif d.status == "failed" and (now - d.last_fail) > self.FAIL_COOLDOWN:
+                elif (
+                    d.status == "failed"
+                    and d.has_valid_identity()
+                    and (now - d.last_fail) > self.FAIL_COOLDOWN
+                ):
                     d.status = "active"
                     d.fail_count = 0
                     candidates.append(d)
@@ -138,7 +151,7 @@ class DevicePool:
                         return None
                     device.status = "active"
                     device.fail_count = 0
-                if device.status != "active" or not device.secret_key:
+                if device.status != "active" or not device.has_valid_identity():
                     return None
                 device.last_used = now
                 self._save()

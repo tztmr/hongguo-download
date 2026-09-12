@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import type { AIComponentProgress, AIComponentStatus, AppSettings } from "../types";
+import type { AIComponentProgress, AIComponentStatus, AppSettings, DevicePoolStatus } from "../types";
 import { describe, expect, it, vi } from "vitest";
 import { useAppSettings, type AppSettingsDependencies, type AppSettingsPatch } from "./useAppSettings";
 
@@ -26,6 +26,54 @@ function dependencies(overrides: Partial<AppSettingsDependencies> = {}): AppSett
 }
 
 describe("useAppSettings", () => {
+  it("loads and refreshes the device identity pool", async () => {
+    const initial: DevicePoolStatus = { devices: [], pool_size: 0, active_count: 0 };
+    const refreshed: DevicePoolStatus = {
+      devices: [{
+        device_id: "device-123",
+        install_id: "install-456",
+        status: "active",
+        remaining_seconds: 3600,
+        expired: false,
+      }],
+      pool_size: 1,
+      active_count: 1,
+    };
+    const deps = dependencies({
+      getDevicePool: vi.fn(async () => initial),
+      refreshDevice: vi.fn(async () => refreshed),
+    });
+    const { result } = renderHook(() => useAppSettings(deps));
+
+    await waitFor(() => expect(result.current.devicePool).toBe(initial));
+    await act(async () => result.current.refreshDevice());
+
+    expect(deps.refreshDevice).toHaveBeenCalledTimes(1);
+    expect(result.current.devicePool).toBe(refreshed);
+    expect(result.current.devicesLoading).toBe(false);
+  });
+
+  it("keeps the last native progress and error when an update fails", async () => {
+    const component: AIComponentStatus = { id: "runtime-modern", version: "4", installed: false,
+      installedVersion: "3", installedPath: null, downloadBytes: 1024, installedBytes: 2048, inUse: false };
+    let progress: ((event: AIComponentProgress) => void) | undefined;
+    let rejectInstall: ((reason: unknown) => void) | undefined;
+    const failure = { code: "AI_COMPONENT_DOWNLOAD_FAILED", message: "媒体组件下载失败（HTTP 404 Not Found）" };
+    const deps = dependencies({
+      getAiComponents: vi.fn(async () => [component]),
+      subscribeAiComponentProgress: vi.fn(async (listener) => { progress = listener; return () => undefined; }),
+      installAiComponent: vi.fn(() => new Promise<AIComponentStatus>((_resolve, reject) => { rejectInstall = reject; })),
+    });
+    const { result } = renderHook(() => useAppSettings(deps));
+    await waitFor(() => expect(result.current.components).toHaveLength(1));
+    let operation: Promise<unknown>;
+    act(() => { operation = result.current.installComponent(component.id).catch(error => error); });
+    act(() => progress?.({ id: component.id, stage: "downloading", percent: 20 }));
+    await act(async () => { rejectInstall?.(failure); await operation; });
+    expect(result.current.components[0]).toMatchObject({ installed: false, installedVersion: "3", stage: "failed", percent: 20 });
+    expect(result.current.warning).toBe(failure.message);
+  });
+
   it("loads components and applies live native progress", async () => {
     const component: AIComponentStatus = {
       id: "runtime",

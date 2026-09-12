@@ -74,6 +74,8 @@ async def device_register() -> dict:
 
     if not device_id or device_id == "0":
         raise Exception("设备注册返回无效 device_id")
+    if not install_id or install_id == "0":
+        raise Exception("设备注册返回无效 install_id")
 
     return {
         "device_id": device_id,

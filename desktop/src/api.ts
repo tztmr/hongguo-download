@@ -4,6 +4,7 @@ import type {
   AIComponentProgress,
   AIComponentStatus,
   AppSettings,
+  DevicePoolStatus,
   CategoryGroup,
   CategoryFilters,
   WebCategoryPage,
@@ -162,6 +163,15 @@ export async function apiGet<T>(path: string): Promise<T> {
 
 export async function fetchHealth() {
   return invoke<{ status: string; pool_size: number; active_count: number }>("health");
+}
+
+export async function fetchDevicePool(): Promise<DevicePoolStatus> {
+  return apiGet<DevicePoolStatus>("/api/device/list");
+}
+
+export async function refreshDevice(): Promise<DevicePoolStatus> {
+  await apiGet<unknown>("/api/device/register?count=1");
+  return fetchDevicePool();
 }
 
 export async function fetchDiscovery(contentType: ContentType): Promise<DiscoveryPage> {

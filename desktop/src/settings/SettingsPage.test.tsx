@@ -24,6 +24,9 @@ function model(overrides: Partial<UseAppSettingsResult> = {}): UseAppSettingsRes
     openDirectory: vi.fn(async () => undefined),
     installComponent: vi.fn(async () => undefined),
     removeComponent: vi.fn(async () => undefined),
+    devicePool: null,
+    devicesLoading: false,
+    refreshDevice: vi.fn(async () => undefined),
     ...overrides,
   };
 }
@@ -52,6 +55,30 @@ describe("SettingsPage", () => {
     expect(settings.update).toHaveBeenCalledWith({ definition: "720p" });
     expect(settings.update).toHaveBeenCalledWith({ notifyNewReleases: false });
     expect(settings.update).toHaveBeenCalledWith({ aiDevice: "cuda" });
+  });
+
+  it("shows device and install identities and refreshes the device pool", async () => {
+    const settings = model({
+      devicePool: {
+        devices: [{
+          device_id: "device-123",
+          install_id: "install-456",
+          status: "active",
+          remaining_seconds: 3600,
+          expired: false,
+        }],
+        pool_size: 1,
+        active_count: 1,
+      },
+      refreshDevice: vi.fn(async () => undefined),
+    });
+    const view = render(<SettingsPage model={settings} />);
+
+    expect(view.getByText("device-123")).toBeTruthy();
+    expect(view.getByText("install-456")).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: "更新/刷新设备" }));
+
+    await waitFor(() => expect(settings.refreshDevice).toHaveBeenCalledTimes(1));
   });
 
   it("shows component progress and refuses model deletion while in use", () => {
@@ -211,7 +238,7 @@ describe("SettingsPage", () => {
     const settings = model({ components: ["runtime", "demucs-htdemucs", "whisper-small", "whisper-medium"].map((id) => ({
       id, version: "1", installed: id === "runtime", installedVersion: null, installedPath: null,
       downloadBytes: 1024, installedBytes: 2048, inUse: false,
-    })), installComponent: vi.fn().mockRejectedValue(new Error("组件下载失败")) });
+    })), installComponent: vi.fn().mockRejectedValue({ code: "AI_COMPONENT_DOWNLOAD_FAILED", message: "媒体组件下载失败（HTTP 404 Not Found）" }) });
     const view = render(<SettingsPage model={settings} />);
     fireEvent.click(view.getByRole("button", { name: "选择当前模型所需组件" }));
     expect((view.getByRole("checkbox", { name: "选择 runtime 下载" }) as HTMLInputElement).checked).toBe(false);
@@ -220,7 +247,7 @@ describe("SettingsPage", () => {
     expect((view.getByRole("checkbox", { name: "选择 whisper-medium 下载" }) as HTMLInputElement).checked).toBe(false);
     expect(view.getByText("下载 2 KB · 安装后占用 4 KB")).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: /下载选中组件/ }));
-    await waitFor(() => expect(view.getByRole("alert").textContent).toBe("组件下载失败"));
+    await waitFor(() => expect(view.getByRole("alert").textContent).toBe("媒体组件下载失败（HTTP 404 Not Found）"));
     expect(settings.installComponent).toHaveBeenCalledTimes(1);
     vi.mocked(window.confirm).mockRestore();
   });

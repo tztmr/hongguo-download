@@ -13,9 +13,11 @@ from starlette.requests import Request
 from endpoints.duanju import (
     _duanju_new_release_cache,
     _duanju_rank_page_cache,
+    _duanju_video_cache,
     _category_groups,
     _fetch_new_release_page,
     _fetch_rank_feed_page,
+    _fetch_video_model,
     _fetch_series_metrics,
     _new_release_candidates,
     _series_item,
@@ -118,6 +120,43 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             _pick_source([source("720p")], "auto")["definition"], "720p"
         )
+
+    async def test_video_model_uses_device_failover_client(self):
+        _duanju_video_cache.clear()
+
+        class Client:
+            def __init__(self):
+                self.calls = []
+
+            async def call_with_device(self, url_builder, **kwargs):
+                self.calls.append({"url": url_builder("device-under-test"), **kwargs})
+                return {
+                    "ok": True,
+                    "upstream": {
+                        "data": {
+                            "episode-1": {
+                                "video_model": json.dumps({
+                                    "video_list": {
+                                        "720p": {
+                                            "main_url": "https://cdn.example.test/video",
+                                            "encrypt_info": {"spade_a": "spade"},
+                                        },
+                                    },
+                                }),
+                            },
+                        },
+                    },
+                }
+
+        client = Client()
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(client=client)))
+
+        result = await _fetch_video_model(request, "episode-1")
+
+        self.assertEqual(result["sources"][0]["definition"], "720p")
+        self.assertEqual(client.calls[0]["method"], "POST")
+        self.assertEqual(client.calls[0]["aid"], 8662)
+        self.assertEqual(client.calls[0]["content_type"], "application/json")
 
     def test_category_groups_keep_upstream_order_and_deduplicate(self):
         selector = {

@@ -38,6 +38,7 @@ import {
   type GroupedPagingState,
 } from "./feed/groupedPaging";
 import { NewReleasesPage } from "./monitor/NewReleasesPage";
+import { AutomationPage } from "./monitor/AutomationPage";
 import { useNewReleaseMonitor } from "./monitor/useNewReleaseMonitor";
 import { createTauriNotificationAdapter, type NotificationTarget } from "./notifications";
 import { useNotificationRouter } from "./notifications/useNotificationRouter";
@@ -59,6 +60,7 @@ import { useAppSettings, type AppSettingsDependencies } from "./settings/useAppS
 import { useYouTube } from "./youtube/useYouTube";
 import type {
   AppSettings,
+  AIComponentProgress,
   ContentType,
   CategoryGroup,
   DiscoveryPage,
@@ -102,6 +104,7 @@ const previewSettings: AppSettings = {
   downloadProxy: "",
   downloadMirror: "",
 };
+const previewInstallListeners = new Set<(progress: AIComponentProgress) => void>();
 const previewSettingsApi: AppSettingsDependencies = {
   getSettings: async () => previewSettings,
   updateSettings: async (patch) => ({ ...previewSettings, ...patch }),
@@ -112,7 +115,17 @@ const previewSettingsApi: AppSettingsDependencies = {
   installAiComponent: async (id) => {
     const item = previewAIComponents.find((component) => component.id === id);
     if (!item) throw new Error("预览组件不存在");
+    // Exercise the same progress UI without downloading files in preview mode.
+    for (const [stage, percent] of [["downloading", 20], ["downloading", 35], ["verifying", 50], ["extracting", 70], ["selfTesting", 90]] as const) {
+      await new Promise(resolve => window.setTimeout(resolve, 1500));
+      previewInstallListeners.forEach(listener => listener({ id, stage, percent }));
+    }
+    await new Promise(resolve => window.setTimeout(resolve, 1500));
     return { ...item, installed: true, installedVersion: item.version, installedPath: `/Preview/components/${id}` };
+  },
+  subscribeAiComponentProgress: async (listener) => {
+    previewInstallListeners.add(listener);
+    return () => { previewInstallListeners.delete(listener); };
   },
   removeAiComponent: async () => undefined,
 };
@@ -141,8 +154,8 @@ function filterSearchItems(items: SeriesItem[], keyword: string, mode: SearchMod
 
 export default function App() {
   const previewMode = new URLSearchParams(window.location.search).get("preview");
-  const isPreview = previewMode === "library" || previewMode === "downloads";
-  const [nav, setNav] = useState<NavId>(previewMode === "downloads" ? "queue" : "discover");
+  const isPreview = previewMode === "library" || previewMode === "downloads" || previewMode === "automation";
+  const [nav, setNav] = useState<NavId>(previewMode === "automation" ? "automation" : previewMode === "downloads" ? "queue" : "discover");
   const [platformVisited, setPlatformVisited] = useState(false);
   const [analyticsVisited, setAnalyticsVisited] = useState(false);
   const [queueVisited, setQueueVisited] = useState(previewMode === "downloads");
@@ -539,7 +552,7 @@ export default function App() {
   };
 
   return (
-    <div className={`app-shell ${nav === "queue" || nav === "monitor" || nav === "settings" || nav === "platformVideos" || nav === "analytics" ? "queue-mode" : "library-mode"}`}>
+    <div className={`app-shell ${nav === "queue" || nav === "monitor" || nav === "automation" || nav === "settings" || nav === "platformVideos" || nav === "analytics" ? "queue-mode" : "library-mode"}`}>
       <AppRail nav={nav} pendingCount={pendingCount} unseenReleases={monitor.unseenCount} healthOk={healthOk} onNavigate={navigate} />
       {nav === "queue" || queueVisited ? (
         <DownloadManagerPage
@@ -551,8 +564,8 @@ export default function App() {
           onAIConcurrencyChange={value => settingsModel.update({ aiConcurrency: value })}
           demucsModel={activeSettings.demucsModel}
           whisperModel={activeSettings.whisperModel}
-          aiComponents={isPreview ? undefined : settingsModel.components}
-          onInstallComponent={isPreview ? undefined : settingsModel.installComponent}
+          aiComponents={settingsModel.components}
+          onInstallComponent={settingsModel.installComponent}
           youtube={isPreview ? previewYouTubeModel : youtube}
           focusTarget={nav === "queue" ? managerFocus : null}
           onChooseDir={() => {
@@ -570,6 +583,8 @@ export default function App() {
       {analyticsVisited && <DataAnalyticsPage hidden={nav !== "analytics"} youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewAnalyticsCommands : undefined} />}
       {nav === "queue" || nav === "platformVideos" || nav === "analytics" ? null : nav === "monitor" ? (
         <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
+      ) : nav === "automation" ? (
+        <AutomationPage saveDir={activeSettings.saveDir} channels={(isPreview ? previewYouTubeModel : youtube).channels} onOpenSettings={() => navigate("settings")} />
       ) : nav === "settings" ? (
         <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />
       ) : (

@@ -1,11 +1,14 @@
 import { useRef, useState, type ReactNode } from "react";
 import type { DownloadBatch } from "../download/model";
 import type { MediaJobScope } from "../media/types";
+import type { AIComponentStatus } from "../types";
+import { AIInstallProgress } from "./AIInstallProgress";
 
 export type BatchMediaTarget = { batch: DownloadBatch; mergedPath?: string; reason?: string };
 export type BatchMediaKind = "audioSeparation" | "subtitleExtraction";
 
-export function BatchMediaDialog({ targets, kind, modelName, missingComponents, canInstall, onInstall, onSubmit, onClose, onQueued, concurrencyControl }: {
+export function BatchMediaDialog({ targets, kind, modelName, missingComponents, aiComponents, canInstall, onInstall, onSubmit, onClose, onQueued, concurrencyControl }: {
+  aiComponents?: AIComponentStatus[];
   concurrencyControl?: ReactNode;
   targets: BatchMediaTarget[];
   kind: BatchMediaKind;
@@ -22,6 +25,7 @@ export function BatchMediaDialog({ targets, kind, modelName, missingComponents, 
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [installError, setInstallError] = useState("");
+  const [installIds, setInstallIds] = useState<string[]>([]);
   const inFlight = useRef(false);
   const reasonFor = (target: BatchMediaTarget) => target.reason || (scope === "merged" && !target.mergedPath ? "尚无已验证的合并视频，已跳过" : undefined);
   const remaining = targets.filter(target => !reasonFor(target) && !queued.has(target.batch.id));
@@ -35,7 +39,10 @@ export function BatchMediaDialog({ targets, kind, modelName, missingComponents, 
     let count = 0;
     let failed = false;
     try {
-      if (missingComponents.length) await onInstall();
+      if (missingComponents.length) {
+        setInstallIds([...missingComponents]);
+        await onInstall();
+      }
       for (const target of remaining) {
         try {
           await onSubmit(target, scope);
@@ -72,6 +79,7 @@ export function BatchMediaDialog({ targets, kind, modelName, missingComponents, 
       </li>)}</ul>
       {missingComponents.length ? <p>需要先安装 AI 组件：{missingComponents.join("、")}{!canInstall ? "。请先在设置中安装所需组件。" : "。确认后安装并继续。"}</p> : null}
       {installError ? <p role="alert" className="error-copy">{installError}</p> : null}
+      {installIds.length ? <AIInstallProgress ids={installIds} components={aiComponents} /> : null}
       <footer><button className="secondary-button" disabled={busy} onClick={onClose}>取消</button>
         <button className="primary-button" disabled={busy || !remaining.length || (missingComponents.length > 0 && !canInstall)} onClick={() => void submit()}>{busy ? "正在准备任务…" : missingComponents.length ? "确认安装并批量处理" : Object.keys(errors).length ? "重试失败项" : "开始批量处理"}</button></footer>
     </section>

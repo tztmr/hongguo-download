@@ -20,6 +20,7 @@ import { BatchMediaDialog, type BatchMediaTarget, type BatchMediaKind } from "./
 import { BatchMergeDialog, type BatchMergeTarget } from "./BatchMergeDialog";
 import { YouTubeBatchUploadDialog, type YouTubeBatchUploadSource } from "../youtube/YouTubeBatchUploadDialog";
 import { getUploadSourceOptions } from "../youtube/uploadSources";
+import { AIInstallProgress } from "./AIInstallProgress";
 
 type ManagerSection = "downloads" | "media" | "youtube";
 
@@ -317,8 +318,9 @@ function DownloadManagerPageView({
   }
 
   async function installAndEnqueue() {
-    if (!pendingInstall || !onInstallComponent) return;
+    if (!pendingInstall || !onInstallComponent || installing) return;
     setInstalling(true);
+    setActionError("");
     try {
       for (const id of pendingInstall.ids) await onInstallComponent(id);
       await enqueueAI(pendingInstall.batchId, pendingInstall.kind, pendingInstall.scope, pendingInstall.mergedPath);
@@ -633,6 +635,8 @@ function DownloadManagerPageView({
               const component = aiComponents?.find((item) => item.id === id);
               return <li key={id}>{id}{component ? ` · 下载 ${formatBytes(component.downloadBytes)} · 安装 ${formatBytes(component.installedBytes)}` : " · 未在发布清单中配置"}</li>;
             })}</ul>
+            <AIInstallProgress ids={pendingInstall.ids} components={aiComponents} />
+            {actionError ? <p role="alert" className="error-copy">{actionError}</p> : null}
             <footer><button type="button" className="secondary-button" disabled={installing} onClick={() => setPendingInstall(null)}>取消</button><button type="button" className="primary-button" disabled={installing || !onInstallComponent || pendingInstall.ids.some((id) => !aiComponents?.some((item) => item.id === id))} onClick={() => { void installAndEnqueue(); }}>{installing ? "安装中…" : "确认安装并继续"}</button></footer>
           </section>
         </div>
@@ -653,6 +657,7 @@ function DownloadManagerPageView({
         />
       ) : null}
       {bulkMedia ? <BatchMediaDialog concurrencyControl={media.scheduling?.windows && onAIConcurrencyChange ? <MediaConcurrencyControl value={aiConcurrency} onChange={onAIConcurrencyChange} /> : undefined} targets={bulkMedia.targets} kind={bulkMedia.kind} modelName={bulkModel}
+        aiComponents={aiComponents}
         missingComponents={bulkMissing} canInstall={Boolean(onInstallComponent) && bulkMissing.every(id => aiComponents?.some(item => item.id === id))}
         onInstall={async () => { for (const id of bulkMissing) await onInstallComponent!(id); }}
         onSubmit={({ batch, mergedPath: sourcePath }, scope) => bulkMedia.kind === "audioSeparation"

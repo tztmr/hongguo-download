@@ -7,6 +7,7 @@ function Icon({ size = 18, children, ...props }: IconProps) {
 }
 
 export const HomeIcon = (props: IconProps) => <Icon {...props}><path d="m3 11 9-8 9 8" /><path d="M5 10v10h14V10M9 20v-6h6v6" /></Icon>;
+export const AutomationIcon = (props: IconProps) => <Icon {...props}><path d="M20 8a8 8 0 0 0-14-2L3 9m0-5v5h5M4 16a8 8 0 0 0 14 2l3-3m0 5v-5h-5" /><path d="m13 7-4 6h4l-2 4 5-7h-4z" /></Icon>;
 export const SearchIcon = (props: IconProps) => <Icon {...props}><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></Icon>;
 export const ChartIcon = (props: IconProps) => <Icon {...props}><path d="M4 20V10h4v10M10 20V4h4v16M16 20v-7h4v7" /></Icon>;
 export const DownloadIcon = (props: IconProps) => <Icon {...props}><path d="M12 3v12m-5-5 5 5 5-5" /><path d="M4 20h16" /></Icon>;

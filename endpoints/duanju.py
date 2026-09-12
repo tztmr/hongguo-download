@@ -945,13 +945,17 @@ async def _fetch_video_model(request: Request, item_id: str) -> dict:
         'mixed_video_id_map': {'1': [item_id]},
     }, separators=(',', ':')).encode('utf-8')
     url = f'{VIDEO_URL}?{VIDEO_QUERY}'
-    try:
-        response = await request.app.state.client.signed_post(url, body, content_type='application/json', aid=8662)
-        upstream = response.json()
-    except Exception as exc:
-        raise RuntimeError(f'播放模型请求失败: {exc}') from exc
-    if response.status_code != 200 or upstream.get('code') not in (None, 0):
-        raise RuntimeError(upstream.get('message') or upstream.get('msg') or f'上游 HTTP {response.status_code}')
+    result = await request.app.state.client.call_with_device(
+        lambda _device_id: url,
+        method='POST',
+        data=body,
+        aid=8662,
+        max_device_retries=3,
+        content_type='application/json',
+    )
+    if not result['ok']:
+        raise RuntimeError(result['msg'])
+    upstream = result['upstream']
     data = {'item_id': item_id, 'sources': _video_sources(upstream, item_id), 'raw': upstream}
     if not data['sources']:
         raise RuntimeError('播放模型响应中没有可用视频源')

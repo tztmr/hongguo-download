@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   chooseSaveDir,
+  fetchDevicePool,
   getAiComponents,
   getSettings,
   installAiComponent,
   openSaveDir,
   removeAiComponent,
+  refreshDevice as refreshDeviceApi,
   subscribeAiComponentProgress,
   updateSettings,
 } from "../api";
 import { createTauriNotificationAdapter, type NotificationStatus } from "../notifications";
-import type { AIComponentProgress, AIComponentStatus, AppSettings } from "../types";
+import type { AIComponentProgress, AIComponentStatus, AppSettings, DevicePoolStatus } from "../types";
 
 export type AppSettingsPatch = Partial<
   Omit<AppSettings, "version" | "warning">
@@ -22,6 +24,8 @@ export type AppSettingsDependencies = {
   chooseSaveDir(): Promise<string>;
   openSaveDir(): Promise<void>;
   getNotificationStatus(): Promise<NotificationStatus>;
+  getDevicePool?(): Promise<DevicePoolStatus>;
+  refreshDevice?(): Promise<DevicePoolStatus>;
   getAiComponents?(): Promise<AIComponentStatus[]>;
   installAiComponent?(id: string): Promise<AIComponentStatus>;
   removeAiComponent?(id: string): Promise<void>;
@@ -34,11 +38,14 @@ export type UseAppSettingsResult = {
   warning: string;
   notificationPermission: NotificationStatus;
   components: AIComponentStatus[];
+  devicePool: DevicePoolStatus | null;
+  devicesLoading: boolean;
   update(patch: AppSettingsPatch): Promise<void>;
   chooseDirectory(): Promise<void>;
   openDirectory(): Promise<void>;
   installComponent(id: string): Promise<void>;
   removeComponent(id: string): Promise<void>;
+  refreshDevice(): Promise<void>;
 };
 
 const notifications = createTauriNotificationAdapter();
@@ -48,9 +55,11 @@ const defaultDependencies: AppSettingsDependencies = {
   chooseSaveDir,
   openSaveDir,
   getNotificationStatus: () => notifications.getStatus(),
+  getDevicePool: fetchDevicePool,
   getAiComponents,
   installAiComponent,
   removeAiComponent,
+  refreshDevice: refreshDeviceApi,
   subscribeAiComponentProgress,
 };
 
@@ -82,6 +91,8 @@ export function useAppSettings(
   const [notificationPermission, setNotificationPermission] =
     useState<NotificationStatus>("prompt");
   const [components, setComponents] = useState<AIComponentStatus[]>([]);
+  const [devicePool, setDevicePool] = useState<DevicePoolStatus | null>(null);
+  const [devicesLoading, setDevicesLoading] = useState(true);
   const settingsRef = useRef<AppSettings | null>(null);
   const updateQueue = useRef<Promise<void>>(Promise.resolve());
 
@@ -91,20 +102,26 @@ export function useAppSettings(
       dependencies.getSettings(),
       dependencies.getNotificationStatus().catch(() => "prompt" as const),
       dependencies.getAiComponents ? dependencies.getAiComponents().catch(() => [] as AIComponentStatus[]) : Promise.resolve([] as AIComponentStatus[]),
+      dependencies.getDevicePool ? dependencies.getDevicePool().catch(() => null) : Promise.resolve(null),
     ])
-      .then(([value, permission, nextComponents]) => {
+      .then(([value, permission, nextComponents, nextDevicePool]) => {
         if (!active) return;
         settingsRef.current = value;
         setSettings(value);
         setWarning(value.warning || "");
         setNotificationPermission(permission);
         setComponents(nextComponents);
+        setDevicePool(nextDevicePool);
+        setDevicesLoading(false);
       })
       .catch((error) => {
         if (active) setWarning(errorMessage(error));
       })
       .finally(() => {
-        if (active) setLoading(false);
+        if (active) {
+          setLoading(false);
+          setDevicesLoading(false);
+        }
       });
     return () => {
       active = false;
@@ -210,16 +227,32 @@ export function useAppSettings(
     }
   }, [dependencies]);
 
+  const refreshDevice = useCallback(async () => {
+    if (!dependencies.refreshDevice) return;
+    setDevicesLoading(true);
+    try {
+      setDevicePool(await dependencies.refreshDevice());
+      setWarning("");
+    } catch (error) {
+      setWarning(errorMessage(error));
+    } finally {
+      setDevicesLoading(false);
+    }
+  }, [dependencies]);
+
   return {
     settings,
     loading,
     warning,
     notificationPermission,
     components,
+    devicePool,
+    devicesLoading,
     update,
     chooseDirectory,
     openDirectory,
     installComponent,
     removeComponent,
+    refreshDevice,
   };
 }

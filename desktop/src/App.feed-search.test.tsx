@@ -14,6 +14,7 @@ const apiMocks = vi.hoisted(() => ({
   fetchDiscoveryByCategory: vi.fn(),
   fetchDiscoveryMore: vi.fn(),
   fetchHealth: vi.fn(),
+  fetchDevicePool: vi.fn(),
   fetchRank: vi.fn(),
   fetchSearch: vi.fn(),
   fetchSearchAll: vi.fn(),
@@ -23,6 +24,7 @@ const apiMocks = vi.hoisted(() => ({
   getSettings: vi.fn(),
   installAiComponent: vi.fn(),
   removeAiComponent: vi.fn(),
+  refreshDevice: vi.fn(),
   subscribeAiComponentProgress: vi.fn(),
   updateSettings: vi.fn(),
   getSaveDir: vi.fn(),
@@ -108,9 +110,11 @@ describe("App feed and search controls", () => {
     apiMocks.fetchWebCategoryGroups.mockResolvedValue([]);
     apiMocks.fetchWebCategory.mockResolvedValue({ items: [], nextPage: 2, hasMore: false });
     apiMocks.fetchHealth.mockResolvedValue({ status: "ok", pool_size: 1, active_count: 1 });
+    apiMocks.fetchDevicePool.mockResolvedValue({ devices: [], pool_size: 0, active_count: 0 });
     apiMocks.getAiComponents.mockResolvedValue([]);
     apiMocks.subscribeAiComponentProgress.mockResolvedValue(() => undefined);
     apiMocks.getSettings.mockResolvedValue({ version: 1, saveDir: "/tmp/downloads", definition: "auto", notifyDownloadComplete: true, notifyNewReleases: true });
+    apiMocks.refreshDevice.mockResolvedValue({ devices: [], pool_size: 0, active_count: 0 });
     apiMocks.updateSettings.mockImplementation(async (patch) => ({ version: 1, saveDir: "/tmp/downloads", definition: "auto", notifyDownloadComplete: true, notifyNewReleases: true, ...patch }));
     apiMocks.fetchNewReleases.mockResolvedValue({ items: [], nextCursor: "", hasMore: false, date: "2026-09-02", refreshedAt: "" });
     apiMocks.fetchSeriesMetrics.mockResolvedValue({ seriesId: "", contentTypeCode: 1 });

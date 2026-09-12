@@ -1,7 +1,7 @@
 export type ContentType = "drama" | "manju";
 export type SearchContentType = "all" | ContentType;
 export type RankReleaseType = "all" | NewReleaseType;
-export type NavId = "discover" | "search" | "rank" | "monitor" | "queue" | "platformVideos" | "analytics" | "settings";
+export type NavId = "discover" | "search" | "rank" | "monitor" | "automation" | "queue" | "platformVideos" | "analytics" | "settings";
 export type DefinitionPreference = "auto" | "1080p" | "720p";
 export type DemucsModel = "htdemucs" | "htdemucs_ft";
 export type WhisperModel = "small" | "medium";
@@ -90,6 +90,20 @@ export type AppSettings = {
   downloadProxy?: string;
   downloadMirror?: string;
   warning?: string;
+};
+
+export type DeviceIdentity = {
+  device_id: string;
+  install_id: string;
+  status: string;
+  remaining_seconds: number;
+  expired: boolean;
+};
+
+export type DevicePoolStatus = {
+  devices: DeviceIdentity[];
+  pool_size: number;
+  active_count: number;
 };
 
 export type AIComponentStatus = {

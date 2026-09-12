@@ -1,4 +1,4 @@
-"""Pooled CDN downloads with a delayed backup only when the first CDN stalls."""
+"""Pooled CDN downloads; hedge stalled transfers, not shared-bandwidth rates."""
 import asyncio
 import httpx
 
@@ -6,8 +6,6 @@ VIDEO_UA = ('com.dragon.read/58332 (Linux; U; Android 9; zh_CN; HD1900; '
             'Build/PQ3A.190705.06091305;tt-ok/3.12.13.1)')
 FIRST_BYTE_WAIT = 2.0
 STALL_WAIT = 3.0
-SLOW_WINDOW = 8.0
-MIN_BYTES_PER_SECOND = 256 * 1024
 DOWNLOAD_TIMEOUT = 120.0
 MIN_VIDEO_BYTES = 1024
 
@@ -61,7 +59,7 @@ async def download_video(urls: list[str], client: httpx.AsyncClient) -> bytes:
                 # two CDN requests per episode, and retain a progressing primary
                 # until a complete, valid alternative has actually arrived.
                 done, _ = await asyncio.wait(
-                    tasks, timeout=min(0.25, FIRST_BYTE_WAIT / 2, STALL_WAIT / 2, SLOW_WINDOW / 2),
+                    tasks, timeout=min(0.25, FIRST_BYTE_WAIT / 2, STALL_WAIT / 2),
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 for task in done:
@@ -80,8 +78,12 @@ async def download_video(urls: list[str], client: httpx.AsyncClient) -> bytes:
                     elapsed = now - started
                     waiting = received == 0 and elapsed >= FIRST_BYTE_WAIT
                     stalled = received > 0 and now - last_byte >= STALL_WAIT
-                    slow = elapsed >= SLOW_WINDOW and received / elapsed < MIN_BYTES_PER_SECOND
-                    if waiting or stalled or slow:
+                    # A low per-episode rate can simply mean that all episodes
+                    # share the same link. Racing a second full copy then steals
+                    # bandwidth from useful downloads (v0.3.1 regression).
+                    # Only hedge when bytes stop arriving, as opposed to using
+                    # an absolute KiB/s cutoff for a progressing transfer.
+                    if waiting or stalled:
                         start_next()
     except TimeoutError as exc:
         raise RuntimeError('视频 CDN 下载超时，请重试') from exc

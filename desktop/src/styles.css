@@ -300,6 +300,16 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .settings-network-form input:focus { border-color: var(--accent); }
 .settings-network-actions { display: flex; gap: 8px; }
 .settings-network-help { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+.device-pool-card { display: grid; gap: 14px; margin-top: 16px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #111216; }
+.device-pool-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; }
+.device-pool-list { display: grid; gap: 8px; }
+.device-pool-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.device-pool-row > div { display: grid; gap: 6px; min-width: 0; }
+.device-pool-row span { color: var(--muted); font-size: 10px; }
+.device-pool-row code { overflow: hidden; color: var(--text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.device-status-active { color: #9fe0af; font-size: 12px; }
+.device-status-inactive { color: #e5ad9f; font-size: 12px; }
+.device-pool-empty { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .resolution-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
 .resolution-options label { position: relative; min-height: 88px; display: flex; flex-direction: column; padding: 15px 15px 14px 39px; border: 1px solid var(--border); border-radius: 9px; background: #111216; cursor: pointer; }
 .resolution-options label.selected { border-color: var(--accent); background: var(--accent-soft); }
@@ -604,7 +614,7 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 /* Settings navigation stays within the scrolling settings page. */
 .settings-page { scroll-behavior: smooth; padding: 30px 36px 48px; }
 .settings-header p { font-size: 12px; }
-.settings-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; max-width: 1200px; margin-top: 24px; }
+.settings-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; max-width: 1200px; margin-top: 24px; }
 .settings-overview > a { min-width: 0; display: flex; flex-direction: column; gap: 8px; text-decoration: none; color: var(--text); border: 1px solid var(--border); background: var(--surface); border-radius: 12px; padding: 17px 20px; }
 .settings-overview span, .settings-overview small { color: var(--muted); font-size: 11px; }
 .settings-overview strong { font-size: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 550; }
@@ -633,6 +643,7 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
   .settings-page { padding-inline: 22px; }
   .settings-layout { grid-template-columns: 145px minmax(0, 1fr); gap: 16px; }
   .settings-content .settings-section { padding: 18px; }
+  .device-pool-row { grid-template-columns: 1fr; }
   .youtube-job-card { padding: 16px; gap: 16px; }
   .youtube-job-card .media-job-title { flex-wrap: wrap; }
 }
@@ -641,6 +652,7 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
   .settings-layout .settings-jump-nav { position: relative; flex-direction: row; flex-wrap: wrap; margin-bottom: 15px; }
   .settings-jump-nav a > small, .settings-jump-nav a > span { display: none; }
   .settings-overview { gap: 8px; }
+  .settings-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-overview > a { padding: 14px; }
   .youtube-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .youtube-job-card { align-items: stretch; flex-direction: column; }

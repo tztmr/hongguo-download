@@ -38,6 +38,7 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
       <div className="settings-overview" aria-label="当前设置概览">
         <a href="#settings-download"><span>默认画质</span><strong>{resolutions.find((item) => item.value === settings.definition)?.label}</strong><small>新任务自动使用</small></a>
         <a href="#settings-media"><span>媒体组件</span><strong>{model.components.filter((item) => item.installed).length} / {model.components.length} 已就绪</strong><small>音频分离与字幕识别</small></a>
+        <a href="#settings-device"><span>设备身份</span><strong>{model.devicesLoading ? "读取中" : model.devicePool ? `${model.devicePool.active_count} 个可用` : "暂不可用"}</strong><small>device_id 与 install_id</small></a>
         <a href="#settings-youtube"><span>YouTube 频道</span><strong>{youtube?.channels.find((item) => item.channelId === youtube.activeChannelId)?.title || "尚未连接"}</strong><small>最多 5 个并发上传</small></a>
       </div>
       <div className="settings-layout">
@@ -45,8 +46,9 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
         <a href="#settings-download"><span>01</span>下载偏好<small>保存位置与画质</small></a>
         <a href="#settings-notifications"><span>02</span>系统通知<small>任务完成与新剧提醒</small></a>
         <a href="#settings-network"><span>03</span>下载网络<small>代理与镜像</small></a>
-        <a href="#settings-media"><span>04</span>媒体处理模型<small>安装与管理组件</small></a>
-        {youtube ? <a href="#settings-youtube"><span>05</span>YouTube<small>凭证与频道授权</small></a> : null}
+        <a href="#settings-device"><span>04</span>设备身份<small>device_id 与 install_id</small></a>
+        <a href="#settings-media"><span>05</span>媒体处理模型<small>安装与管理组件</small></a>
+        {youtube ? <a href="#settings-youtube"><span>06</span>YouTube<small>凭证与频道授权</small></a> : null}
       </nav>
       <div className="settings-content">
       {model.warning ? <div className="warning-banner">{model.warning}</div> : null}
@@ -133,6 +135,33 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
             <button type="button" className="secondary-button" onClick={() => { setProxyDraft(""); setMirrorDraft(""); void model.update({ downloadProxy: "", downloadMirror: "" }); }}>恢复直连</button>
           </div>
           <p className="settings-network-help">代理支持 HTTP、HTTPS、SOCKS5。视频/API 下载的代理在重启应用后生效；留空时使用系统代理环境。</p>
+        </div>
+      </section>
+
+      <section className="settings-section" id="settings-device">
+        <div className="settings-section-title">
+          <div><h2>设备身份</h2><p>搜索和下载会成对使用 device_id 与 install_id；刷新后立即使用新的设备身份。</p></div>
+        </div>
+        <div className="device-pool-card">
+          <div className="device-pool-toolbar">
+            <span>{model.devicesLoading ? "正在读取设备池…" : model.devicePool ? `${model.devicePool.active_count} 个可用设备 / 共 ${model.devicePool.pool_size} 个` : "设备信息暂不可用"}</span>
+            <button type="button" className="secondary-button" disabled={model.devicesLoading} onClick={() => void model.refreshDevice()}>
+              {model.devicesLoading ? "正在刷新…" : "更新/刷新设备"}
+            </button>
+          </div>
+          {model.devicePool?.devices.length ? (
+            <div className="device-pool-list" role="table" aria-label="设备身份列表">
+              {model.devicePool.devices.map((device) => (
+                <div className="device-pool-row" role="row" key={`${device.device_id}-${device.install_id}`}>
+                  <div role="cell"><span>device_id</span><code>{device.device_id}</code></div>
+                  <div role="cell"><span>install_id</span><code>{device.install_id}</code></div>
+                  <div role="cell"><span>状态</span><strong className={device.status === "active" && !device.expired ? "device-status-active" : "device-status-inactive"}>{device.status === "active" && !device.expired ? "可用" : "不可用"}</strong></div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="device-pool-empty">暂无有效设备，点击“更新/刷新设备”注册新的设备身份。</p>
+          )}
         </div>
       </section>
 
