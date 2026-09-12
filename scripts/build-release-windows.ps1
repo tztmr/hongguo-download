@@ -1,12 +1,20 @@
 param(
     [Parameter(Mandatory = $true)][string]$FfmpegArchive,
     [Parameter(Mandatory = $true)][string]$FfmpegArchiveSha256,
-    [string]$Python = "python"
+    [string]$Python = "python",
+    [string]$AIBaseWorker = "",
+    [string]$AIPython = "python"
 )
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+$AIConfig = @()
+if ($AIBaseWorker) {
+    & $AIPython (Join-Path $PSScriptRoot "repack-ai-worker.py") $AIBaseWorker (Join-Path $ProjectRoot "desktop/src-tauri/resources/ai-worker-modern-v034")
+    if ($LASTEXITCODE -ne 0) { throw "AI worker update build failed (requires Python 3.11 and PyInstaller)" }
+    $AIConfig = @('--config', 'src-tauri/tauri.ai-worker.conf.json')
+}
 
 & (Join-Path $PSScriptRoot "build-api-sidecar-windows.ps1") -Python $Python
 & (Join-Path $PSScriptRoot "stage-media-tools-windows.ps1") `
@@ -18,7 +26,7 @@ npm test --prefix (Join-Path $ProjectRoot "desktop") -- --run
 cargo test --manifest-path (Join-Path $ProjectRoot "desktop/src-tauri/Cargo.toml") --lib
 Push-Location (Join-Path $ProjectRoot "desktop")
 try {
-    npx tauri build --config src-tauri/tauri.release.conf.json --bundles nsis
+    npx tauri build --config src-tauri/tauri.release.conf.json @AIConfig --bundles nsis
 }
 finally {
     Pop-Location

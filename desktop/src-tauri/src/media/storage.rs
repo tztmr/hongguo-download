@@ -481,6 +481,18 @@ impl MediaJobManager {
 
 fn apply_transition(job: &mut MediaJob, transition: MediaJobTransition) -> Result<(), AppError> {
     match (job.status, transition) {
+        (status, MediaJobTransition::DeletionFailed { code, message, output_path, outputs })
+            if status == MediaJobStatus::Running
+                || (status == MediaJobStatus::Paused && job.pause_origin == Some(MediaJobPauseOrigin::Running)) =>
+        {
+            job.status = MediaJobStatus::Failed;
+            job.stage = "failed".into();
+            job.error_code = Some(code);
+            job.error_message = Some(message);
+            job.pause_origin = None;
+            job.output_path = output_path;
+            job.outputs = outputs;
+        }
         (MediaJobStatus::Queued, MediaJobTransition::Start) => {
             job.status = MediaJobStatus::Running;
             job.stage = "running".into();
@@ -720,6 +732,24 @@ mod lifecycle_tests {
                 }],
             })
             .unwrap()
+    }
+
+    #[test]
+    fn deletion_failure_retains_just_published_output_after_reload() {
+        let (root, manager) = test_manager("deletion-failed");
+        let job = enqueue(&manager, "deletion-failed");
+        manager.claim_oldest_queued().unwrap();
+        let output = root.join("merged.mp4");
+        fs::write(&output, b"published while cancellation was requested").unwrap();
+        manager.update(&job.id, MediaJobTransition::DeletionFailed {
+            code: "MEDIA_OUTPUT_DELETE_FAILED".into(), message: "file in use".into(),
+            output_path: Some(output.clone()), outputs: Vec::new(),
+        }).unwrap();
+        drop(manager);
+        let retained = MediaJobManager::load(&root).unwrap().job(&job.id).unwrap();
+        assert_eq!(retained.status, MediaJobStatus::Failed);
+        assert_eq!(retained.output_path, Some(output));
+        assert_eq!(retained.error_code.as_deref(), Some("MEDIA_OUTPUT_DELETE_FAILED"));
     }
 
     #[test]

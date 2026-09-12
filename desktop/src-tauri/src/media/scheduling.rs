@@ -15,6 +15,7 @@ pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
 #[derive(Clone, Copy, Debug)]
 pub struct ExecutionBudget {
     pub cpu_threads: usize,
+    pub force_cpu: bool,
     pub(crate) memory: u64,
     pub(crate) gpu_memory: u64,
 }
@@ -227,6 +228,36 @@ fn configured_for_platform(
     if active.len() >= limit {
         return Err("已达到同时处理上限；完成一个任务后自动补位（暂停任务仍占用名额）");
     }
+    // Only auto may change devices. Keep the saved preference intact and carry
+    // the actual execution choice to the worker through its transient budget.
+    let auto = windows
+        && parallel_kind_for_platform(job.kind, true)
+        && job.ai_request.as_ref().is_some_and(|r| r.device == "auto");
+    let gpu_busy = resources.gpu.is_some_and(|gpu| {
+        !gpu.shared_memory && (gpu.usage >= 85.0 || gpu.free_memory < gpu_reservation(job) + GIB)
+    });
+    if auto && (gpu_busy || (resources.gpu.is_none() && !active.is_empty())) {
+        let mut cpu_job = job.clone();
+        cpu_job.ai_request.as_mut().unwrap().device = "cpu".into();
+        // Use full model RAM/load checks even under a manual concurrency limit.
+        return admit_with_limit(&cpu_job, active, resources, true, limit)
+            .filter(|budget| {
+                resources
+                    .available_memory
+                    .is_some_and(|free| free >= budget.memory + 2 * GIB)
+                    && resources.cpu_usage.is_some_and(|usage| {
+                        usage.is_finite()
+                            && (0.0..85.0).contains(&usage)
+                            && resources.cores as f32 * (1.0 - usage / 100.0)
+                                >= (budget.cpu_threads + 1) as f32
+                    })
+            })
+            .map(|mut budget| {
+                budget.force_cpu = true;
+                budget
+            })
+            .ok_or("GPU 暂无余量，等待可用 CPU 或内存后继续处理");
+    }
     if windows && concurrency > 0 && parallel_kind_for_platform(job.kind, true) {
         // A user-selected limit overrides conservative model estimates, while
         // preserving actual OS/VRAM headroom. Unknown telemetry is shown in UI.
@@ -237,10 +268,31 @@ fn configured_for_platform(
         if gpu_requested && resources.gpu.is_some_and(|g| g.free_memory < GIB) {
             return Err("可用显存不足 1 GB，等待运行中的任务释放显存");
         }
+        let memory = if auto {
+            memory_reservation(job, false)
+        } else {
+            2 * GIB
+        };
+        if auto
+            && resources
+                .available_memory
+                .is_some_and(|free| free < memory + 2 * GIB)
+        {
+            return Err("可用内存不足，等待运行中的任务释放模型内存");
+        }
         return Ok(ExecutionBudget {
-            cpu_threads: 1,
-            memory: 2 * GIB,
-            gpu_memory: if gpu_requested { GIB } else { 0 },
+            cpu_threads: (resources.cores.saturating_mul(85) / 100 / limit)
+                .clamp(1, 8)
+                .min(resources.cores.max(1)),
+            force_cpu: false,
+            memory,
+            gpu_memory: if auto {
+                gpu_reservation(job)
+            } else if gpu_requested {
+                GIB
+            } else {
+                0
+            },
         });
     }
     admit_for_platform(job, active, resources, windows).ok_or_else(|| {
@@ -258,27 +310,36 @@ fn admit_for_platform(
     resources: Resources,
     windows: bool,
 ) -> Option<ExecutionBudget> {
+    admit_with_limit(job, active, resources, windows, MAX_AI_JOBS)
+}
+
+fn admit_with_limit(
+    job: &MediaJob,
+    active: &[ExecutionBudget],
+    resources: Resources,
+    windows: bool,
+    limit: usize,
+) -> Option<ExecutionBudget> {
     if !parallel_kind_for_platform(job.kind, windows) {
         return active.is_empty().then_some(ExecutionBudget {
             cpu_threads: 1,
+            force_cpu: false,
             memory: 0,
             gpu_memory: 0,
         });
     }
-    if active.len() >= MAX_AI_JOBS {
+    if active.len() >= limit {
         return None;
     }
     let Some(request) = job.ai_request.as_ref() else {
         // Let the executor fail legacy jobs with missing persisted requests.
         return active.is_empty().then_some(ExecutionBudget {
             cpu_threads: 1,
+            force_cpu: false,
             memory: 0,
             gpu_memory: 0,
         });
     };
-    let subtitles = job.kind == MediaJobKind::ExtractSubtitles;
-    let medium = request.model == "medium";
-    let fine_tuned = request.model == "htdemucs_ft";
     let gpu_requested = request.device != "cpu";
     let cuda = gpu_requested && resources.gpu.is_some_and(|gpu| !gpu.shared_memory);
     let mps = gpu_requested && resources.gpu.is_some_and(|gpu| gpu.shared_memory);
@@ -291,40 +352,11 @@ fn admit_for_platform(
     }
     .min(resources.cores.max(1));
     // Conservative per-process reservations include decoding and CPU fallback.
-    let memory = (if subtitles {
-        if medium {
-            8
-        } else {
-            4
-        }
-    } else if mps {
-        if fine_tuned {
-            14
-        } else {
-            10
-        }
-    } else if fine_tuned {
-        10
-    } else {
-        6
-    }) * GIB;
-    let gpu_memory = if cuda {
-        (if subtitles {
-            if medium {
-                6
-            } else {
-                3
-            }
-        } else if fine_tuned {
-            6
-        } else {
-            4
-        }) * GIB
-    } else {
-        0
-    };
+    let memory = memory_reservation(job, mps);
+    let gpu_memory = if cuda { gpu_reservation(job) } else { 0 };
     let budget = ExecutionBudget {
         cpu_threads,
+        force_cpu: false,
         memory,
         gpu_memory,
     };
@@ -375,9 +407,135 @@ fn admit_for_platform(
     Some(budget)
 }
 
+fn gpu_reservation(job: &MediaJob) -> u64 {
+    let Some(request) = &job.ai_request else {
+        return 0;
+    };
+    (if job.kind == MediaJobKind::ExtractSubtitles {
+        if request.model == "medium" {
+            6
+        } else {
+            3
+        }
+    } else if request.model == "htdemucs_ft" {
+        6
+    } else {
+        4
+    }) * GIB
+}
+
+fn memory_reservation(job: &MediaJob, mps: bool) -> u64 {
+    let Some(request) = &job.ai_request else {
+        return 0;
+    };
+    (if job.kind == MediaJobKind::ExtractSubtitles {
+        if request.model == "medium" {
+            8
+        } else {
+            4
+        }
+    } else if mps {
+        if request.model == "htdemucs_ft" {
+            14
+        } else {
+            10
+        }
+    } else if request.model == "htdemucs_ft" {
+        10
+    } else {
+        6
+    }) * GIB
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_manual_slots_allocate_cpu_threads_from_machine_capacity() {
+        let resources = Resources {
+            cores: 20,
+            ..idle()
+        };
+        let request = job("cpu", "htdemucs");
+        let one = configured_for_platform(&request, &[], resources, 1, true).unwrap();
+        let five = configured_for_platform(&request, &[], resources, 5, true).unwrap();
+        assert!(one.cpu_threads > five.cpu_threads);
+        assert!(five.cpu_threads > 1);
+        assert!(five.cpu_threads * 5 <= 17);
+        let small =
+            configured_for_platform(&request, &[], Resources { cores: 2, ..idle() }, 10, true)
+                .unwrap();
+        assert_eq!(small.cpu_threads, 1);
+    }
+
+    #[test]
+    fn windows_auto_places_work_on_cpu_while_gpu_is_full() {
+        let request = job("auto", "htdemucs");
+        let resources = Resources {
+            cores: 20,
+            gpu: Some(GpuResources {
+                free_memory: 8 * GIB,
+                usage: 0.0,
+                shared_memory: false,
+            }),
+            ..idle()
+        };
+        let gpu = configured_for_platform(&request, &[], resources, 0, true).unwrap();
+        assert!(!gpu.force_cpu);
+        let manual_gpu = configured_for_platform(&request, &[], resources, 5, true).unwrap();
+        let after_launch = Resources {
+            gpu: Some(GpuResources {
+                free_memory: 8 * GIB - manual_gpu.gpu_memory,
+                ..resources.gpu.unwrap()
+            }),
+            ..resources
+        };
+        assert!(
+            configured_for_platform(&request, &[manual_gpu], after_launch, 5, true)
+                .unwrap()
+                .force_cpu
+        );
+        let busy = Resources {
+            gpu: Some(GpuResources {
+                free_memory: 2 * GIB,
+                usage: 95.0,
+                shared_memory: false,
+            }),
+            ..resources
+        };
+        for slots in [0, 5] {
+            let cpu = configured_for_platform(&request, &[gpu], busy, slots, true).unwrap();
+            assert!(cpu.force_cpu);
+            assert_eq!(cpu.gpu_memory, 0);
+            assert!(cpu.cpu_threads > 1);
+            assert_eq!(request.ai_request.as_ref().unwrap().device, "auto");
+            assert!(configured_for_platform(
+                &request,
+                &[gpu],
+                Resources {
+                    cpu_usage: Some(98.0),
+                    ..busy
+                },
+                slots,
+                true
+            )
+            .is_err());
+            assert!(configured_for_platform(
+                &request,
+                &[gpu],
+                Resources {
+                    available_memory: Some(3 * GIB),
+                    ..busy
+                },
+                slots,
+                true
+            )
+            .is_err());
+        }
+        assert!(configured_for_platform(&job("cuda", "htdemucs"), &[gpu], busy, 0, true).is_err());
+        assert!(configured_for_platform(&request, &[gpu], busy, 0, false).is_err());
+    }
     fn job(device: &str, model: &str) -> MediaJob {
         serde_json::from_value(serde_json::json!({
             "id":"test", "dedupeKey":"test", "kind":"separateBackgroundMusic", "status":"queued",

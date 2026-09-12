@@ -860,3 +860,9 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .youtube-permission-guide { padding: 14px 16px; border: 1px solid var(--border); border-radius: 10px; margin: 12px 0; font-size: 12px; line-height: 1.8; }
 .youtube-permission-guide p { color: var(--muted); margin: 4px 0 10px; }
 .youtube-permission-guide summary { cursor: pointer; margin-top: 10px; }
+.upload-source-full-path { display: block; overflow-wrap: anywhere; white-space: normal; }
+.media-delete-dialog { max-height: 85vh; display: flex; flex-direction: column; }
+.media-delete-paths { overflow-y: auto; min-height: 0; display: grid; gap: 16px; }
+.media-delete-paths > div { display: grid; gap: 6px; }
+.media-delete-paths code { white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
+.media-delete-paths small { color: var(--text-secondary); }

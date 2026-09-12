@@ -72,6 +72,7 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
   const [bulkPending, setBulkPending] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set<string>());
   const [actionError, setActionError] = useState("");
+  const [deletionTargets, setDeletionTargets] = useState<MediaJob[] | null>(null);
   useEffect(() => { if (focusId) { setFilter("all"); setKindFilter("all"); setQuery(""); } }, [focusId]);
   useEffect(() => {
     const currentIds = new Set(media.jobs.map((job) => job.id));
@@ -127,10 +128,9 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
       setBulkPending(false);
     }
   }
-  async function deleteSelected() {
-    if (bulkRef.current || !selectedVisible.length || selectedVisible.some((job) => busyRef.current.has(job.id))) return;
-    // Snapshot only visible selections; filters may change while deletion is pending.
-    const targets = selectedVisible;
+  async function deleteSelected(targets: MediaJob[]) {
+    if (bulkRef.current || !targets.length || targets.some((job) => busyRef.current.has(job.id))) return;
+    setDeletionTargets(null);
     bulkRef.current = true;
     setBulkPending(true);
     for (const job of targets) busyRef.current.add(job.id);
@@ -198,7 +198,7 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
         <span aria-live="polite">已选 {selectedVisible.length} 项（当前可见），共选 {selectedIds.size} 项</span>
         <button type="button" className="secondary-button" disabled={!pausable.length || selectionBusy} onClick={() => void updateSelected("pause")}><PauseIcon size={15} />批量暂停{pausable.length ? ` (${pausable.length})` : ""}</button>
         <button type="button" className="secondary-button" disabled={!resumable.length || selectionBusy} onClick={() => void updateSelected("resume")}><PlayIcon size={15} />批量开启{resumable.length ? ` (${resumable.length})` : ""}</button>
-        <button type="button" className="secondary-button danger" disabled={!selectedVisible.length || selectionBusy} onClick={() => void deleteSelected()}>批量删除</button>
+        <button type="button" className="secondary-button danger" disabled={!selectedVisible.length || selectionBusy} onClick={() => setDeletionTargets(selectedVisible)}>批量删除</button>
         <button type="button" className="primary-button compact" disabled={!onBulkUploadToYouTube || !uploadSources.length || selectionBusy}
           title={!onBulkUploadToYouTube ? "上传操作暂不可用" : undefined}
           onClick={() => {
@@ -242,12 +242,39 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
                 {job.status === "completed" && job.outputPath ? <button type="button" className="secondary-button" onClick={() => onRevealPath(job.outputPath!)}><FolderIcon size={15} />定位</button> : null}
                 {separateSource ? <button type="button" className="secondary-button" disabled={busy || Boolean(separateDisabledReason)} title={separateDisabledReason} onClick={() => onSeparateVideo?.(job, separateSource)}>分离视频</button> : null}
                 {uploadSource ? <button type="button" className="primary-button compact" disabled={busy || Boolean(uploadDisabledReason)} title={uploadDisabledReason} onClick={() => onUploadToYouTube?.(job, uploadSource)}>上传 YouTube</button> : null}
-                <button type="button" className="secondary-button danger" disabled={busy} onClick={() => void act(job, "deleteJob")}><TrashIcon size={15} />删除</button>
+                <button type="button" className="secondary-button danger" disabled={busy} onClick={() => setDeletionTargets([job])}><TrashIcon size={15} />删除</button>
               </div>
             </article>
           );
         })}
       </div>
+      {deletionTargets && <div className="dialog-backdrop" role="presentation">
+        <section className="merge-dialog media-delete-dialog" role="alertdialog" aria-modal="true" aria-label="删除任务及产物"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") setDeletionTargets(null);
+            if (event.key === "Tab") {
+              const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>("button");
+              const first = buttons[0], last = buttons[buttons.length - 1];
+              if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+              else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+            }
+          }}>
+          <header><h2>删除任务及产物</h2></header>
+          <p>将删除以下任务及对应模块生成的文件，保留下载的原始视频。正在处理的任务会先停止，再清理已生成结果。</p>
+          <div className="media-delete-paths">{deletionTargets.map((job) => {
+            const paths = job.kind === "merge" ? [job.outputPath].filter(Boolean)
+              : (job.outputs || []).filter((output) => job.kind === "extractSubtitles" ? output.kind === "subtitles"
+                : ["vocals", "backgroundMusic", "noBackgroundMusicVideo"].includes(output.kind)).map((output) => output.path);
+            return <div key={job.id}><strong>{sourceTitle(job, batches, media.jobs)} · {kinds[job.kind]}</strong>
+              {paths.map((path) => <code key={path}>{path}</code>)}
+              <small>{job.kind === "separateBackgroundMusic" ? "清理本任务的人声、背景音乐和去背景音乐视频。" : job.kind === "extractSubtitles" ? "清理本任务的字幕文件。" : "清理本任务的合并视频。"}</small>
+              {!paths.length && <small>尚无已记录的产物；如有已完成的中间结果，将一并清理。</small>}
+            </div>;
+          })}</div>
+          <footer><button autoFocus type="button" className="secondary-button" onClick={() => setDeletionTargets(null)}>取消</button>
+            <button type="button" className="secondary-button danger" onClick={() => void deleteSelected(deletionTargets)}>确认删除任务及文件</button></footer>
+        </section>
+      </div>}
     </section>
   );
 }

@@ -14,7 +14,7 @@ export function UploadSourcePicker({ sources, value, onChange, disabled = false 
     <fieldset className="upload-source-picker" disabled={disabled}>
       <legend>上传视频版本</legend>
       {sources.length > 1 ? <>
-        <p>检测到两个视频版本，请选择本次上传的版本。</p>
+        <p>默认上传去背景音乐视频；可切换版本，请核对下方完整路径。</p>
         {sources.map((source) => <label className={`upload-source-option ${value === source.path ? "selected" : ""}`} key={source.path}>
           <input type="radio" name={name} aria-label={labels[source.kind]} checked={value === source.path} onChange={() => onChange(source.path)} />
           <span><strong>{labels[source.kind]}</strong><small>{source.path}</small></span>

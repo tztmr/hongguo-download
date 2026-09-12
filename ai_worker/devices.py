@@ -66,16 +66,42 @@ def _cuda_runtime_supports_device(torch: Any, index: int) -> bool:
     architectures = torch.cuda.get_arch_list()
     if not architectures:
         return False
-    supported = set()
-    has_ptx = False
     for architecture in architectures:
-        normalized = str(architecture).lower().replace("compute_", "sm_")
-        if normalized.endswith("+ptx"):
-            has_ptx = True
-            normalized = normalized[:-4]
-        if normalized.startswith("sm_"):
-            try:
-                supported.add(int(normalized[3:]))
-            except ValueError:
-                continue
-    return target in supported or (has_ptx and bool(supported) and target >= max(supported))
+        normalized = str(architecture).lower()
+        ptx = normalized.startswith("compute_") or normalized.endswith("+ptx")
+        code = normalized.removesuffix("+ptx").removeprefix("compute_").removeprefix("sm_")
+        # Architecture-specific suffixes (90a, 100f) have narrower guarantees.
+        if not code.isdigit() or not normalized.startswith(("sm_", "compute_")):
+            continue
+        compiled = int(code)
+        if (ptx and compiled <= target) or (
+            compiled // 10 == major and compiled <= target
+        ):
+            return True
+    return False
+
+
+def accelerator_failure(error: BaseException, device: str) -> bool:
+    if not isinstance(error, (RuntimeError, NotImplementedError)):
+        return False
+    accelerator = "cuda" if device.startswith("cuda") else "mps" if device == "mps" else None
+    if accelerator is None:
+        return False
+    message = str(error).lower()
+    return accelerator in message or any(token in message for token in (
+        "cublas", "cudnn", "out of memory", "no kernel image",
+    ))
+
+
+def release_accelerator_cache(device: str) -> None:
+    # Call outside exception handlers so failed inference tracebacks are released.
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if device.startswith("cuda"):
+            torch.cuda.empty_cache()
+        elif device == "mps":
+            torch.mps.empty_cache()
+    except (ImportError, RuntimeError, AttributeError):
+        pass  # A broken accelerator must not prevent CPU recovery.

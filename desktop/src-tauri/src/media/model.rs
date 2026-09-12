@@ -254,6 +254,12 @@ pub enum MediaJobTransition {
         code: String,
         message: String,
     },
+    DeletionFailed {
+        code: String,
+        message: String,
+        output_path: Option<PathBuf>,
+        outputs: Vec<MediaJobOutput>,
+    },
     Cancel,
     Retry,
 }

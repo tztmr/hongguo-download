@@ -7,6 +7,32 @@ import { YouTubeUploadJobs } from "./YouTubeUploadJobs";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: vi.fn() }));
 const completed = { ...previewYouTubeModel, jobs: [previewYouTubeModel.jobs[1]] };
 
+it("bulk starts paused and failed visible selections and skips completed jobs", async () => {
+  const resume = vi.fn().mockResolvedValue(undefined);
+  const retry = vi.fn().mockResolvedValue(undefined);
+  const jobs = (["paused", "failed", "cancelled", "completed"] as const).map((status, i) => ({
+    ...completed.jobs[0], id: `bulk-${i}`, title: `视频${i}`, status,
+  }));
+  const view = render(<YouTubeUploadJobs model={{ ...completed, jobs, resume, retry }} onRevealPath={vi.fn()} />);
+  fireEvent.click(view.getByRole("checkbox", { name: "全选当前可见上传任务" }));
+  fireEvent.click(view.getByRole("button", { name: /^批量开始/ }));
+  await waitFor(() => expect(retry).toHaveBeenCalledTimes(2));
+  expect(resume).toHaveBeenCalledExactlyOnceWith("bulk-0");
+  expect(retry.mock.calls).toEqual([["bulk-1"], ["bulk-2"]]);
+});
+
+it("bulk pause captures selected visible pausable jobs and reports individual failures", async () => {
+  const pause = vi.fn().mockImplementation((id) => id === "pause-1" ? Promise.reject({ message: "暂停失败" }) : Promise.resolve());
+  const jobs = (["uploading", "queued", "paused", "processing"] as const).map((status, i) => ({
+    ...completed.jobs[0], id: `pause-${i}`, title: `视频${i}`, status,
+  }));
+  const view = render(<YouTubeUploadJobs model={{ ...completed, jobs, pause }} onRevealPath={vi.fn()} />);
+  fireEvent.click(view.getByRole("checkbox", { name: "全选当前可见上传任务" }));
+  fireEvent.click(view.getByRole("button", { name: /^批量暂停/ }));
+  await waitFor(() => expect(view.getByRole("alert").textContent).toContain("1 项暂停失败"));
+  expect(pause.mock.calls).toEqual([["pause-0"], ["pause-1"]]);
+});
+
 it("combines upload status and title filters and reveals notification targets", () => {
   const view = render(<YouTubeUploadJobs model={previewYouTubeModel} onRevealPath={vi.fn()} />);
   fireEvent.click(within(view.getByRole("group", { name: "上传状态筛选" })).getByRole("button", { name: /待处理/ }));

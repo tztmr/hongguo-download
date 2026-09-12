@@ -50,6 +50,8 @@ export function YouTubeVideoLink({ url, label = "打开 YouTube 视频" }: { url
 
 const activeStatuses = ["pausing", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing", "settingThumbnail", "uploadingSubtitles"];
 const attentionStatuses = ["failed", "videoUploadedThumbnailFailed", "videoUploadedSubtitleFailed"];
+const pausableStatuses = ["queued", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry"];
+const startableStatuses = ["paused", "failed", "cancelled"];
 function fileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -99,6 +101,31 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId, onNotice }:
   const selectedVisible = visible.filter((job) => selectedIds.has(job.id));
   const allVisibleSelected = visible.length > 0 && selectedVisible.length === visible.length;
   const selectionBusy = bulkPending || selectedVisible.some((job) => pending.has(job.id));
+  const pausable = selectedVisible.filter((job) => pausableStatuses.includes(job.status));
+  const startable = selectedVisible.filter((job) => startableStatuses.includes(job.status));
+  async function updateSelected(action: "start" | "pause") {
+    const targets = action === "start" ? startable : pausable;
+    if (bulkRef.current || !targets.length || targets.some((job) => pendingRef.current.has(job.id))) return;
+    bulkRef.current = true;
+    setBulkPending(true);
+    targets.forEach((job) => pendingRef.current.add(job.id));
+    setPending(new Set(pendingRef.current));
+    setActionError("");
+    try {
+      const results = await Promise.allSettled(targets.map((job) => action === "pause"
+        ? model.pause(job.id) : job.status === "paused" ? model.resume(job.id) : model.retry(job.id)));
+      const failures = results.flatMap((result, i) => result.status === "rejected"
+        ? [`${targets[i].title}：${actionErrorMessage(result.reason)}`] : []);
+      const label = action === "pause" ? "暂停" : "开始";
+      if (failures.length) setActionError(`${failures.length} 项${label}失败：${failures.join("；")}`);
+      if (results.length > failures.length) onNotice?.(`已${label} ${results.length - failures.length} 项上传任务`);
+    } finally {
+      targets.forEach((job) => pendingRef.current.delete(job.id));
+      setPending(new Set(pendingRef.current));
+      bulkRef.current = false;
+      setBulkPending(false);
+    }
+  }
   function selectRows(ids: string[], checked: boolean) {
     setSelectedIds((current) => {
       const next = new Set(current);
@@ -162,6 +189,8 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId, onNotice }:
           ref={(node) => { if (node) node.indeterminate = selectedVisible.length > 0 && !allVisibleSelected; }}
           disabled={!visible.length || bulkPending} onChange={(event) => selectRows(visible.map((job) => job.id), event.target.checked)} />全选当前可见</label>
         <span aria-live="polite">已选 {selectedVisible.length} 项（当前可见），共选 {selectedIds.size} 项</span>
+        <button type="button" className="secondary-button" disabled={!startable.length || selectionBusy} onClick={() => void updateSelected("start")}>批量开始{startable.length ? ` (${startable.length})` : ""}</button>
+        <button type="button" className="secondary-button" disabled={!pausable.length || selectionBusy} onClick={() => void updateSelected("pause")}>批量暂停{pausable.length ? ` (${pausable.length})` : ""}</button>
         <button type="button" className="secondary-button danger" disabled={!selectedVisible.length || selectionBusy} onClick={() => void deleteSelected()}>批量删除</button>
       </div>
       <p className="queue-summary" role="status">最多同时上传 5 个 · 正在处理 {active} 个 · 排队 {queued} 个</p>
@@ -175,6 +204,7 @@ export function YouTubeUploadJobs({ model, onRevealPath, focusJobId, onNotice }:
           <div className="media-job-copy">
             <div className="media-job-title"><strong>{job.title}</strong><span className="upload-status">{statusCopy(job)}</span></div>
             <p className="upload-file-meta"><span>{model.channels.find((channel) => channel.channelId === job.channelId)?.title || "YouTube 频道"}</span><span title={job.sourcePath}>{job.sourcePath.split(/[\\/]/).pop()}</span></p>
+            <small className="upload-source-full-path">上传文件：{job.sourcePath}</small>
             <div className="upload-progress-label"><strong>{Math.round(job.percent)}<small>%</small></strong><span>{fileSize(job.uploadedBytes)} / {fileSize(job.totalBytes)}</span></div>
             <div className="progress-track" role="progressbar" aria-label={`${job.title}上传进度`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(job.percent)}><span style={{ width: `${job.percent}%` }} /></div>
             <small>字幕：{{ skipped: "未上传", pending: "待提交", submitted: "已提交 YouTube", failed: "上传失败" }[job.subtitleState || "skipped"]}</small>

@@ -12,6 +12,41 @@ from ai_worker.separate import _demucs_separator
 
 @unittest.skipUnless(importlib.util.find_spec("demucs"), "requires AI dependencies")
 class StreamingSeparationTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("HONGGUO_TEST_CUDA"), "requires CUDA GPU")
+    @unittest.skipUnless(os.environ.get("HONGGUO_TEST_DEMUCS_MODEL"), "requires packaged Demucs weights")
+    def test_real_cuda_oom_retry_reduces_forward_length_and_keeps_valid_audio(self):
+        import numpy as np
+        import soundfile as sf
+        import torch
+        from demucs.apply import apply_model
+        from demucs.htdemucs import HTDemucs
+
+        calls, lengths = [], []
+        original_forward = HTDemucs.forward
+        def forward(model, mix):
+            lengths.append((mix.shape[-1], int(model.segment * model.samplerate)))
+            return original_forward(model, mix)
+        def infer(model, audio, **kwargs):
+            calls.append(str(kwargs["device"]))
+            if len(calls) == 1:
+                raise RuntimeError("CUDA out of memory")
+            return apply_model(model, audio, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.wav"
+            sf.write(source, np.sin(np.arange(16000) * 0.08) * 0.2, 16000)
+            with patch("demucs.apply.apply_model", side_effect=infer), patch.object(HTDemucs, "forward", forward):
+                paths = _demucs_separator(source, root, "htdemucs", "cuda:0",
+                    Path(os.environ["HONGGUO_TEST_DEMUCS_MODEL"]))
+            self.assertTrue(all(device == "cuda:0" for device in calls))
+            self.assertTrue(lengths)
+            self.assertTrue(all(actual <= 4 * 44100 and padded <= 4 * 44100 for actual, padded in lengths))
+            for path in paths:
+                samples, rate = sf.read(path)
+                self.assertEqual((len(samples), rate), (44100, 44100))
+                self.assertTrue(np.isfinite(samples).all())
+
     @unittest.skipUnless(os.environ.get("HONGGUO_TEST_DEMUCS_MODEL"), "requires packaged Demucs weights")
     def test_real_model_with_restricted_torch_loading(self):
         import torch

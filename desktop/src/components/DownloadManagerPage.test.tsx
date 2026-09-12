@@ -386,7 +386,7 @@ describe("YouTube separated upload source", () => {
     fireEvent.click(view.getByRole("tab", { name: "媒体处理" }));
     fireEvent.click(within(view.getAllByTestId("media-job-row")[0]).getByRole("button", { name: "上传 YouTube" }));
     const dialog = within(view.getByRole("dialog", { name: "上传到 YouTube" }));
-    expect(dialog.getByRole("button", { name: "确认上传" })).toHaveProperty("disabled", true);
+    expect(dialog.getByRole("button", { name: "确认上传" })).toHaveProperty("disabled", false);
     fireEvent.click(dialog.getByRole("radio", { name: "去背景音乐视频" }));
     fireEvent.click(dialog.getByRole("button", { name: "确认上传" }));
     await waitFor(() => expect(startUpload).toHaveBeenCalledWith(expect.objectContaining({ filePath: "/Downloads/音频分离/去背景音乐.mp4" })));
@@ -420,7 +420,7 @@ describe("YouTube separated upload source", () => {
     if (enabled) {
       fireEvent.click(button);
       if (retainMerge) {
-        expect(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByRole("button", { name: "确认上传" })).toHaveProperty("disabled", true);
+        expect(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByRole("button", { name: "确认上传" })).toHaveProperty("disabled", false);
         fireEvent.click(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByRole("radio", { name: "去背景音乐视频" }));
       }
       expect(within(view.getByRole("dialog", { name: "上传到 YouTube" })).getByText("上传文件：/Downloads/音频分离/去背景音乐.mp4")).toBeTruthy();

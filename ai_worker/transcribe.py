@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable, Mapping
 
 from ai_worker.model_package import validate_whisper_package
 from ai_worker.protocol import WorkerError, WorkerRequest, progress
-from ai_worker.devices import select_device
+from ai_worker.devices import select_device, accelerator_failure, release_accelerator_cache
 
 
 SUPPORTED_MODELS = {"small", "medium"}
@@ -129,7 +129,7 @@ def _whisper_transcriber(
             loaded = whisper.load_model(model, **kwargs)
             report(progress("preparingSubtitleAudio", 5))
             return loaded.transcribe(
-                str(source),
+                _prepared_audio(source),
                 language=language,
                 fp16=device != "cpu",
                 verbose=False,
@@ -138,12 +138,34 @@ def _whisper_transcriber(
         module.tqdm = original
 
 
+def _prepared_audio(source: Path):
+    """Reuse the desktop's 16 kHz mono PCM without another FFmpeg process."""
+    import numpy as np
+    try:
+        with wave.open(str(source), "rb") as audio:
+            if (audio.getframerate(), audio.getnchannels(), audio.getsampwidth(), audio.getcomptype()) != (16000, 1, 2, "NONE"):
+                return str(source)
+            samples = audio.readframes(audio.getnframes())
+    except (OSError, EOFError, wave.Error):
+        return str(source)
+    return np.frombuffer(samples, dtype="<i2").astype(np.float32) / 32768.0
+
+
 def transcribe_audio(
     request: WorkerRequest,
     transcriber: Callable[..., Mapping[str, Any]] = _whisper_transcriber,
     emit: Callable[[dict], None] = lambda _event: None,
 ) -> dict[str, Any]:
     options = request.options
+    original_emit = emit
+    highest_percent = 0.0
+
+    def emit(event):
+        nonlocal highest_percent
+        if event.get("type") == "progress":
+            highest_percent = max(highest_percent, event["percent"])
+            event = {**event, "percent": highest_percent}
+        original_emit(event)
     if set(options) - {"model", "device", "language", "modelRoot"}:
         raise WorkerError("AI_REQUEST_INVALID", "AI 请求选项无效")
     model = options.get("model", "small")
@@ -165,12 +187,25 @@ def transcribe_audio(
             raise WorkerError("AI_REQUEST_INVALID", "Whisper 模型目录无效")
         validate_whisper_package(model_root, model)
     duration = _wav_duration(request.input_path)
+    retry_cpu = False
     try:
         recognition = transcriber(request.input_path, model, device, language, model_root, emit)
     except WorkerError:
         raise
-    except BaseException as error:
-        raise WorkerError("AI_TRANSCRIPTION_FAILED", "语音转写执行失败") from error
+    except Exception as error:
+        if options.get("device", "auto") == "auto" and accelerator_failure(error, device):
+            retry_cpu = True
+        else:
+            raise WorkerError("AI_TRANSCRIPTION_FAILED", "语音转写执行失败") from error
+    if retry_cpu:
+        release_accelerator_cache(device)
+        emit(progress("加速不可用，已切换 CPU 重新识别字幕", highest_percent))
+        try:
+            recognition = transcriber(request.input_path, model, "cpu", language, model_root, emit)
+        except WorkerError:
+            raise
+        except Exception as error:
+            raise WorkerError("AI_TRANSCRIPTION_FAILED", "语音转写执行失败") from error
     emit(progress("renderingSubtitles", 90))
     segments = recognition.get("segments") if isinstance(recognition, Mapping) else None
     if not isinstance(segments, list):

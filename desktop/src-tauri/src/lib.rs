@@ -1154,6 +1154,17 @@ fn resume_media_job(state: State<AppState>, job_id: String) -> AppResult<MediaJo
 
 #[tauri::command]
 fn delete_media_job(state: State<AppState>, job_id: String) -> AppResult<()> {
+    if let Some(job) = state.media_jobs.snapshot().jobs.iter().find(|job| job.id == job_id) {
+        let paths = media::deletion::output_paths(job)?;
+        use youtube::models::YouTubeJobStatus as Status;
+        if state.youtube.snapshot().jobs.iter().any(|upload| {
+            !matches!(upload.status, Status::Completed | Status::Cancelled | Status::Failed
+                | Status::VideoUploadedSubtitleFailed | Status::VideoUploadedThumbnailFailed)
+                && paths.iter().any(|path| path.to_string_lossy().eq_ignore_ascii_case(&upload.source_path.to_string_lossy()))
+        }) {
+            return Err(AppError::new("MEDIA_OUTPUT_IN_USE", "产物正被 YouTube 上传任务使用，请先取消相关上传"));
+        }
+    }
     state.media_jobs.delete(&job_id)
 }
 

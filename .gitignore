@@ -29,3 +29,5 @@ desktop/dist/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/schemas/
 desktop/*.local
+desktop/src-tauri/resources/ai-worker-modern-v034/
+desktop/src-tauri/binaries/*-x86_64-pc-windows-gnu.exe

@@ -5,6 +5,26 @@ from ai_worker.protocol import WorkerError
 
 
 class DeviceSelectionTests(unittest.TestCase):
+    def test_compatible_cubin_and_ptx_are_verified_instead_of_rejected(self):
+        from ai_worker.devices import select_device
+
+        for capability, architectures in [
+            ((8, 9), ["sm_80", "sm_86"]),
+            ((12, 0), ["sm_89", "compute_90"]),
+            ((9, 0), ["sm_80+PTX", "sm_120"]),
+        ]:
+            with self.subTest(capability=capability, architectures=architectures):
+                torch = fake_torch(cuda_available=True, capability=capability, architectures=architectures)
+                self.assertEqual(select_device("auto", torch_module=torch), "cuda:0")
+                self.assertEqual(torch.cuda.tensor_runs, 1)
+
+    def test_newer_cubin_and_architecture_specific_ptx_do_not_allow_older_gpu(self):
+        from ai_worker.devices import select_device
+
+        for architectures in (["sm_89"], ["compute_90"], ["compute_90a"]):
+            torch = fake_torch(cuda_available=True, capability=(8, 6), architectures=architectures)
+            self.assertEqual(select_device("auto", torch_module=torch), "cpu")
+
     def test_auto_prefers_a_verified_cuda_device(self):
         from ai_worker.devices import select_device
 

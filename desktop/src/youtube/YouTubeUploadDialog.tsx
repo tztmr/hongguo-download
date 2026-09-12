@@ -7,7 +7,7 @@ import { checkYouTubeUpload } from "./commands";
 import { YouTubeVideoLink } from "./YouTubeUploadJobs";
 import type { YouTubeDuplicateMatch, YouTubePrivacy, YouTubeUploadIntent } from "./types";
 import { UploadSourcePicker } from "./UploadSourcePicker";
-import { availableUploadSources, type UploadVideoSource } from "./uploadSources";
+import { availableUploadSources, preferredUploadSource, type UploadVideoSource } from "./uploadSources";
 
 type Props = {
   batch: DownloadBatch;
@@ -32,8 +32,9 @@ function youtubeTags(batch: DownloadBatch) {
 export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelId, onClose, onSubmit }: Props) {
   const sources = availableUploadSources(sourcePath, sourceOptions);
   const sourceKey = JSON.stringify([batch.id, sourcePath, sources]);
-  const [choice, setChoice] = useState({ key: sourceKey, path: "" });
-  const selectedSourcePath = sources.length === 1 ? sources[0].path : choice.key === sourceKey ? choice.path : "";
+  const [choice, setChoice] = useState({ key: sourceKey, path: preferredUploadSource(sources) });
+  const selectedSourcePath = choice.key === sourceKey && sources.some((source) => source.path === choice.path)
+    ? choice.path : preferredUploadSource(sources);
   const [title, setTitle] = useState(batch.title.slice(0, 100));
   const [description, setDescription] = useState((batch.series.abstract || batch.title).slice(0, 5000));
   const [tags, setTags] = useState(youtubeTags(batch).join(", "));

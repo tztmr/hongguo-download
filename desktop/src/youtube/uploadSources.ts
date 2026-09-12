@@ -23,3 +23,7 @@ export function getUploadSourceOptions(sourcePath: string, jobs: MediaJob[], kno
 export function availableUploadSources(sourcePath: string, options?: UploadVideoSource[]): UploadVideoSource[] {
   return options?.length ? options : [{ kind: "merged", path: sourcePath }];
 }
+
+export function preferredUploadSource(sources: UploadVideoSource[]): string {
+  return (sources.find((source) => source.kind === "noBackgroundMusic") || sources[0])?.path || "";
+}

@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod components;
+pub mod deletion;
 pub mod hardware;
 #[cfg(unix)]
 pub mod merge;
@@ -15,6 +16,8 @@ pub mod process_control;
 pub mod scheduling;
 pub mod storage;
 pub mod tools;
+#[cfg(windows)]
+mod worker_patch;
 #[cfg(all(test, unix))]
 #[path = "merge_windows.rs"]
 mod windows_merge_tests;
@@ -927,6 +930,7 @@ impl MediaJobService {
                 .insert(job_id.to_string());
             token.cancel();
         } else {
+            deletion::remove_outputs(&current, &self.manager.snapshot().jobs)?;
             self.manager.remove(job_id)?;
         }
         Ok(())
@@ -1309,7 +1313,20 @@ fn execute_job(
         .map(|pending| pending.contains(&job.id))
         .unwrap_or(false);
     if remove_after_stop {
-        let _ = manager.remove(&job.id);
+        let mut cleanup_job = manager.job(&job.id).unwrap_or_else(|_| job.clone());
+        if let Ok(Ok(ref completed)) = result {
+            cleanup_job.output_path = Some(completed.output_path.clone());
+            cleanup_job.outputs = completed.outputs.clone();
+        }
+        match deletion::remove_outputs(&cleanup_job, &manager.snapshot().jobs) {
+            Ok(()) => { let _ = manager.remove(&job.id); }
+            Err(error) => {
+                if let Ok(terminal) = manager.update(&job.id, MediaJobTransition::DeletionFailed {
+                    code: error.code, message: error.message,
+                    output_path: cleanup_job.output_path, outputs: cleanup_job.outputs,
+                }) { safe_emit(&event_sink, terminal); }
+            }
+        }
         if let Ok(mut pending) = pending_removals.lock() {
             pending.remove(&job.id);
         }
@@ -2745,6 +2762,7 @@ mod tests {
                 kind: MediaJobKind::Merge,
                 budget: scheduling::ExecutionBudget {
                     cpu_threads: 1,
+                    force_cpu: false,
                     memory: 0,
                     gpu_memory: 0,
                 },

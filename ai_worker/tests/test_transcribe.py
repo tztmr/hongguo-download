@@ -9,6 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
 from ai_worker.protocol import WorkerError, WorkerRequest, emit_event
 from ai_worker.transcribe import segments_to_srt, transcribe_audio, _whisper_transcriber
 
@@ -23,6 +28,62 @@ def write_silence(path: Path, seconds: float = 2.0):
 
 
 class TranscriptionTests(unittest.TestCase):
+    def test_auto_cuda_failure_retries_once_and_publishes_cpu_subtitles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request = self.request(Path(directory), device="auto")
+            devices, events = [], []
+
+            def recognize(_source, _model, device, _language, _root, emit):
+                devices.append(device)
+                if device == "cuda:0":
+                    emit({"type": "progress", "stage": "识别", "percent": 40})
+                    raise RuntimeError("CUDA out of memory")
+                emit({"type": "progress", "stage": "识别", "percent": 10})
+                return {"segments": [{"start": 0, "end": 1, "text": "回退成功"}]}
+
+            with patch("ai_worker.transcribe.select_device", return_value="cuda:0"):
+                result = transcribe_audio(request, transcriber=recognize, emit=events.append)
+            self.assertEqual(devices, ["cuda:0", "cpu"])
+            self.assertIn("回退成功", Path(result["srtPath"]).read_text(encoding="utf-8"))
+            self.assertEqual([e["percent"] for e in events], sorted(e["percent"] for e in events))
+            self.assertTrue(any("CPU" in e["stage"] for e in events))
+
+    def test_explicit_cuda_and_non_accelerator_errors_are_not_retried(self):
+        for device, error in [("cuda", RuntimeError("CUDA out of memory")),
+                              ("auto", OSError("disk full")),
+                              ("auto", RuntimeError("unsupported audio format")),
+                              ("auto", RuntimeError("invalid audio"))]:
+            with self.subTest(device=device, error=error), tempfile.TemporaryDirectory() as directory:
+                request = self.request(Path(directory), device=device)
+                calls = []
+                def fail(*args):
+                    calls.append(args[2])
+                    raise error
+                with patch("ai_worker.transcribe.select_device", return_value="cuda:0"):
+                    with self.assertRaisesRegex(WorkerError, "AI_TRANSCRIPTION_FAILED"):
+                        transcribe_audio(request, transcriber=fail)
+                self.assertEqual(calls, ["cuda:0"])
+                self.assertFalse((request.output_dir / "subtitles.srt").exists())
+
+    @unittest.skipIf(np is None, "requires numpy")
+    def test_prepared_pcm_is_passed_directly_to_whisper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "音频.wav"
+            with wave.open(str(source), "wb") as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(np.array([-32768, 0, 16384, 32767], dtype="<i2").tobytes())
+            def recognize(audio, **kwargs):
+                self.assertIsInstance(audio, np.ndarray)
+                np.testing.assert_array_equal(audio, [-1, 0, 0.5, 32767 / 32768])
+                self.assertFalse(kwargs["fp16"])
+                return {"segments": []}
+            whisper = SimpleNamespace(load_model=lambda *a, **kw: SimpleNamespace(transcribe=recognize))
+            module = SimpleNamespace(tqdm=object())
+            with patch.dict(sys.modules, {"whisper": whisper, "whisper.transcribe": module}):
+                _whisper_transcriber(source, "small", "cpu", "zh", None, lambda _: None)
+
     def request(self, root: Path, **options):
         source = root / "dialogue.wav"
         write_silence(source)

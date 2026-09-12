@@ -95,6 +95,7 @@ describe("media list selection", () => {
     fireEvent.change(view.getByRole("searchbox"), { target: { value: "Alpha" } });
     expect(view.getByText("已选 1 项（当前可见），共选 2 项")).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: "批量删除" }));
+    fireEvent.click(view.getByRole("button", { name: "确认删除任务及文件" }));
     await waitFor(() => expect(media.deleteJob).toHaveBeenCalledExactlyOnceWith("Alpha"));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("已删除 1 项")));
     expect((view.getByRole("searchbox") as HTMLInputElement).value).toBe("Alpha");
@@ -131,6 +132,7 @@ describe("media list selection", () => {
     fireEvent.click(view.getByRole("checkbox", { name: "全选当前可见媒体任务" }));
     const bulk = view.getByRole("button", { name: "批量删除" });
     fireEvent.click(bulk);
+    fireEvent.click(view.getByRole("button", { name: "确认删除任务及文件" }));
     fireEvent.click(bulk);
     expect(disabled(bulk)).toBe(true);
     for (const row of view.getAllByTestId("media-job-row")) {
@@ -147,6 +149,7 @@ describe("media list selection", () => {
     expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("已删除 1 项"));
     deleteJob.mockResolvedValue(undefined);
     fireEvent.click(bulk);
+    fireEvent.click(view.getByRole("button", { name: "确认删除任务及文件" }));
     await waitFor(() => expect(view.getByText("已选 0 项（当前可见），共选 0 项")).toBeTruthy());
     expect(deleteJob.mock.calls).toEqual([["Alpha"], ["Beta"], ["Beta"]]);
   });
@@ -161,6 +164,7 @@ describe("media list selection", () => {
     expect(disabled(view.getByRole("button", { name: "批量删除" }))).toBe(true);
     await act(async () => finish());
     fireEvent.click(view.getByRole("button", { name: "删除" }));
+    fireEvent.click(view.getByRole("button", { name: "确认删除任务及文件" }));
     await waitFor(() => expect(onNotice).toHaveBeenCalledWith(expect.stringContaining("已删除 1 项")));
     expect(selected(view.getByRole("checkbox", { name: "选择媒体任务：Alpha" }))).toBe(false);
     expect(media.deleteJob).toHaveBeenCalledExactlyOnceWith("Alpha");

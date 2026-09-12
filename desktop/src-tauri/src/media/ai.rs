@@ -127,14 +127,23 @@ impl AIExecutor for NativeAIExecutor {
 
     fn execute_with_budget(
         &self,
-        request: ValidatedAIJobRequest,
+        mut request: ValidatedAIJobRequest,
         cancellation: &CancellationToken,
         progress: &mut dyn FnMut(MergeProgress),
         budget: super::scheduling::ExecutionBudget,
     ) -> Result<AIExecutionResult, AppError> {
+        if budget.force_cpu && request.device == "auto" {
+            request.device = "cpu".into();
+        }
         let threads =
             super::scheduling::is_parallel_kind(request.kind).then_some(budget.cpu_threads);
-        self.execute_with_threads(request, cancellation, progress, threads)
+        let mut scheduled_progress = |mut event: MergeProgress| {
+            if budget.force_cpu {
+                event.stage = format!("CPU · {}", event.stage);
+            }
+            progress(event);
+        };
+        self.execute_with_threads(request, cancellation, &mut scheduled_progress, threads)
     }
 }
 
@@ -173,9 +182,17 @@ impl NativeAIExecutor {
             ComponentUseGuard::new(self.components.clone(), vec![runtime_id.into(), model_id]);
         let mut outputs = Vec::new();
         let total = request.inputs.len().max(1) as f64;
+        #[cfg(windows)]
+        let worker = {
+            let executable = std::env::current_exe().map_err(ai_io)?;
+            let bundle = executable.parent().ok_or_else(|| ai_io("missing executable directory"))?;
+            super::worker_patch::resolve(&runtime.entrypoint, bundle)?
+        };
+        #[cfg(not(windows))]
+        let worker = runtime.entrypoint.clone();
         let context = AIItemContext {
             tools,
-            runtime: &runtime.entrypoint,
+            runtime: &worker,
             model_root: &model.root,
             request: &request,
             cancellation,

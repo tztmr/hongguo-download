@@ -9,7 +9,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Callable
 
-from ai_worker.devices import select_device
+from ai_worker.devices import select_device, accelerator_failure, release_accelerator_cache
 from ai_worker.model_package import validate_demucs_package
 from ai_worker.protocol import WorkerError, WorkerRequest, progress
 
@@ -17,6 +17,54 @@ from ai_worker.protocol import WorkerError, WorkerRequest, progress
 SUPPORTED_MODELS = {"htdemucs", "htdemucs_ft"}
 CHUNK_SECONDS = 120
 CONTEXT_SECONDS = 1
+
+
+class SeparationInference:
+    """Keep successful retry settings for all remaining streaming chunks."""
+
+    def __init__(self, network, device, apply_model):
+        self.network, self.device, self.apply_model = network, device, apply_model
+        self.segment = None
+        self.original_segments = [(part, part.segment)
+                                  for part in getattr(network, "models", [network])
+                                  if hasattr(part, "segment")]
+
+    def __call__(self, audio, report):
+        while True:
+            smaller_segment = False
+            try:
+                kwargs = {} if self.segment is None else {"segment": self.segment}
+                return self.apply_model(
+                    self.network, audio, device=self.device, shifts=1,
+                    split=True, overlap=0.25, progress=False, num_workers=0, **kwargs,
+                )
+            except (RuntimeError, NotImplementedError) as error:
+                if not accelerator_failure(error, self.device):
+                    raise
+                smaller_segment = (
+                    self.device.startswith("cuda") and self.segment is None
+                    and "out of memory" in str(error).lower()
+                )
+            # Do not retain the failed call's traceback/tensors during recovery.
+            old_device = self.device
+            if smaller_segment:
+                allowed = float(getattr(self.network, "max_allowed_segment",
+                                        getattr(self.network, "segment", 7.8)))
+                self.segment = min(4.0, allowed / 2)
+                # HTDemucs pads its forward input to model.segment even when
+                # apply_model(segment=...) is shorter. Bound both values so an
+                # OOM retry actually uses less GPU memory.
+                for part, _original in self.original_segments:
+                    part.segment = self.segment
+                release_accelerator_cache(old_device)
+                report("显存不足，缩短推理片段后继续使用 NVIDIA GPU")
+            else:
+                self.device, self.segment = "cpu", None
+                for part, original in self.original_segments:
+                    part.segment = original
+                self.network.cpu()
+                release_accelerator_cache(old_device)
+                report("加速不可用，已切换 CPU 继续分离")
 
 
 def _wav_duration(path: Path) -> float:
@@ -63,6 +111,7 @@ def _demucs_separator(
             network = get_model(model, repo=model_root)
     network.cpu()
     network.eval()
+    inference = SeparationInference(network, device, apply_model)
     vocal_index = network.sources.index("vocals")
     rate = network.samplerate
     vocals = output / "vocals.wav"
@@ -97,37 +146,10 @@ def _demucs_separator(
                     else:
                         normalized = (wav - mean) / std
 
-                        def infer():
-                            return apply_model(
-                                network, normalized[None], device=device, shifts=1,
-                                split=True, overlap=0.25, progress=False, num_workers=0,
-                            )[0]
-
-                        retry_on_cpu = False
-                        try:
-                            sources = infer()
-                        except (RuntimeError, NotImplementedError) as error:
-                            message = str(error).lower()
-                            accelerator = "mps" if device == "mps" else "cuda" if device.startswith("cuda") else None
-                            if accelerator is None or accelerator not in message and not any(
-                                token in message for token in (
-                                    "out of memory", "not supported", "not implemented", "no kernel image",
-                                    "not currently implemented", "unsupported",
-                                )
-                            ):
-                                raise
-                            retry_on_cpu = True
-                        # Leave the exception handler first to release its traceback
-                        # and failed GPU tensors before allocating the CPU retry.
-                        if retry_on_cpu:
-                            device = "cpu"
-                            network.cpu()
-                            if accelerator == "mps":
-                                torch.mps.empty_cache()
-                            else:
-                                torch.cuda.empty_cache()
-                            emit(progress("加速不可用，已切换 CPU 继续分离", 10 + 65 * index / count))
-                            sources = infer()
+                        sources = inference(
+                            normalized[None],
+                            lambda stage: emit(progress(stage, 10 + 65 * index / count)),
+                        )[0]
                         sources = sources.cpu() * std + mean
                         voice = sources[vocal_index]
                         music = sources.sum(dim=0) - voice

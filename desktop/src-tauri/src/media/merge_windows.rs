@@ -633,71 +633,11 @@ fn normalize_inputs(
     let total = durations.iter().sum::<f64>();
     let mut completed = 0.0;
     let mut normalized = Vec::new();
+    let mut cuda_decode = spec.encoder == VideoEncoder::Nvenc;
     for (index, (input, probe)) in inputs.iter().zip(probes).enumerate() {
         check_cancelled(cancellation)?;
         let path = directory.join(format!("segment-{index:05}.mov"));
-        let mut command = tools.ffmpeg_command();
-        command.args(["-hide_banner", "-y", "-i"]).arg(&input.path);
-        let audio = probe.media.audio.is_some();
-        if spec.audio && !audio {
-            command.args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
-        }
-        command.args(["-map", "0:v:0"]);
         let duration = durations[index];
-        if spec.audio {
-            let start = if probe.video_start.is_finite() {
-                probe.video_start
-            } else {
-                0.0
-            };
-            let offset = if audio {
-                probe.audio_start - start
-            } else {
-                0.0
-            };
-            command.args(["-map", if audio { "0:a:0" } else { "1:a:0" }, "-af"])
-                .arg(format!("asetpts=PTS-STARTPTS+{offset:.9}/TB,aresample=48000:async=1:first_pts=0,apad,atrim=duration={duration:.9}"));
-        }
-        match spec.encoder {
-            VideoEncoder::Copy => {
-                command.args(["-c:v", "copy"]);
-            }
-            encoder => {
-                command.arg("-vf").arg(format!("setpts=PTS-STARTPTS,fps={},scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1", spec.rate, spec.width, spec.height, spec.width, spec.height));
-                match encoder {
-                    VideoEncoder::Nvenc => {
-                        command.args(nvenc_args(spec.quality));
-                    }
-                    VideoEncoder::VideoToolbox => {
-                        command.args(["-c:v", "h264_videotoolbox"]);
-                    }
-                    _ => {
-                        command.args(libx264_args(spec.quality));
-                    }
-                }
-                command.args(["-pix_fmt", "yuv420p"]);
-            }
-        }
-        // PCM intermediates avoid accumulating AAC priming at each episode join.
-        if spec.audio {
-            command.args(["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]);
-        } else {
-            command.arg("-an");
-        }
-        command
-            .args([
-                "-t",
-                &format!("{duration:.9}"),
-                "-video_track_timescale",
-                "90000",
-                "-progress",
-                "pipe:1",
-                "-nostats",
-            ])
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
         let stage = format!(
             "{} {}/{}",
             if spec.encoder == VideoEncoder::Copy {
@@ -708,12 +648,94 @@ fn normalize_inputs(
             index + 1,
             inputs.len()
         );
+        let mut highest_percent: f64 = 0.0;
         let mut update = |mut event: MergeProgress| {
-            event.percent = (completed + duration * event.percent / 100.0) / total * 85.0;
+            highest_percent = highest_percent.max(event.percent);
+            event.percent = (completed + duration * highest_percent / 100.0) / total * 85.0;
             progress(event);
         };
         update(event(&stage, 0.0, false));
-        let result = run_command(command, duration, &stage, cancellation, &mut update)?;
+        let result = loop {
+            let mut command = tools.ffmpeg_command();
+            command.args(["-hide_banner", "-y"]);
+            if cuda_decode {
+                // Keep decoded frames in system memory for the existing timing,
+                // scale and pad filters; NVDEC and NVENC work alongside CPU filters.
+                command.args(["-hwaccel", "cuda"]);
+            }
+            command.arg("-i").arg(&input.path);
+            let audio = probe.media.audio.is_some();
+            if spec.audio && !audio {
+                command.args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
+            }
+            command.args(["-map", "0:v:0"]);
+            if spec.audio {
+                let start = if probe.video_start.is_finite() {
+                    probe.video_start
+                } else {
+                    0.0
+                };
+                let offset = if audio {
+                    probe.audio_start - start
+                } else {
+                    0.0
+                };
+                command.args(["-map", if audio { "0:a:0" } else { "1:a:0" }, "-af"])
+                .arg(format!("asetpts=PTS-STARTPTS+{offset:.9}/TB,aresample=48000:async=1:first_pts=0,apad,atrim=duration={duration:.9}"));
+            }
+            match spec.encoder {
+                VideoEncoder::Copy => {
+                    command.args(["-c:v", "copy"]);
+                }
+                encoder => {
+                    command.arg("-vf").arg(format!("setpts=PTS-STARTPTS,fps={},scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1", spec.rate, spec.width, spec.height, spec.width, spec.height));
+                    match encoder {
+                        VideoEncoder::Nvenc => {
+                            command.args(nvenc_args(spec.quality));
+                        }
+                        VideoEncoder::VideoToolbox => {
+                            command.args(["-c:v", "h264_videotoolbox"]);
+                        }
+                        _ => {
+                            command.args(libx264_args(spec.quality));
+                        }
+                    }
+                    command.args(["-pix_fmt", "yuv420p"]);
+                }
+            }
+            // PCM intermediates avoid accumulating AAC priming at each episode join.
+            if spec.audio {
+                command.args(["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]);
+            } else {
+                command.arg("-an");
+            }
+            command
+                .args([
+                    "-t",
+                    &format!("{duration:.9}"),
+                    "-video_track_timescale",
+                    "90000",
+                    "-progress",
+                    "pipe:1",
+                    "-nostats",
+                ])
+                .arg(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let result = run_command(command, duration, &stage, cancellation, &mut update)?;
+            if !result.success && cuda_decode && cuda_decode_failure(&result.stderr) {
+                check_cancelled(cancellation)?;
+                cuda_decode = false;
+                update(event(
+                    "GPU 解码不可用，改用 CPU 解码并保留 NVIDIA GPU 编码",
+                    0.0,
+                    false,
+                ));
+                continue;
+            }
+            break result;
+        };
         if !result.success {
             if spec.encoder == VideoEncoder::Nvenc && nvenc_runtime_failure(&result.stderr) {
                 return Err(AppError::new("MERGE_NVENC_RETRY", "NVENC 不可用"));
@@ -897,9 +919,30 @@ fn nvenc_runtime_failure(stderr: &str) -> bool {
         "openencode session",
         "initialize the encoder",
         "unsupported device",
+        "cannot load nvencodeapi",
+        "initializeencoder failed",
+        "openencodesessionex failed",
+        "no capable devices found",
     ]
     .iter()
     .any(|needle| value.contains(needle))
+}
+
+fn cuda_decode_failure(stderr: &str) -> bool {
+    let value = stderr.to_ascii_lowercase();
+    [
+        "cuda_error",
+        "cannot load nvcuda",
+        "failed setup for format cuda",
+        "hwaccel initialisation",
+        "hardware device setup failed",
+        "device setup failed for decoder",
+        "no device available for decoder",
+        "cuvid",
+        "cannot load libnvcuvid",
+    ]
+    .iter()
+    .any(|token| value.contains(token))
 }
 
 fn encoder_stage(encoder: VideoEncoder) -> &'static str {
@@ -988,6 +1031,20 @@ fn ffmpeg_error(cause: impl std::fmt::Display) -> AppError {
 #[cfg(test)]
 mod performance_tests {
     use super::*;
+
+    #[test]
+    fn decoder_failure_is_distinct_from_io_failure() {
+        assert!(cuda_decode_failure(
+            "Device setup failed for decoder: CUDA_ERROR_NOT_SUPPORTED"
+        ));
+        assert!(cuda_decode_failure(
+            "Failed setup for format cuda: hwaccel initialisation returned error"
+        ));
+        assert!(!cuda_decode_failure("No space left on device"));
+        assert!(!cuda_decode_failure(
+            "Error opening output: Permission denied"
+        ));
+    }
 
     fn tools() -> Option<MediaTools> {
         let directory = std::env::var_os("HONGGUO_TEST_PLAYBACK_TOOLS")?;

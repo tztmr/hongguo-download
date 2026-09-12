@@ -6,7 +6,7 @@ import { checkYouTubeUpload } from "./commands";
 import { YouTubeVideoLink } from "./YouTubeUploadJobs";
 import type { YouTubeDuplicateMatch, YouTubePrivacy, YouTubeUploadIntent } from "./types";
 import { UploadSourcePicker } from "./UploadSourcePicker";
-import { availableUploadSources, type UploadVideoSource } from "./uploadSources";
+import { availableUploadSources, preferredUploadSource, type UploadVideoSource } from "./uploadSources";
 
 export type YouTubeBatchUploadSource = { batch: DownloadBatch; sourcePath: string; sourceOptions?: UploadVideoSource[] };
 
@@ -39,8 +39,7 @@ function reviewItem(source: YouTubeBatchUploadSource): ReviewItem {
   const dramaTitle = batch.series.title.trim() || batch.title.trim();
   return {
     ...source,
-    selectedSourcePath: availableUploadSources(source.sourcePath, source.sourceOptions).length === 1
-      ? availableUploadSources(source.sourcePath, source.sourceOptions)[0].path : "",
+    selectedSourcePath: preferredUploadSource(availableUploadSources(source.sourcePath, source.sourceOptions)),
     jobId: `youtube-${crypto.randomUUID()}`,
     title: batch.title.slice(0, 100),
     description: (batch.series.abstract || batch.title).slice(0, 5000),
