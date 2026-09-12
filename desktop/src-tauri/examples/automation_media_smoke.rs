@@ -2,6 +2,7 @@
 //! Usage: automation_media_smoke <new-output-directory> <episode-fixture.mp4>
 use hongguo_desktop_lib::{
     media::{
+        model::MergeMode,
         MediaJob, MediaJobEventSink, MediaJobManager, MediaJobService, MediaJobStatus,
         NativeMergeExecutor, StartMergeInput, StartMergeRequest,
     },
@@ -49,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output_file_name: "成片.mp4".into(),
             inputs,
             transcode_h264: false,
-            mode: None,
+            mode: Some(MergeMode::Auto),
             quality: Default::default(),
             conflict_policy: Default::default(),
         };

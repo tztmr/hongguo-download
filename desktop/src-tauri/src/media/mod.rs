@@ -1,4 +1,5 @@
 pub mod ai;
+mod audio_prepare;
 pub mod components;
 pub mod deletion;
 pub mod hardware;
@@ -945,6 +946,10 @@ impl MediaJobService {
     }
 
     pub fn retry(&self, job_id: &str) -> Result<MediaJob, AppError> {
+        self.retry_with_merge_mode(job_id, None)
+    }
+
+    fn retry_with_merge_mode(&self, job_id: &str, mode: Option<model::MergeMode>) -> Result<MediaJob, AppError> {
         // Keep the same lock order as start_merge: request validation, then claim.
         let _request_guard = self.merge_request_lock.lock().map_err(|_| {
             AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
@@ -954,7 +959,10 @@ impl MediaJobService {
         })?;
         let original_job = self.manager.job(job_id)?;
         let job = if original_job.kind == MediaJobKind::Merge {
-            let original = self.manager.merge_request(job_id)?;
+            let mut original = self.manager.merge_request(job_id)?;
+            if let Some(mode) = mode {
+                original.mode = Some(mode);
+            }
             if self.has_merged_video(&original.series_root)? {
                 return Err(AppError::new(
                     "MERGE_OUTPUT_EXISTS",
@@ -962,7 +970,11 @@ impl MediaJobService {
                 ));
             }
             let revalidated = revalidate_merge_request(&original)?;
-            self.manager.retry_merge(job_id, revalidated)?
+            if mode == Some(model::MergeMode::Auto) {
+                self.manager.retry_automation_merge(job_id, revalidated)?
+            } else {
+                self.manager.retry_merge(job_id, revalidated)?
+            }
         } else {
             let original = self.manager.ai_request(job_id)?;
             let revalidated = revalidate_ai_request(&original)?;
@@ -971,6 +983,10 @@ impl MediaJobService {
         safe_emit(&self.event_sink, job.clone());
         self.wake_worker();
         Ok(job)
+    }
+
+    pub(crate) fn retry_automation_merge(&self, job_id: &str) -> Result<MediaJob, AppError> {
+        self.retry_with_merge_mode(job_id, Some(model::MergeMode::Auto))
     }
 
     fn wake_worker(&self) {
@@ -2276,6 +2292,31 @@ mod tests {
     }
 
     struct ErrorExecutor;
+
+    #[test]
+    fn automation_retry_upgrades_persisted_copy_only_request_without_losing_inputs() {
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let request = fixture.request("auto-fixture-merge", vec![fixture.write_input("retry.mp4", b"retry")]);
+        let expected = validate_merge_request(&request).unwrap();
+        let job = manager.enqueue_merge(expected.clone()).unwrap();
+        manager.update(&job.id, MediaJobTransition::Start).unwrap();
+        manager.update(&job.id, MediaJobTransition::Fail {
+            code: "MERGE_TRANSCODE_REQUIRED".into(), message: "输入媒体参数不一致".into(),
+        }).unwrap();
+        drop(manager);
+        let service = MediaJobService::new(
+            Arc::new(MediaJobManager::load(&fixture.store).unwrap()),
+            Arc::new(ErrorExecutor), Arc::new(RecordingSink::default()),
+        );
+        let retried = service.retry_automation_merge(&job.id).unwrap();
+        let actual = retried.merge_request.unwrap();
+        assert_eq!(actual.mode, Some(model::MergeMode::Auto));
+        assert_eq!(actual.inputs, expected.inputs);
+        assert_eq!(actual.output_file_name, expected.output_file_name);
+        assert_eq!(actual.quality, expected.quality);
+        assert_ne!(actual.dedupe_key, expected.dedupe_key);
+    }
 
     impl MergeExecutor for ErrorExecutor {
         fn execute(

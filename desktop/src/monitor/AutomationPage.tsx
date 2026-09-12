@@ -9,6 +9,11 @@ import type { YouTubeUploadFormat } from "../youtube/types";
 import { AIStudio, studioDefaults } from "./AIStudio";
 
 const STORAGE_KEY = "hongguo.automation.settings-draft.v1";
+const taskStageLabels: Record<string, string> = {
+  inspect: "检查剧集与查重", download: "下载并校验剧集", merge: "智能合并 / H.264 转码",
+  separate: "分离背景音乐", subtitles: "提取字幕", metadata: "准备文案与封面",
+  upload: "上传与远端处理", short: "首集 Shorts 处理", cleanup: "校验与清理", done: "全部完成",
+};
 const defaults = {
   ...studioDefaults,
   uploadFormat: "auto" as YouTubeUploadFormat,
@@ -222,9 +227,11 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
       </div>}
       <div className="auto-runtime-jobs">{!snapshot?.jobs.length ? <p className="auto-runtime-empty">{loaded ? "尚无后台任务。保存并启动后显示真实进度。" : "正在读取后台状态…"}</p> : snapshot.jobs.map(job => <article className="auto-runtime-job" key={job.id}>
         <div><strong>{job.title}</strong><span>{job.season ? `第 ${job.season} 季 · ` : ""}{job.bookId}</span></div>
-        <div><b>{job.stage}</b><span>{({ pending: "等待", working: "处理中", review: "待核对", failed: "失败", completed: "完成", skipped: "已跳过", observing: "观察中" })[job.status]}</span></div>
+        <div><b>{taskStageLabels[job.stage] || job.stage}</b><span>{({ pending: "等待 / 后台处理中", working: "处理中", review: "待核对", failed: "失败", completed: "完成", skipped: "已跳过", observing: "观察中" })[job.status]}</span></div>
         <progress max={100} value={Math.max(0, Math.min(100, job.progress || 0))} aria-label={`${job.title}进度`} />
-        <p>{job.message} {job.episodeTotal > 0 && `· 剧集 ${job.episodeDone}/${job.episodeTotal}`}</p>
+        <p>{job.message}</p>
+        <p className="auto-runtime-meta">阶段进度 {Math.round(Math.max(0, Math.min(100, job.progress || 0)))}%{job.episodeTotal > 0 && ` · ${job.episodeDone >= job.episodeTotal ? "下载已完成" : "已下载"} ${job.episodeDone}/${job.episodeTotal} 集`}</p>
+        {!!job.retryAt && job.retryAt > Date.now() / 1000 && job.status === "pending" && <p className="auto-runtime-meta">第 {job.attempts || 1} 次重试 · 预计 {timeLabel(job.retryAt)} · 复用已完成文件</p>}
         <div className="auto-runtime-actions">
           {job.status === "review" && <><button type="button" disabled={!!pending} onClick={() => void perform("确认继续", () => automationRuntime.review(job.id, "continue"))}>确认继续处理</button><button type="button" disabled={!!pending} onClick={() => void perform("跳过任务", () => automationRuntime.review(job.id, "skip"))}>跳过此任务</button></>}
           {job.status === "failed" && <button type="button" disabled={!!pending} onClick={() => void perform("重试任务", () => automationRuntime.review(job.id, "retry"))}>重试此任务</button>}

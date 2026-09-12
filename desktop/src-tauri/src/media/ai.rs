@@ -269,7 +269,8 @@ fn process_separation(
     }
     let temp = JobTemp::create(&request.series_root)?;
     let wav = temp.root.join("input.wav");
-    extract_audio(context.tools, input, &wav, context.cancellation)?;
+    super::audio_prepare::extract(context.tools, input, &wav, context.cancellation,
+        &mut |stage, percent| progress(stage, percent * 0.1))?;
     progress("separating".into(), 10.0);
     let worker_outputs = run_worker(
         WorkerInvocation {
@@ -398,7 +399,8 @@ fn process_subtitles(
             if let Some(vocals) = vocals.filter(|_| source == SubtitleSource::WhisperVocals) {
                 fs::copy(vocals, &wav).map_err(ai_io)?;
             } else {
-                extract_audio(context.tools, input, &wav, context.cancellation)?;
+                super::audio_prepare::extract(context.tools, input, &wav, context.cancellation,
+                    &mut |stage, percent| progress(stage, percent * 0.1))?;
             }
             let outputs = run_worker(
                 WorkerInvocation {
@@ -412,7 +414,7 @@ fn process_subtitles(
                     options: json!({"model": request.model, "device": request.device, "modelRoot": context.model_root, "cpuThreads": context.cpu_threads}),
                 },
                 context.cancellation,
-                progress,
+                &mut |stage, percent| progress(stage, 10.0 + percent.clamp(0.0, 100.0) * 0.8),
             )?;
             let worker_srt = worker_output_path(&outputs, "srtPath", &temp.output)?;
             fs::copy(worker_srt, &temporary_srt).map_err(ai_io)?;
@@ -486,41 +488,14 @@ impl Drop for JobTemp {
     }
 }
 
+#[cfg(test)]
 fn extract_audio(
     tools: &MediaTools,
     input: &Path,
     output: &Path,
     cancellation: &CancellationToken,
 ) -> Result<(), AppError> {
-    let mut command = tools.ffmpeg_command();
-    command
-        .args(["-nostdin", "-v", "error", "-y", "-i"])
-        .arg(input)
-        .args([
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-af",
-            "aresample=async=1:first_pts=0",
-            "-c:a",
-            "pcm_s16le",
-        ])
-        .arg(output)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let status = run_controlled_status(
-        &mut command,
-        cancellation,
-        "FFMPEG_FAILED",
-        "音频预处理失败",
-    )?;
-    if !status.success() || !regular_nonempty(output) {
-        return Err(AppError::new("FFMPEG_FAILED", "音频预处理失败"));
-    }
-    Ok(())
+    super::audio_prepare::extract(tools, input, output, cancellation, &mut |_, _| {})
 }
 
 fn remux_vocals(
@@ -1187,6 +1162,21 @@ mod tests {
         assert_eq!(total, 5);
         assert_eq!(super::worker_cpu_threads(2, true, 32), 2);
         assert_eq!(super::worker_cpu_threads(4, true, 32), 4);
+    }
+
+    #[test]
+    fn audio_preprocessing_reports_missing_audio_instead_of_generic_ffmpeg_failure() {
+        let Ok(root) = std::env::var("HONGGUO_TEST_PLAYBACK_TOOLS") else { return; };
+        let tools = super::MediaTools::from_resource_root(root).unwrap();
+        let temp = super::JobTemp::create(&std::env::temp_dir()).unwrap();
+        let video = temp.root.join("无音轨.mp4");
+        assert!(tools.ffmpeg_command().args([
+            "-v", "error", "-f", "lavfi", "-i", "color=size=64x64:rate=10",
+            "-t", "0.5", "-an", "-c:v", "libx264",
+        ]).arg(&video).status().unwrap().success());
+        let error = super::extract_audio(&tools, &video, &temp.root.join("input.wav"), &super::CancellationToken::default()).unwrap_err();
+        assert_eq!(error.code, "AI_AUDIO_STREAM_MISSING");
+        assert!(error.message.contains("没有音轨"));
     }
 
     #[test]

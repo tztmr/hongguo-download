@@ -315,6 +315,14 @@ impl MediaJobManager {
         id: &str,
         revalidated: ValidatedMergeRequest,
     ) -> Result<MediaJob, AppError> {
+        self.retry_merge_inner(id, revalidated, false)
+    }
+
+    pub(super) fn retry_automation_merge(&self, id: &str, revalidated: ValidatedMergeRequest) -> Result<MediaJob, AppError> {
+        self.retry_merge_inner(id, revalidated, true)
+    }
+
+    fn retry_merge_inner(&self, id: &str, revalidated: ValidatedMergeRequest, smart: bool) -> Result<MediaJob, AppError> {
         let mut guard = self.state.lock().map_err(|_| manager_unavailable_error())?;
         let mut next = guard.clone();
         let index = next
@@ -328,7 +336,12 @@ impl MediaJobManager {
                 "媒体任务缺少可重试的原始请求",
             )
         })?;
-        if original != &revalidated {
+        let mut expected = original.clone();
+        if smart {
+            expected.mode = Some(super::model::MergeMode::Auto);
+            expected.dedupe_key = revalidated.dedupe_key.clone();
+        }
+        if expected != revalidated {
             return Err(AppError::new(
                 "MEDIA_INPUT_CHANGED",
                 "合并输入已移动或发生变化",
@@ -337,7 +350,7 @@ impl MediaJobManager {
         let dedupe_key = next.jobs[index].dedupe_key.clone();
         if next.jobs.iter().enumerate().any(|(other_index, job)| {
             other_index != index
-                && job.dedupe_key == dedupe_key
+                && (job.dedupe_key == dedupe_key || job.dedupe_key == revalidated.dedupe_key)
                 && matches!(
                     job.status,
                     MediaJobStatus::Queued | MediaJobStatus::Running | MediaJobStatus::Paused
@@ -349,6 +362,8 @@ impl MediaJobManager {
             ));
         }
         apply_transition(&mut next.jobs[index], MediaJobTransition::Retry)?;
+        next.jobs[index].dedupe_key = revalidated.dedupe_key.clone();
+        next.jobs[index].merge_request = Some(revalidated);
         let updated = next.jobs.remove(index);
         next.jobs.push(updated.clone());
         persist_jobs(&self.store_dir, &next.jobs)?;

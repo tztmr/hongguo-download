@@ -1,6 +1,6 @@
 use super::{model::*, source, Service};
 use crate::{
-    media::model::{MediaJobOutputKind, MediaJobScope, MediaJobStatus, StartMergeInput},
+    media::model::{MediaJobOutputKind, MediaJobScope, MediaJobStatus, MergeMode, StartMergeInput},
     media::{MediaJob, MediaJobKind, MediaTools, StartAIJobRequest, StartMergeRequest},
     youtube::{
         duplicates::{DuplicateQuery, MatchConfidence, UploadIdentity},
@@ -425,6 +425,8 @@ async fn download(
     let receipt = task.root.join(format!("下载完成-{}.json", episode.index));
     let orientation = text(&task.config, "orientation").to_owned();
     ensure_running(service)?;
+    task.message = format!("正在{}第 {}/{} 集", if existing.is_some() { "校验已有" } else { "下载" }, episode.index, wanted);
+    service.checkpoint(task)?;
     let path = crate::run_blocking(move || {
         if let Some(path) = existing {
             safe_root(&path)?;
@@ -536,14 +538,22 @@ fn refresh_media(
             MediaJobKind::SeparateBackgroundMusic => "分离背景音乐",
             _ => "提取字幕",
         },
-        job.stage
+        match job.stage.as_str() {
+            "queued" => "等待可用 CPU / GPU 资源",
+            "probing" => "正在检测媒体参数",
+            "merging" => "正在合并视频",
+            "completed" => "处理和输出校验完成",
+            "failed" => "处理失败",
+            "paused" => "已暂停，保留当前进度",
+            stage => stage,
+        }
     );
     match job.status {
         MediaJobStatus::Completed => Ok(Some(job)),
         MediaJobStatus::Failed | MediaJobStatus::Cancelled => {
             if task.retry_ready {
                 task.retry_ready = false;
-                app.state::<AppState>().media_jobs.retry(&job.id)?;
+                retry_media(app, &job)?;
                 Ok(None)
             } else {
                 Err(AppError::new(
@@ -555,7 +565,7 @@ fn refresh_media(
             }
         }
         MediaJobStatus::Interrupted => {
-            app.state::<AppState>().media_jobs.retry(&job.id)?;
+            retry_media(app, &job)?;
             Ok(None)
         }
         MediaJobStatus::Paused => {
@@ -565,6 +575,15 @@ fn refresh_media(
         _ => Ok(None),
     }
 }
+fn retry_media(app: &AppHandle, job: &MediaJob) -> Result<MediaJob, AppError> {
+    let state = app.state::<AppState>();
+    if job.kind == MediaJobKind::Merge {
+        state.media_jobs.retry_automation_merge(&job.id)
+    } else {
+        state.media_jobs.retry(&job.id)
+    }
+}
+
 async fn merge(
     app: &AppHandle,
     service: &Arc<Service>,
@@ -642,7 +661,7 @@ async fn merge(
                 })
                 .collect(),
             transcode_h264: false,
-            mode: None,
+            mode: Some(MergeMode::Auto),
             quality: Default::default(),
             conflict_policy: Default::default(),
         };

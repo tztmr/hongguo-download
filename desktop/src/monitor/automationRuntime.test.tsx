@@ -31,6 +31,17 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it("distinguishes completed downloads from ongoing audio preparation and scheduled retry", async () => {
+    state.mode = "running";
+    state.jobs = [{ id: "audio", title: "预处理剧目", bookId: "book", stage: "separate", status: "pending",
+      message: "音频预处理失败：磁盘空间不足", episodeDone: 152, episodeTotal: 152,
+      progress: 6, updatedAt: 1, attempts: 1, retryAt: Math.floor(Date.now() / 1000) + 30 } as typeof state.jobs[number]];
+    const view = page(); await loaded(view);
+    expect(view.getByText("分离背景音乐", { selector: "b" })).toBeTruthy();
+    expect(view.getByText(/下载已完成 152\/152 集/)).toBeTruthy();
+    expect(view.getByText(/阶段进度 6%/)).toBeTruthy();
+    expect(view.getByText(/第 1 次重试/)).toBeTruthy();
+  });
   it("prefers saved backend config and starts only after saved target confirmation, without a config argument", async () => {
     storage.set(storageKey, JSON.stringify({ title: "旧本地模板" }));
     const view = page(); await loaded(view);

@@ -6,6 +6,7 @@ export type AutomationJob = {
   status: "pending" | "working" | "review" | "failed" | "completed" | "skipped" | "observing";
   message: string; episodeDone: number; episodeTotal: number; progress: number;
   mainVideoUrl?: string; shortVideoUrl?: string; updatedAt: number;
+  attempts?: number; retryAt?: number;
 };
 export type AutomationSnapshot = {
   config: Record<string, unknown> | null;
