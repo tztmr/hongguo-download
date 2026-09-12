@@ -4,6 +4,7 @@ export type StudioConnection = { provider: string; apiKey: string; baseUrl?: str
 export type StudioResult = {
   title_candidates: { title: string; angle?: string; evidence?: string }[];
   recommended_title: string;
+  recommendation_reason?: string;
   description: string;
   tags: string[];
   category_suggestion: unknown;

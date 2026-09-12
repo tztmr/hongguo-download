@@ -17,6 +17,23 @@ function fill(view: ReturnType<typeof render>) {
   fireEvent.change(view.getByLabelText(/^视频内容 \/ 字幕/), { target: { value: "真实剧情内容" } });
 }
 describe("AI studio live requests", () => {
+  it("sends fixed A/B/C rules for existing settings and applies hashtags to the upload description", async () => {
+    const onApply = vi.fn();
+    const generated = { ...result, title_candidates: [
+      { title: "标题甲", angle: "情绪冲突型" }, { title: "标题乙", angle: "剧情反转型" }, { title: "标题丙", angle: "强点击型" },
+    ], recommended_title: "标题乙", recommendation_reason: "反转有剧情依据", tags: ["原剧名", "短剧"] };
+    vi.mocked(studioRequest).mockResolvedValue({ result: generated });
+    const view = render(<AIStudio settings={{...defaults, textPrompt: "旧草稿附加要求"}} onChange={vi.fn()} onApply={onApply} />); fill(view);
+    fireEvent.click(view.getByRole("button", {name: "生成真实文案"}));
+    await waitFor(() => expect(view.getByLabelText("AI 推荐标题").textContent).toContain("最推荐：标题B"));
+    const prompt = String(vi.mocked(studioRequest).mock.calls[0][1].prompt);
+    for (const rule of ["只生成 3 个标题", "35～60", "300～500", "8～12", "不剧透最终结局", "季数", "旧草稿附加要求", "原剧名", "真实剧情内容"]) expect(prompt).toContain(rule);
+    expect(prompt).not.toContain("输出 5 个候选标题");
+    expect(view.getByLabelText("生成的 Hashtag").textContent).toContain("#原剧名 #短剧");
+    fireEvent.click(view.getByRole("button", {name: /C\s*标题丙/}));
+    fireEvent.click(view.getByRole("button", {name: "应用文案到上传草稿"}));
+    expect(onApply).toHaveBeenCalledWith("标题丙", "真实描述\n\n#原剧名 #短剧", ["原剧名", "短剧"]);
+  });
   it("uses distinct keys and retains the image prompt when image mode changes", async () => {
     vi.mocked(studioRequest).mockResolvedValueOnce({ result }).mockResolvedValueOnce({ image: "https://example.com/cover.png", model: "gpt-image-2", usedReference: false });
     const view = render(<Harness />); fill(view);
