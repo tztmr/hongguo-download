@@ -215,6 +215,16 @@ describe("App feed and search controls", () => {
     expect(view.queryByText("天下第一纨绔3")).toBeNull();
   });
 
+  it("shows a search service failure without claiming the title does not exist", async () => {
+    apiMocks.fetchSearchAll.mockRejectedValue(new Error("当前设备未返回漫剧搜索分类，请重试或缩短关键词"));
+    const view = render(<App />);
+    const input = view.getByRole("textbox", { name: "搜索短剧或漫剧" });
+    fireEvent.change(input, { target: { value: "山河尽罢，共赴良辰" } });
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(view.getByText("当前设备未返回漫剧搜索分类，请重试或缩短关键词")).toBeTruthy());
+    expect(view.queryByRole("heading", { name: "没有找到短剧" })).toBeNull();
+  });
+
   it("opens search immediately from rank and restores cached results after visiting settings", async () => {
     let resolve!: (page: SearchPage) => void;
     apiMocks.fetchSearchAll.mockReturnValue(new Promise((done) => { resolve = done; }));

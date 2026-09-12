@@ -4,7 +4,7 @@ import json
 import logging
 import random
 import time
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
@@ -159,6 +159,7 @@ class PureSignedClient:
         content_type: str = "application/x-www-form-urlencoded",
         preferred_device_id: str | None = None,
         return_device_id: bool = False,
+        validate_upstream: Callable[[dict], str | None] | None = None,
     ) -> dict:
         """带设备失效转移的请求: 上游失败时不向上抛错, 自动注册新设备重试。
 
@@ -205,6 +206,13 @@ class PureSignedClient:
             result = await self._do_call(
                 url, method, data, aid, content_type=content_type, device=entry,
             )
+
+            # A successful HTTP/business code can still omit data this device
+            # is expected to support. Validate before reporting/caching success.
+            if result["ok"] and validate_upstream is not None:
+                validation_error = validate_upstream(result["upstream"])
+                if validation_error:
+                    result = {"ok": False, "msg": validation_error}
 
             if result["ok"]:
                 device_pool.report_success(device_id)

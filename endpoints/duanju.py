@@ -808,7 +808,17 @@ async def duanju_search(
             f'&passback={quote(passback, safe="")}'
         )
 
-    result = await request.app.state.client.call_with_device(build_url, max_device_retries=3)
+    def validate_search_tab(upstream: dict) -> str | None:
+        tabs = upstream.get('search_tabs') if isinstance(upstream, dict) else None
+        if isinstance(tabs, list) and any(
+            isinstance(tab, dict) and str(tab.get('tab_type')) == tab_type for tab in tabs
+        ):
+            return None
+        return f'当前设备未返回{"漫剧" if is_manju else "真人剧"}搜索分类，请重试或缩短关键词'
+
+    result = await request.app.state.client.call_with_device(
+        build_url, max_device_retries=3, validate_upstream=validate_search_tab,
+    )
     if not result['ok']:
         logger.error('短剧搜索失败: %s', result['msg'])
         return error(result['msg'], code=-3, status_code=502)

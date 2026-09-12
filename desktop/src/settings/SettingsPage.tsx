@@ -140,7 +140,7 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
 
       <section className="settings-section" id="settings-device">
         <div className="settings-section-title">
-          <div><h2>设备身份</h2><p>搜索和下载会成对使用 device_id 与 install_id；刷新后立即使用新的设备身份。</p></div>
+          <div><h2>设备身份</h2><p>搜索和下载会自动选择可用设备，无需手动选择。device_id 与 install_id 成对使用，失效时自动切换。</p></div>
         </div>
         <div className="device-pool-card">
           <div className="device-pool-toolbar">
@@ -160,7 +160,7 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
               ))}
             </div>
           ) : (
-            <p className="device-pool-empty">暂无有效设备，点击“更新/刷新设备”注册新的设备身份。</p>
+            <p className="device-pool-empty">暂无有效设备，搜索时会自动注册；也可点击“更新/刷新设备”提前注册。</p>
           )}
         </div>
       </section>
