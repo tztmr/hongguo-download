@@ -12,3 +12,5 @@ pub mod vault;
 pub mod subtitles;
 
 pub mod management;
+
+pub mod format;

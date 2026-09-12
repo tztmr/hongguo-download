@@ -1,3 +1,4 @@
+export type YouTubeUploadFormat = "auto" | "shorts" | "standard";
 export type YouTubePrivacy = "private" | "unlisted" | "public";
 
 export type YouTubeCredential = {
@@ -60,6 +61,7 @@ export type YouTubeDuplicateQuery = { channelId: string; title: string; bookId: 
 export type YouTubeDuplicateMatch = { title: string; videoId: string; youtubeUrl: string; reason: "sameTitle" | "sameDrama" | "similarTitle" };
 
 export type YouTubeUploadIntent = {
+  uploadFormat?: YouTubeUploadFormat;
   dedup?: { channelId: string; bookId: string; dramaTitle: string; allowDuplicate: boolean };
   jobId: string;
   filePath: string;

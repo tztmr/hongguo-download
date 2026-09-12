@@ -76,6 +76,7 @@ describe("YouTubeBatchUploadDialog", () => {
     expect(new Set(requests.map((request) => request.jobId)).size).toBe(2);
     expect(requests.every((request) => request.jobId.length > 0)).toBe(true);
     expect(requests[0]).toEqual({
+      uploadFormat: "auto",
       jobId: expect.any(String), filePath: "/Downloads/都市全集.mp4", coverPath: null,
       subtitle: { path: null, language: "zh-Hans" },
       title: "都市全集", description: "第一部简介", tags: ["都市", "逆袭", "都市归来"],

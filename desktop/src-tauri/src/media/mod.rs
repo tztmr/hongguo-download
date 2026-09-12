@@ -16,11 +16,11 @@ pub mod process_control;
 pub mod scheduling;
 pub mod storage;
 pub mod tools;
-#[cfg(windows)]
-mod worker_patch;
 #[cfg(all(test, unix))]
 #[path = "merge_windows.rs"]
 mod windows_merge_tests;
+#[cfg(windows)]
+mod worker_patch;
 
 pub use ai::{select_subtitle_source, NativeAIExecutor, SubtitleSource};
 
@@ -1319,12 +1319,21 @@ fn execute_job(
             cleanup_job.outputs = completed.outputs.clone();
         }
         match deletion::remove_outputs(&cleanup_job, &manager.snapshot().jobs) {
-            Ok(()) => { let _ = manager.remove(&job.id); }
+            Ok(()) => {
+                let _ = manager.remove(&job.id);
+            }
             Err(error) => {
-                if let Ok(terminal) = manager.update(&job.id, MediaJobTransition::DeletionFailed {
-                    code: error.code, message: error.message,
-                    output_path: cleanup_job.output_path, outputs: cleanup_job.outputs,
-                }) { safe_emit(&event_sink, terminal); }
+                if let Ok(terminal) = manager.update(
+                    &job.id,
+                    MediaJobTransition::DeletionFailed {
+                        code: error.code,
+                        message: error.message,
+                        output_path: cleanup_job.output_path,
+                        outputs: cleanup_job.outputs,
+                    },
+                ) {
+                    safe_emit(&event_sink, terminal);
+                }
             }
         }
         if let Ok(mut pending) = pending_removals.lock() {

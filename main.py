@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.http_client import PureSignedClient
 from core.video_download import create_video_client
 from core.scheduler import scheduler
-from endpoints import device, duanju, pseries, web_catalog
+from endpoints import device, duanju, pseries, web_catalog, ai_studio
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -77,6 +77,7 @@ app.add_middleware(
     expose_headers=["Content-Disposition", "X-Duanju-Definition", "X-Duanju-Playback", "Content-Length", "X-Playback-Mime", "X-Playback-Duration"],
 )
 
+app.include_router(ai_studio.router, prefix="/api", tags=["AI 创作台"])
 app.include_router(device.router, prefix="/api", tags=["设备管理"])
 app.include_router(duanju.router, prefix="/api", tags=["短剧(签名 + 解密)"])
 app.include_router(pseries.router, prefix="/api", tags=["短剧(PSeries 无签名)"])

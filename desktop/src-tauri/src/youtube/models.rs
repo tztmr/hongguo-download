@@ -13,6 +13,8 @@ pub enum PrivacyStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UploadIntent {
+    #[serde(default, skip_serializing_if = "super::format::UploadFormat::is_auto")]
+    pub upload_format: super::format::UploadFormat,
     pub job_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dedup: Option<super::duplicates::UploadIdentity>,
@@ -66,6 +68,7 @@ impl UploadIntent {
             ));
         }
         validate_regular_file(&self.file_path, "UPLOAD_SOURCE_INVALID", "上传源文件无效")?;
+        super::format::validate_file(self.upload_format, &self.file_path)?;
         if let Some(cover) = &self.cover_path {
             validate_regular_file(cover, "UPLOAD_COVER_INVALID", "上传封面无效")?;
         }
@@ -204,6 +207,7 @@ mod tests {
         let path = root.join("merged.mp4");
         fs::write(&path, b"video").unwrap();
         let mut intent = UploadIntent {
+            upload_format: Default::default(),
             job_id: "job-1".into(),
             dedup: None,
             file_path: path,
@@ -221,6 +225,10 @@ mod tests {
             synthetic_media_confirmed: true,
             publish_confirmed: true,
         };
+        assert!(serde_json::to_value(&intent)
+            .unwrap()
+            .get("uploadFormat")
+            .is_none());
         assert_eq!(
             intent.validate().unwrap_err().code,
             "UPLOAD_AUDIENCE_CONFIRMATION_REQUIRED"

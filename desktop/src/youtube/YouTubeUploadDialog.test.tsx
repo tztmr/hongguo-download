@@ -155,3 +155,11 @@ it("ignores a completed lookup after the dialog is closed", async () => {
   fireEvent.click(view.getByRole("button", { name: "确认上传" }));
   await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({ hasPaidProductPlacement: true })));
 });
+
+it("includes the selected Shorts type in the real upload request", async () => {
+  const submit = vi.fn();
+  const view = render(<YouTubeUploadDialog batch={batch} sourcePath="/Downloads/merged.mp4" channelId="channel-a" onClose={vi.fn()} onSubmit={submit} />);
+  fireEvent.change(view.getByLabelText("YouTube 上传类型"), {target:{value:"shorts"}});
+  fireEvent.click(view.getByRole("button", {name:"确认上传"}));
+  await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({uploadFormat:"shorts", privacyStatus:"private"})));
+});

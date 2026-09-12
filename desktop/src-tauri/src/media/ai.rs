@@ -185,7 +185,9 @@ impl NativeAIExecutor {
         #[cfg(windows)]
         let worker = {
             let executable = std::env::current_exe().map_err(ai_io)?;
-            let bundle = executable.parent().ok_or_else(|| ai_io("missing executable directory"))?;
+            let bundle = executable
+                .parent()
+                .ok_or_else(|| ai_io("missing executable directory"))?;
             super::worker_patch::resolve(&runtime.entrypoint, bundle)?
         };
         #[cfg(not(windows))]

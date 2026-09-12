@@ -1,3 +1,4 @@
+import { UploadFormatPicker } from "./UploadFormatPicker";
 import { useUploadPreferences } from "./uploadPreferences";
 import { SubtitlePicker, subtitleRequest, type SubtitleChoice } from "./SubtitlePicker";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -69,7 +70,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
     setError("");
     setPhase("idle");
     return () => { generation.current += 1; };
-  }, [title, channelId, sourcePath, selectedSourcePath, sourceKey]);
+  }, [title, channelId, sourcePath, selectedSourcePath, sourceKey, settings.uploadFormat]);
 
   function close() {
     generation.current += 1;
@@ -84,7 +85,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
     setPhase(allowDuplicate ? "submitting" : "checking");
     const request: YouTubeUploadIntent = {
       jobId: `youtube-${Date.now()}`,
-      filePath: selectedSourcePath, coverPath, subtitle: subtitleRequest(subtitle, selectedSourcePath, settings.subtitleLanguage), title: title.trim(), description,
+      uploadFormat: settings.uploadFormat, filePath: selectedSourcePath, coverPath, subtitle: subtitleRequest(subtitle, selectedSourcePath, settings.subtitleLanguage), title: title.trim(), description,
       tags: tags.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
       categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
       containsSyntheticMedia: synthetic, hasPaidProductPlacement: paidPromotion, audienceConfirmed, syntheticMediaConfirmed: syntheticConfirmed, publishConfirmed,
@@ -122,6 +123,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
         <label>标题<input aria-label="YouTube 标题" value={title} maxLength={100} onChange={(event) => setTitle(event.target.value)} /></label>
         <label>简介<textarea aria-label="YouTube 简介" value={description} maxLength={5000} onChange={(event) => setDescription(event.target.value)} /></label>
         <label>标签<input aria-label="YouTube 标签" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="多个标签用逗号分隔" /></label>
+        <UploadFormatPicker value={settings.uploadFormat} onChange={value => setSetting("uploadFormat", value)} disabled={busy} />
         <div className="youtube-form-grid">
           <label>类别<select aria-label="YouTube 类别" value={categoryId} onChange={(event) => setCategoryId(event.target.value)}><option value="1">电影/动漫</option><option value="24">娱乐</option></select></label>
           <label>可见性<select aria-label="YouTube 可见性" value={privacy} onChange={(event) => setPrivacy(event.target.value as YouTubePrivacy)}><option value="private">私享</option><option value="unlisted">不公开</option><option value="public">公开</option></select></label>

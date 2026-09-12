@@ -903,6 +903,45 @@ async fn api_get(state: State<'_, AppState>, path: String) -> AppResult<Value> {
     .await
 }
 
+#[tauri::command]
+async fn ai_studio_request(
+    state: State<'_, AppState>,
+    action: String,
+    payload: Value,
+) -> AppResult<Value> {
+    if !matches!(action.as_str(), "models" | "text" | "image") {
+        return Err(AppError::new("AI_INVALID_REQUEST", "不支持的 AI 操作。"));
+    }
+    let api_base = state.api_base.clone();
+    let ready = state.api_ready.clone();
+    let readiness_client = state.client.clone();
+    run_blocking(move || {
+        ensure_api_ready(&readiness_client, &api_base, &ready)?;
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(260))
+            .build()
+            .map_err(|_| AppError::new("AI_NETWORK_ERROR", "无法创建本地 AI 请求。"))?;
+        let response = client
+            .post(format!("{api_base}/api/studio/{action}"))
+            .json(&payload)
+            .send()
+            .map_err(|_| AppError::new("AI_NETWORK_ERROR", "本地 AI 服务连接失败或超时。"))?;
+        let success = response.status().is_success();
+        let value: Value = response.json().map_err(|_| {
+            AppError::new("AI_INVALID_RESPONSE", "本地 AI 服务响应无效，请更新应用。")
+        })?;
+        if !success {
+            return Err(AppError::new(
+                value["code"].as_str().unwrap_or("AI_ERROR"),
+                value["message"].as_str().unwrap_or("AI 请求失败。"),
+            ));
+        }
+        Ok(value)
+    })
+    .await
+}
+
 fn playback_url(api_base: &str, item_id: &str, definition: &str, windows: bool) -> String {
     format!(
         "{api_base}/api/duanju/download?item_id={}&definition={}{}",
@@ -1154,15 +1193,32 @@ fn resume_media_job(state: State<AppState>, job_id: String) -> AppResult<MediaJo
 
 #[tauri::command]
 fn delete_media_job(state: State<AppState>, job_id: String) -> AppResult<()> {
-    if let Some(job) = state.media_jobs.snapshot().jobs.iter().find(|job| job.id == job_id) {
+    if let Some(job) = state
+        .media_jobs
+        .snapshot()
+        .jobs
+        .iter()
+        .find(|job| job.id == job_id)
+    {
         let paths = media::deletion::output_paths(job)?;
         use youtube::models::YouTubeJobStatus as Status;
         if state.youtube.snapshot().jobs.iter().any(|upload| {
-            !matches!(upload.status, Status::Completed | Status::Cancelled | Status::Failed
-                | Status::VideoUploadedSubtitleFailed | Status::VideoUploadedThumbnailFailed)
-                && paths.iter().any(|path| path.to_string_lossy().eq_ignore_ascii_case(&upload.source_path.to_string_lossy()))
+            !matches!(
+                upload.status,
+                Status::Completed
+                    | Status::Cancelled
+                    | Status::Failed
+                    | Status::VideoUploadedSubtitleFailed
+                    | Status::VideoUploadedThumbnailFailed
+            ) && paths.iter().any(|path| {
+                path.to_string_lossy()
+                    .eq_ignore_ascii_case(&upload.source_path.to_string_lossy())
+            })
         }) {
-            return Err(AppError::new("MEDIA_OUTPUT_IN_USE", "产物正被 YouTube 上传任务使用，请先取消相关上传"));
+            return Err(AppError::new(
+                "MEDIA_OUTPUT_IN_USE",
+                "产物正被 YouTube 上传任务使用，请先取消相关上传",
+            ));
         }
     }
     state.media_jobs.delete(&job_id)
@@ -1712,6 +1768,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             api_get,
+            ai_studio_request,
             get_playback_url,
             get_settings,
             update_settings,

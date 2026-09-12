@@ -14,6 +14,9 @@ export default defineConfig(async () => ({
   server: {
     port: 1424,
     strictPort: true,
+    proxy: {
+      "/api/studio": { target: "http://127.0.0.1:1426" },
+    },
     host: host || false,
     hmr: host
       ? {

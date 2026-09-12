@@ -1244,6 +1244,7 @@ mod tests {
                 failure_notified_at: None,
             },
             intent: UploadIntent {
+                upload_format: Default::default(),
                 job_id: id.into(),
                 dedup: None,
                 file_path: PathBuf::from(format!("/{id}.mp4")),

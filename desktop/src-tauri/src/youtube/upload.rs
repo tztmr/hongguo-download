@@ -930,6 +930,7 @@ mod tests {
         let source = root.join("video.mp4");
         fs::write(&source, vec![7u8; size]).unwrap();
         UploadIntent {
+            upload_format: Default::default(),
             job_id: job_id.into(),
             dedup: None,
             file_path: source,

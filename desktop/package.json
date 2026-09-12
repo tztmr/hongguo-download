@@ -1,10 +1,11 @@
 {
   "name": "hongguo-desktop",
   "private": true,
-  "version": "0.3.4",
+  "version": "0.3.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:ai": "python3 -m uvicorn endpoints.ai_studio:preview_app --app-dir .. --host 127.0.0.1 --port 1426 --no-access-log",
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:watch": "vitest",

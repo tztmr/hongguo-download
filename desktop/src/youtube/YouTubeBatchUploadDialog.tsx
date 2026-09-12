@@ -1,3 +1,4 @@
+import { UploadFormatPicker } from "./UploadFormatPicker";
 import { useUploadPreferences } from "./uploadPreferences";
 import { SubtitlePicker, subtitleRequest, type SubtitleChoice } from "./SubtitlePicker";
 import { useEffect, useRef, useState } from "react";
@@ -121,7 +122,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
         // Consent applies only to this explicit attempt. Every retry performs a fresh check.
         const allowDuplicate = item.jobId === overrideJobId;
         const request: YouTubeUploadIntent = {
-          jobId: item.jobId, filePath: item.selectedSourcePath, coverPath: null,
+          jobId: item.jobId, uploadFormat: settings.uploadFormat, filePath: item.selectedSourcePath, coverPath: null,
           subtitle: subtitleRequest(item.subtitle, item.selectedSourcePath, settings.subtitleLanguage),
           title, description: item.description,
           tags: item.tags.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
@@ -171,7 +172,8 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
         </header>
         <p>共 {items.length} 部剧。逐项检查当前频道，重复项默认跳过；失败项可修正后重新开始。</p>
         <fieldset className="youtube-upload-fields" disabled={busy}>
-          <div className="youtube-form-grid">
+          <UploadFormatPicker value={settings.uploadFormat} onChange={value => setSetting("uploadFormat", value)} disabled={busy} />
+        <div className="youtube-form-grid">
             <label>类别<select aria-label="YouTube 类别" value={categoryId} onChange={(event) => setCategoryId(event.target.value)}><option value="1">电影/动漫</option><option value="24">娱乐</option></select></label>
             <label>可见性<select aria-label="YouTube 可见性" value={privacy} onChange={(event) => setPrivacy(event.target.value as YouTubePrivacy)}><option value="private">私享</option><option value="unlisted">不公开</option><option value="public">公开</option></select></label>
             <label>儿童受众<select aria-label="儿童受众" value={madeForKids ? "yes" : "no"} onChange={(event) => setMadeForKids(event.target.value === "yes")}><option value="no">不是面向儿童</option><option value="yes">面向儿童</option></select></label>

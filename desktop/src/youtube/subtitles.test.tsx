@@ -94,5 +94,5 @@ it("falls back safely for corrupt or invalid cached settings", () => {
   window.localStorage.setItem("hongguo.youtube.upload-preferences.v1", "broken");
   expect(readUploadPreferences().privacy).toBe("private");
   window.localStorage.setItem("hongguo.youtube.upload-preferences.v1", JSON.stringify({ privacy: "invalid", madeForKids: "false", subtitleLanguage: "invalid language", title: "do not load" }));
-  expect(readUploadPreferences()).toEqual({ privacy: "private", categoryId: "1", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" });
+  expect(readUploadPreferences()).toEqual({ uploadFormat: "auto", privacy: "private", categoryId: "1", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" });
 });

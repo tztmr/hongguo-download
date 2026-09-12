@@ -1,6 +1,6 @@
 [package]
 name = "hongguo-desktop"
-version = "0.3.4"
+version = "0.3.5"
 description = "Desktop downloader for Hongguo / Fanqie short dramas"
 authors = ["edking"]
 edition = "2021"

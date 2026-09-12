@@ -481,9 +481,17 @@ impl MediaJobManager {
 
 fn apply_transition(job: &mut MediaJob, transition: MediaJobTransition) -> Result<(), AppError> {
     match (job.status, transition) {
-        (status, MediaJobTransition::DeletionFailed { code, message, output_path, outputs })
-            if status == MediaJobStatus::Running
-                || (status == MediaJobStatus::Paused && job.pause_origin == Some(MediaJobPauseOrigin::Running)) =>
+        (
+            status,
+            MediaJobTransition::DeletionFailed {
+                code,
+                message,
+                output_path,
+                outputs,
+            },
+        ) if status == MediaJobStatus::Running
+            || (status == MediaJobStatus::Paused
+                && job.pause_origin == Some(MediaJobPauseOrigin::Running)) =>
         {
             job.status = MediaJobStatus::Failed;
             job.stage = "failed".into();
@@ -741,15 +749,25 @@ mod lifecycle_tests {
         manager.claim_oldest_queued().unwrap();
         let output = root.join("merged.mp4");
         fs::write(&output, b"published while cancellation was requested").unwrap();
-        manager.update(&job.id, MediaJobTransition::DeletionFailed {
-            code: "MEDIA_OUTPUT_DELETE_FAILED".into(), message: "file in use".into(),
-            output_path: Some(output.clone()), outputs: Vec::new(),
-        }).unwrap();
+        manager
+            .update(
+                &job.id,
+                MediaJobTransition::DeletionFailed {
+                    code: "MEDIA_OUTPUT_DELETE_FAILED".into(),
+                    message: "file in use".into(),
+                    output_path: Some(output.clone()),
+                    outputs: Vec::new(),
+                },
+            )
+            .unwrap();
         drop(manager);
         let retained = MediaJobManager::load(&root).unwrap().job(&job.id).unwrap();
         assert_eq!(retained.status, MediaJobStatus::Failed);
         assert_eq!(retained.output_path, Some(output));
-        assert_eq!(retained.error_code.as_deref(), Some("MEDIA_OUTPUT_DELETE_FAILED"));
+        assert_eq!(
+            retained.error_code.as_deref(),
+            Some("MEDIA_OUTPUT_DELETE_FAILED")
+        );
     }
 
     #[test]
