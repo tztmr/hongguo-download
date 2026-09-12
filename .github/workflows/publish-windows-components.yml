@@ -28,8 +28,9 @@ jobs:
           python-version: '3.12'
       - name: Validate artifacts and publish component archives
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.COMPONENT_RELEASE_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          COMPONENT_RELEASE_REPO: tztmr/apihongguoai-address
           SOURCE_RUN_ID: ${{ inputs.run_id }}
           COMPONENT_TAG: ${{ inputs.tag }}
         run: python scripts/publish-windows-components.py
