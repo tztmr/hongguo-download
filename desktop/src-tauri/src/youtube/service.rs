@@ -165,7 +165,7 @@ impl YouTubeService {
         Ok(self.snapshot())
     }
 
-    async fn management_api(
+    pub(super) async fn management_api(
         &self,
         channel_id: &str,
     ) -> Result<super::management::ManagementApi, AppError> {
@@ -413,7 +413,12 @@ impl YouTubeService {
             source_path: None,
         };
         let matches = self.check_upload(&query).await?;
-        if !identity.allow_duplicate && !matches.is_empty() {
+        if (!identity.allow_duplicate && !matches.is_empty())
+            || (intent.job_id.starts_with("auto-")
+                && matches
+                    .iter()
+                    .any(|m| m.confidence == duplicates::MatchConfidence::Confirmed))
+        {
             return Err(AppError::new(
                 "YOUTUBE_DUPLICATE_FOUND",
                 "发现重复或身份信息不完整的影片，请重新查重并核对季数与视频类型",
@@ -1049,7 +1054,12 @@ fn restore_upload_queue(uploads: &mut [StoredUpload]) -> bool {
             item.job.status = YouTubeJobStatus::Paused;
             changed = true;
         } else if is_active(item.job.status) {
-            item.job.status = YouTubeJobStatus::Queued;
+            // Automation owns restart policy; hold these jobs until its runner resumes them.
+            item.job.status = if item.job.id.starts_with("auto-") {
+                YouTubeJobStatus::Paused
+            } else {
+                YouTubeJobStatus::Queued
+            };
             item.job.error_code = None;
             item.job.error_message = None;
             changed = true;
@@ -1326,6 +1336,17 @@ mod tests {
                 publish_confirmed: true,
             },
         }
+    }
+
+    #[test]
+    fn automatic_uploads_wait_for_runner_after_restart() {
+        let mut uploads = vec![queued("auto-series-main"), queued("manual")];
+        for item in &mut uploads {
+            item.job.status = YouTubeJobStatus::Uploading;
+        }
+        assert!(restore_upload_queue(&mut uploads));
+        assert_eq!(uploads[0].job.status, YouTubeJobStatus::Paused);
+        assert_eq!(uploads[1].job.status, YouTubeJobStatus::Queued);
     }
 
     #[test]

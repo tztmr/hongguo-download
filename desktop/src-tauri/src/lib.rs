@@ -21,6 +21,11 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
 pub mod app_error;
+pub mod automation;
+use automation::{
+    control_automation, get_automation_snapshot, review_automation_job, save_automation_settings,
+    start_automation,
+};
 pub mod media;
 mod platform_fs;
 mod settings;
@@ -64,6 +69,7 @@ struct AppState {
     ai_components: Option<std::sync::Arc<ComponentManager>>,
     youtube: std::sync::Arc<YouTubeService>,
     prepared_series_assets: Arc<PreparedSeriesAssets>,
+    automation: Arc<automation::Service>,
 }
 
 #[derive(Clone)]
@@ -1734,6 +1740,9 @@ pub fn run() {
                 )
             });
             media_jobs.set_concurrency(settings.ai_concurrency);
+            let automation =
+                automation::Service::load(media_jobs_path.join("automation/state.json"))
+                    .map_err(|e| e.to_string())?;
             let youtube = YouTubeService::load(
                 config_dir,
                 media_jobs_path,
@@ -1744,6 +1753,7 @@ pub fn run() {
             )
             .map_err(|error| error.to_string())?;
             app.manage(AppState {
+                automation: automation.clone(),
                 client,
                 api_base,
                 api_ready: Arc::new(OnceLock::new()),
@@ -1755,6 +1765,7 @@ pub fn run() {
                 youtube,
                 prepared_series_assets: Arc::new(PreparedSeriesAssets::default()),
             });
+            automation.spawn(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1767,6 +1778,11 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_automation_snapshot,
+            save_automation_settings,
+            start_automation,
+            control_automation,
+            review_automation_job,
             api_get,
             ai_studio_request,
             get_playback_url,

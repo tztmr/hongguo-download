@@ -178,6 +178,20 @@ def series_release_type(video: dict) -> str:
     return "playlet" if int(video.get("content_type") or detail.get("content_type") or 0) == 1 else ""
 
 
+def _completion_labels(*sources: dict) -> list[dict[str, str]]:
+    """Keep explicit series status labels separately from genre-only tags."""
+    labels: list[str] = []
+    for source in sources:
+        for key in ("sub_title_list", "secondary_info_list"):
+            for tag in source.get(key) or []:
+                text = tag.get("content") if isinstance(tag, dict) else tag
+                if (isinstance(text, str)
+                    and re.fullmatch(r"(?:已完结|完结|未完结|连载中|更新中|全\s*[1-9]\d*\s*集)", text.strip())
+                    and text.strip() not in labels):
+                    labels.append(text.strip())
+    return [{"content": label} for label in labels]
+
+
 def text_metric(video: dict, label: str) -> int | None:
     # Homepage recommendations use rec_text; rank feeds use RecommendText.
     texts = [video.get("rec_text"), (video.get("rec_text_item") or {}).get("RecommendText")]
@@ -237,6 +251,11 @@ def _normalize_video(
         "score": video.get("score") or "",
         "category": " · ".join(tags),
         "category_tags": tags,
+        # Category normalization deliberately removes episode/status text. Keep
+        # this source evidence so automation can distinguish complete/unknown
+        # without guessing undocumented status or creation_status enum values.
+        "sub_title": video.get("sub_title") or detail.get("sub_title") or "",
+        "sub_title_list": _completion_labels(video, detail, wrapper),
         "author": video.get("copyright") or "",
         "rank_tags": [],
         "release_type": release_type or series_release_type(video),

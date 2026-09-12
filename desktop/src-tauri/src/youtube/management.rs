@@ -333,6 +333,50 @@ impl ManagementApi {
         parse_video(&self.video(video_id).await?)
     }
 
+    /// Upload transport completion does not establish that YouTube finished
+    /// processing the video. Cleanup must wait for this separate owner read.
+    pub async fn processing_ready(&self, video_id: &str) -> Result<bool, AppError> {
+        if video_id.trim().is_empty() {
+            return Err(invalid());
+        }
+        let data = self
+            .get(
+                "videos",
+                &[
+                    ("part", "snippet,status,processingDetails"),
+                    ("id", video_id),
+                ],
+            )
+            .await?;
+        let videos = items(&data)?;
+        if videos.is_empty() {
+            return Err(AppError::new(
+                "YOUTUBE_VIDEO_NOT_FOUND",
+                "视频已不存在，已暂停自动清理并保留本地文件",
+            ));
+        }
+        let video = videos
+            .iter()
+            .find(|video| field(video, "/id") == video_id)
+            .ok_or_else(response_error)?;
+        owned(video, &self.channel_id)?;
+        let processing = field(video, "/processingDetails/processingStatus");
+        let upload = field(video, "/status/uploadStatus");
+        if [&processing, &upload].iter().any(|state| {
+            matches!(
+                state.as_str(),
+                "failed" | "terminated" | "rejected" | "deleted"
+            )
+        }) {
+            return Err(AppError::new(
+                "YOUTUBE_PROCESSING_FAILED",
+                "YouTube 视频处理失败、已终止或视频不可用；已保留本地文件，请在 YouTube Studio 核对",
+            ));
+        }
+        Ok(processing == "succeeded"
+            || (video.get("processingDetails").is_none() && upload == "processed"))
+    }
+
     pub async fn update(&self, request: &VideoUpdate) -> Result<ManagedVideo, AppError> {
         let current = self.video(&request.video_id).await?;
         let (body, part) = update_body(&current, request)?;
@@ -448,6 +492,19 @@ impl ManagementApi {
             privacy_status: field(&data, "/status/privacyStatus"),
             item_ids: vec![],
         })
+    }
+}
+
+impl super::service::YouTubeService {
+    pub async fn automation_processing_ready(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+    ) -> Result<bool, AppError> {
+        self.management_api(channel_id)
+            .await?
+            .processing_ready(video_id)
+            .await
     }
 }
 
@@ -573,6 +630,104 @@ mod tests {
     }
     fn channel() -> Value {
         json!({"items":[{"id":"c1","contentDetails":{"relatedPlaylists":{"uploads":"uploads1"}}}]})
+    }
+    #[tokio::test]
+    async fn processing_waits_until_success_and_only_reads_the_requested_video() {
+        let states = [
+            (json!({"processingStatus":"processing"}), "uploaded", false),
+            (json!({"processingStatus":"processing"}), "processed", false),
+            (json!({"processingStatus":"unknown"}), "processed", false),
+            (json!({}), "processed", false),
+            (Value::Null, "processed", false),
+            (json!({"processingStatus":"succeeded"}), "uploaded", true),
+        ];
+        let replies = states
+            .iter()
+            .map(|(details, upload, _)| {
+                (
+                    200,
+                    json!({"items":[{
+                        "id":"v1", "snippet":{"channelId":"c1"},
+                        "processingDetails":details,"status":{"uploadStatus":upload}
+                    }]}),
+                )
+            })
+            .collect();
+        let (api, server) = server(replies).await;
+        for (_, _, expected) in states {
+            assert_eq!(api.processing_ready("v1").await.unwrap(), expected);
+        }
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 6);
+        for request in requests {
+            assert!(request.starts_with("GET /videos?"));
+            assert!(request.contains("part=snippet%2Cstatus%2CprocessingDetails"));
+            assert!(request.contains("id=v1"));
+            assert_eq!(request.split("\r\n\r\n").nth(1).unwrap_or(""), "");
+        }
+    }
+    #[tokio::test]
+    async fn processed_upload_is_ready_only_when_processing_details_are_absent() {
+        let (api, server) = server(["uploaded", "processed", "unknown", ""]
+            .iter()
+            .map(|upload| (200,json!({"items":[{"id":"v1","snippet":{"channelId":"c1"},"status":{"uploadStatus":upload}}]})))
+            .collect()).await;
+        for expected in [false, true, false, false] {
+            assert_eq!(api.processing_ready("v1").await.unwrap(), expected);
+        }
+        assert!(server
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+    #[tokio::test]
+    async fn processing_failure_never_exposes_remote_reason_or_allows_cleanup() {
+        let mut replies = Vec::new();
+        for state in ["failed", "terminated", "rejected", "deleted"] {
+            for processing_failure in [true, false] {
+                let mut video = json!({"id":"v1","snippet":{"channelId":"c1"},
+                    "processingDetails":{"processingStatus":"succeeded","processingFailureReason":"sensitive-remote-body"},
+                    "status":{"uploadStatus":"processed","failureReason":"sensitive-remote-body"}});
+                if processing_failure {
+                    video["processingDetails"]["processingStatus"] = json!(state);
+                } else {
+                    video["status"]["uploadStatus"] = json!(state);
+                }
+                replies.push((200, json!({"items":[video]})));
+            }
+        }
+        let (api, server) = server(replies).await;
+        for _ in 0..8 {
+            let error = api.processing_ready("v1").await.unwrap_err();
+            assert_eq!(error.code, "YOUTUBE_PROCESSING_FAILED");
+            assert!(!error.message.contains("sensitive-remote-body"));
+        }
+        assert!(server
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+    #[tokio::test]
+    async fn processing_rejects_cross_channel_missing_and_wrong_video_results() {
+        let (api,server)=server(vec![
+            (200,json!({"items":[{"id":"v1","snippet":{"channelId":"other"},"processingDetails":{"processingStatus":"succeeded"}}]})),
+            (200,json!({"items":[]})),
+            (200,json!({"items":[{"id":"v2","snippet":{"channelId":"c1"},"processingDetails":{"processingStatus":"succeeded"}}]})),
+        ]).await;
+        for expected in [
+            "YOUTUBE_CHANNEL_MISMATCH",
+            "YOUTUBE_VIDEO_NOT_FOUND",
+            "YOUTUBE_MANAGEMENT_RESPONSE",
+        ] {
+            assert_eq!(api.processing_ready("v1").await.unwrap_err().code, expected);
+        }
+        assert!(server
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
     }
     #[tokio::test]
     async fn lists_private_videos_using_uploads_playlist_with_page_token() {

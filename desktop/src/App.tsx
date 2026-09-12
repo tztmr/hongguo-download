@@ -584,7 +584,7 @@ export default function App() {
       {nav === "queue" || nav === "platformVideos" || nav === "analytics" ? null : nav === "monitor" ? (
         <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
       ) : nav === "automation" ? (
-        <AutomationPage saveDir={activeSettings.saveDir} channels={(isPreview ? previewYouTubeModel : youtube).channels} onOpenSettings={() => navigate("settings")} />
+        <AutomationPage runtimeEnabled={!isPreview} saveDir={activeSettings.saveDir} channels={(isPreview ? previewYouTubeModel : youtube).channels} onOpenSettings={() => navigate("settings")} />
       ) : nav === "settings" ? (
         <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />
       ) : (

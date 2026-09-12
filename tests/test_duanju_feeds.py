@@ -221,6 +221,37 @@ class FeedDisplayRegressionTests(unittest.TestCase):
         }]}}})
         self.assertEqual(page['items'][0]['category_tags'], ['萌宝', '东方仙侠'])
         self.assertEqual(page['items'][0]['release_type'], 'comic_series_rank')
+        self.assertEqual(page['items'][0]['sub_title'], '东方仙侠·全300集·演员甲')
+
+    def test_preserves_captured_completion_label_without_polluting_genres(self):
+        # /duanju/search raw, 2026-09-13, series 7683098724637101080.
+        page = parse_rank_page({'data': {'cell_view': {'video_data': [{
+            'series_id': '7683098724637101080', 'content_type': 1,
+            'sub_title': '都市日常·都市脑洞·全64集', 'episode_cnt': 64,
+            'sub_title_list': [
+                {'content': '都市日常', 'data_type': 3},
+                {'content': '都市脑洞', 'data_type': 3},
+                {'content': '全64集', 'data_type': 13},
+            ],
+        }]}}})
+        item = page['items'][0]
+        self.assertEqual(item['sub_title'], '都市日常·都市脑洞·全64集')
+        self.assertEqual(item['sub_title_list'], [{'content': '全64集'}])
+        self.assertEqual(item['category_tags'], ['都市日常', '都市脑洞'])
+
+    def test_preserves_explicit_serial_label_but_does_not_invent_completion(self):
+        page = parse_rank_page({'data': {'cell_view': {'video_data': [{
+            'series_id': 'serial', 'content_type': 1, 'episode_cnt': 80,
+            'sub_title_list': [{'content': '连载中', 'data_type': 13}],
+            'secondary_info_list': [{'content': '连载中'}],
+        }, {
+            'series_id': 'unknown', 'content_type': 1, 'episode_cnt': 80,
+            'video_desc': '故事已经完结，全80集', 'status': 2, 'creation_status': 0,
+        }]}}})
+        self.assertEqual(page['items'][0]['sub_title_list'], [{'content': '连载中'}])
+        self.assertEqual(page['items'][1]['sub_title_list'], [])
+        self.assertEqual(page['items'][1]['sub_title'], '')
+        self.assertNotIn('complete', page['items'][1])
 
     def test_preserves_ai_type_and_known_counters(self):
         page = parse_rank_page({'data': {'cell_view': {'video_data': [{

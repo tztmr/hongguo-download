@@ -44,6 +44,12 @@ pub fn detect_file(path: &Path) -> Result<UploadFormat, AppError> {
     detect_probe(&probe_with_tools(path, &tools)?)
 }
 
+pub fn orientation_file(path: &Path) -> Result<&'static str, AppError> {
+    let exe = std::env::current_exe().map_err(|_| invalid())?;
+    let tools = MediaTools::from_resource_root(exe.parent().ok_or_else(invalid)?)?;
+    orientation_probe(&probe_with_tools(path, &tools)?)
+}
+
 fn probe_with_tools(path: &Path, tools: &MediaTools) -> Result<Value, AppError> {
     let output = tools
         .ffprobe_command()
@@ -71,7 +77,7 @@ fn invalid() -> AppError {
     )
 }
 
-fn detect_probe(data: &Value) -> Result<UploadFormat, AppError> {
+fn display_dimensions(data: &Value) -> Result<(f64, f64), AppError> {
     let stream = data["streams"]
         .as_array()
         .and_then(|v| {
@@ -106,17 +112,30 @@ fn detect_probe(data: &Value) -> Result<UploadFormat, AppError> {
     if (rotation.abs() % 180.0 - 90.0).abs() < 1.0 {
         std::mem::swap(&mut width, &mut height);
     }
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Err(invalid());
+    }
+    Ok((width, height))
+}
+
+fn orientation_probe(data: &Value) -> Result<&'static str, AppError> {
+    let (width, height) = display_dimensions(data)?;
+    Ok(if width < height {
+        "vertical"
+    } else if width > height {
+        "horizontal"
+    } else {
+        "square"
+    })
+}
+
+fn detect_probe(data: &Value) -> Result<UploadFormat, AppError> {
+    let (width, height) = display_dimensions(data)?;
     let duration: f64 = data["format"]["duration"]
         .as_str()
         .and_then(|s| s.parse().ok())
         .ok_or_else(invalid)?;
-    if !duration.is_finite()
-        || duration <= 0.0
-        || !width.is_finite()
-        || !height.is_finite()
-        || width <= 0.0
-        || height <= 0.0
-    {
+    if !duration.is_finite() || duration <= 0.0 {
         return Err(invalid());
     }
     Ok(if width <= height && duration <= 180.0 {
@@ -169,6 +188,36 @@ mod tests {
         for d in ["0", "NaN", "N/A"] {
             let v = json!({"streams":[{"codec_type":"video","width":1080,"height":1920}],"format":{"duration":d}});
             assert!(validate_probe(UploadFormat::Shorts, &v).is_err());
+        }
+    }
+    #[test]
+    fn orientation_uses_rotated_display_dimensions_without_needing_duration() {
+        let v = json!({"streams":[{"codec_type":"video","width":1920,"height":1080,"side_data_list":[{"rotation":-90}]}]});
+        assert_eq!(orientation_probe(&v).unwrap(), "vertical");
+        let v = json!({"streams":[{"codec_type":"video","width":1920,"height":1080,"tags":{"rotate":"90"}}]});
+        assert_eq!(orientation_probe(&v).unwrap(), "vertical");
+    }
+    #[test]
+    fn orientation_respects_sar_and_distinguishes_square() {
+        let mut v = json!({"streams":[{"codec_type":"video","width":720,"height":720,"sample_aspect_ratio":"2:1"}]});
+        assert_eq!(orientation_probe(&v).unwrap(), "horizontal");
+        v["streams"][0]["sample_aspect_ratio"] = json!("1:1");
+        assert_eq!(orientation_probe(&v).unwrap(), "square");
+    }
+    #[test]
+    fn orientation_rejects_unknown_size_and_attached_pictures() {
+        for stream in [
+            json!({"codec_type":"video","height":1080}),
+            json!({"codec_type":"video","width":0,"height":1080}),
+            json!({"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"bad"}),
+            json!({"codec_type":"video","width":1920,"height":1080,"disposition":{"attached_pic":1}}),
+        ] {
+            assert_eq!(
+                orientation_probe(&json!({"streams":[stream]}))
+                    .unwrap_err()
+                    .code,
+                "UPLOAD_FORMAT_PROBE_FAILED"
+            );
         }
     }
 }
