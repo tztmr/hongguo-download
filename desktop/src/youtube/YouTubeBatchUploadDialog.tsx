@@ -1,3 +1,4 @@
+import { DuplicateSeasonPicker, duplicateReasonLabels, hasConfirmedDuplicate, seasonFields, validSeason } from "./duplicateReview";
 import { UploadFormatPicker } from "./UploadFormatPicker";
 import { useUploadPreferences } from "./uploadPreferences";
 import { SubtitlePicker, subtitleRequest, type SubtitleChoice } from "./SubtitlePicker";
@@ -24,9 +25,10 @@ type ReviewItem = YouTubeBatchUploadSource & {
   selectedSourcePath: string;
   subtitle?: SubtitleChoice;
   title: string;
+  season: string;
   description: string;
   tags: string;
-  status: "pending" | "checking" | "submitting" | "queued" | "duplicate" | "error";
+  status: "pending" | "checking" | "submitting" | "queued" | "duplicate" | "review" | "skipped" | "error";
   matches: YouTubeDuplicateMatch[];
   error: string;
 };
@@ -43,6 +45,7 @@ function reviewItem(source: YouTubeBatchUploadSource): ReviewItem {
     selectedSourcePath: preferredUploadSource(availableUploadSources(source.sourcePath, source.sourceOptions)),
     jobId: `youtube-${crypto.randomUUID()}`,
     title: batch.title.slice(0, 100),
+    season: "",
     description: (batch.series.abstract || batch.title).slice(0, 5000),
     tags: [...new Set([...(tags.length ? tags : ["短剧"]), dramaTitle].filter(Boolean))].join(", "),
     status: "pending", matches: [], error: "",
@@ -85,6 +88,10 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
     return () => { active.current = false; };
   }, []);
 
+  useEffect(() => {
+    if (!inFlight.current) setItems(current => current.map(item => item.status === "queued" || item.status === "skipped" ? item : { ...item, status: "pending", matches: [], error: "" }));
+  }, [settings.uploadFormat]);
+
   function close() {
     if (!active.current) return;
     active.current = false;
@@ -95,7 +102,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
     setItems((current) => current.map((item) => item.jobId === jobId ? { ...item, ...patch } : item));
   }
 
-  function edit(jobId: string, patch: Pick<Partial<ReviewItem>, "title" | "description" | "tags" | "selectedSourcePath" | "subtitle">) {
+  function edit(jobId: string, patch: Pick<Partial<ReviewItem>, "title" | "description" | "tags" | "selectedSourcePath" | "subtitle" | "season">) {
     if (inFlight.current || queuedIds.current.has(jobId)) return;
     update(jobId, { ...patch, status: "pending", matches: [], error: "" });
   }
@@ -104,7 +111,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
     if (!active.current || inFlight.current || !confirmed) return;
     if (!overrideJobId && missingChoices) return;
     const targets = items.filter((item) => !queuedIds.current.has(item.jobId) && (overrideJobId
-      ? item.jobId === overrideJobId && item.status === "duplicate"
+      ? item.jobId === overrideJobId && (item.status === "duplicate" || item.status === "review")
       : item.status === "pending" || item.status === "error"));
     if (!targets.length) return;
     if (targets.some((item) => !item.selectedSourcePath)) return;
@@ -115,6 +122,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
       for (const item of targets) {
         if (!active.current) break;
         const title = item.title.trim();
+        if (!validSeason(item.season)) { update(item.jobId, { status: "error", error: "季数须为 1～999 的整数，或留空自动识别", matches: [] }); continue; }
         if (!title) {
           update(item.jobId, { status: "error", error: "请填写 YouTube 标题", matches: [] });
           continue;
@@ -129,14 +137,14 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
           categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
           containsSyntheticMedia: synthetic, hasPaidProductPlacement: paidPromotion, audienceConfirmed,
           syntheticMediaConfirmed: syntheticConfirmed, publishConfirmed,
-          dedup: { channelId, bookId: item.batch.bookId, dramaTitle: item.batch.series.title, allowDuplicate },
+          dedup: { channelId, bookId: item.batch.bookId, dramaTitle: item.batch.series.title, ...seasonFields(item.season), allowDuplicate },
         };
         update(item.jobId, { status: "checking", matches: [], error: "" });
         try {
-          const matches = await checkYouTubeUpload({ channelId, title, bookId: item.batch.bookId, dramaTitle: item.batch.series.title });
+          const matches = await checkYouTubeUpload({ channelId, title, bookId: item.batch.bookId, dramaTitle: item.batch.series.title, ...seasonFields(item.season), uploadFormat: settings.uploadFormat, sourcePath: item.selectedSourcePath });
           if (!active.current) break;
           if (matches.length && !allowDuplicate) {
-            update(item.jobId, { status: "duplicate", matches });
+            update(item.jobId, { status: hasConfirmedDuplicate(matches) ? "duplicate" : "review", matches });
             continue;
           }
           update(item.jobId, { status: "submitting" });
@@ -170,7 +178,7 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
           <div><span className="title-marker" /><h2>批量上传到 YouTube</h2></div>
           <button type="button" className="icon-button" aria-label="关闭" onClick={close}>×</button>
         </header>
-        <p>共 {items.length} 部剧。逐项检查当前频道，重复项默认跳过；失败项可修正后重新开始。</p>
+        <p>共 {items.length} 部剧。逐项检查当前频道，确认重复才跳过，季数或类型不明的疑似项留待核对；其余项目继续上传。</p>
         <fieldset className="youtube-upload-fields" disabled={busy}>
           <UploadFormatPicker value={settings.uploadFormat} onChange={value => setSetting("uploadFormat", value)} disabled={busy} />
         <div className="youtube-form-grid">
@@ -192,29 +200,31 @@ function BatchUploadReview({ sources, channelId, onSubmit, onClose, onQueued }: 
               <h3>{item.batch.series.title || item.batch.title}</h3>
               <UploadSourcePicker sources={availableUploadSources(item.sourcePath, item.sourceOptions)} value={item.selectedSourcePath}
                 disabled={busy || item.status === "queued"} onChange={(path) => edit(item.jobId, { selectedSourcePath: path })} />
+              <DuplicateSeasonPicker value={item.season} onChange={season => edit(item.jobId, { season })} disabled={busy || item.status === "queued"} />
               <SubtitlePicker sourcePath={item.selectedSourcePath} value={item.subtitle} onChange={(subtitle) => edit(item.jobId, { subtitle })} language={settings.subtitleLanguage} onLanguageChange={(value) => setSetting("subtitleLanguage", value)} disabled={busy || item.status === "queued"} />
               <fieldset className="youtube-upload-fields" disabled={busy || item.status === "queued"}>
                 <label>标题<input aria-label="YouTube 标题" value={item.title} maxLength={100} onChange={(event) => edit(item.jobId, { title: event.target.value })} /></label>
                 <label>简介<textarea aria-label="YouTube 简介" value={item.description} maxLength={5000} onChange={(event) => edit(item.jobId, { description: event.target.value })} /></label>
                 <label>标签<input aria-label="YouTube 标签" value={item.tags} placeholder="多个标签用逗号分隔" onChange={(event) => edit(item.jobId, { tags: event.target.value })} /></label>
               </fieldset>
-              <p role="status">{{ pending: "待检查", checking: "正在查重…", submitting: "正在加入上传队列…", queued: "已加入上传队列", duplicate: "已跳过重复项", error: "失败，可重试" }[item.status]}</p>
+              <p role="status">{{ pending: "待检查", checking: "正在查重…", submitting: "正在加入上传队列…", queued: "已加入上传队列", duplicate: "已跳过确认重复项", review: "疑似重复 · 待核对", skipped: "已手动跳过", error: "失败，可重试" }[item.status]}</p>
               {item.status === "error" ? <p className="warning-banner" role="alert">{item.error}</p> : null}
-              {item.status === "duplicate" ? (
+              {item.status === "duplicate" || item.status === "review" ? (
                 <div className="youtube-duplicate-warning" role="alert">
-                  <strong>发现重复或可能重复的影片，已跳过本项</strong>
+                  <strong>{item.status === "duplicate" ? "确认同剧、同季、同类型重复，已跳过本项" : "仅疑似重复，尚未上传；请核对季数与视频类型"}</strong>
                   <ul>{item.matches.map((match, index) => <li key={`${match.videoId}-${index}`}>
                     <span>{match.title}</span>{" · "}
-                    <span>{{ sameTitle: "标题相同", sameDrama: "同一部剧的上传记录", similarTitle: "剧名相近" }[match.reason]}</span>{" "}
-                    <YouTubeVideoLink url={match.youtubeUrl} />
+                    <span>{duplicateReasonLabels[match.reason]}</span>{" "}
+                    {match.youtubeUrl ? <YouTubeVideoLink url={match.youtubeUrl} /> : <small>本地上传队列中的任务</small>}
                   </li>)}</ul>
-                  <button type="button" className="secondary-button" disabled={busy || !confirmed} onClick={() => void queue(item.jobId)}>仍然上传</button>
+                  <button type="button" className="secondary-button" disabled={busy || !confirmed} onClick={() => void queue(item.jobId)}>{item.status === "review" ? "确认是不同内容，上传" : "仍然上传"}</button>
+                  {item.status === "review" && <button type="button" className="secondary-button" disabled={busy} onClick={() => update(item.jobId, { status: "skipped" })}>本次不上传</button>}
                 </div>
               ) : null}
             </section>
           ))}
         </div>
-        <p role="status">已入队 {items.filter((item) => item.status === "queued").length} · 重复跳过 {items.filter((item) => item.status === "duplicate").length} · 失败 {items.filter((item) => item.status === "error").length}</p>
+        <p role="status">已入队 {items.filter((item) => item.status === "queued").length} · 重复跳过 {items.filter((item) => item.status === "duplicate").length} · 待核对 {items.filter((item) => item.status === "review").length} · 手动跳过 {items.filter((item) => item.status === "skipped").length} · 失败 {items.filter((item) => item.status === "error").length}</p>
         {missingChoices ? <p className="source-choice-required" role="status">还有 {missingChoices} 部剧需要选择上传视频版本。</p> : null}
         <footer>
           <button type="button" className="secondary-button" onClick={close}>取消</button>

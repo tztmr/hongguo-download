@@ -35,6 +35,16 @@ pub fn validate_with_tools(
     if format == UploadFormat::Auto {
         return Ok(());
     }
+    validate_probe(format, &probe_with_tools(path, tools)?)
+}
+
+pub fn detect_file(path: &Path) -> Result<UploadFormat, AppError> {
+    let exe = std::env::current_exe().map_err(|_| invalid())?;
+    let tools = MediaTools::from_resource_root(exe.parent().ok_or_else(invalid)?)?;
+    detect_probe(&probe_with_tools(path, &tools)?)
+}
+
+fn probe_with_tools(path: &Path, tools: &MediaTools) -> Result<Value, AppError> {
     let output = tools
         .ffprobe_command()
         .args([
@@ -52,8 +62,7 @@ pub fn validate_with_tools(
     if !output.status.success() {
         return Err(invalid());
     }
-    let data: Value = serde_json::from_slice(&output.stdout).map_err(|_| invalid())?;
-    validate_probe(format, &data)
+    serde_json::from_slice(&output.stdout).map_err(|_| invalid())
 }
 fn invalid() -> AppError {
     AppError::new(
@@ -62,7 +71,7 @@ fn invalid() -> AppError {
     )
 }
 
-fn validate_probe(format: UploadFormat, data: &Value) -> Result<(), AppError> {
+fn detect_probe(data: &Value) -> Result<UploadFormat, AppError> {
     let stream = data["streams"]
         .as_array()
         .and_then(|v| {
@@ -110,8 +119,15 @@ fn validate_probe(format: UploadFormat, data: &Value) -> Result<(), AppError> {
     {
         return Err(invalid());
     }
-    let is_short = width <= height && duration <= 180.0;
-    match (format, is_short) {
+    Ok(if width <= height && duration <= 180.0 {
+        UploadFormat::Shorts
+    } else {
+        UploadFormat::Standard
+    })
+}
+
+fn validate_probe(format: UploadFormat, data: &Value) -> Result<(), AppError> {
+    match (format, detect_probe(data)? == UploadFormat::Shorts) {
         (UploadFormat::Shorts, false) => Err(AppError::new(
             "UPLOAD_SHORTS_FORMAT_REQUIRED",
             "Shorts 需要竖版或方形、时长不超过 3 分钟；请先准备符合条件的视频",

@@ -50,6 +50,17 @@ impl UploadIntent {
                 "YouTube 上传请求无效",
             ));
         }
+        if self
+            .dedup
+            .as_ref()
+            .and_then(|identity| identity.season)
+            .is_some_and(|n| n == 0 || n > 999)
+        {
+            return Err(AppError::new(
+                "UPLOAD_SEASON_INVALID",
+                "季数须为 1～999，留空则自动识别",
+            ));
+        }
         let title_chars = self.title.trim().chars().count();
         if title_chars == 0 || title_chars > 100 || self.description.chars().count() > 5_000 {
             return Err(AppError::new(

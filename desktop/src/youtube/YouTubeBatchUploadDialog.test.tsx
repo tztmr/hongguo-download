@@ -27,7 +27,7 @@ const sources: YouTubeBatchUploadSource[] = [
     },
   },
 ];
-const duplicate: YouTubeDuplicateMatch[] = [{ title: "都市归来 全集", videoId: "existing", youtubeUrl: "https://www.youtube.com/watch?v=existing", reason: "sameDrama" }];
+const duplicate: YouTubeDuplicateMatch[] = [{ title: "都市归来 全集", videoId: "existing", youtubeUrl: "https://www.youtube.com/watch?v=existing", reason: "sameDrama", confidence: "confirmed" }];
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -85,8 +85,8 @@ describe("YouTubeBatchUploadDialog", () => {
       dedup: { channelId: "channel-a", bookId: "book-1", dramaTitle: "都市归来", allowDuplicate: false },
     });
     expect(requests[1]).toMatchObject({ title: "仙侠全集", description: "仙侠全集", tags: ["仙侠", "冒险", "仙侠奇缘"] });
-    expect(checkUpload).toHaveBeenNthCalledWith(1, { channelId: "channel-a", bookId: "book-1", dramaTitle: "都市归来", title: "都市全集" });
-    expect(checkUpload).toHaveBeenNthCalledWith(2, { channelId: "channel-a", bookId: "book-2", dramaTitle: "仙侠奇缘", title: "仙侠全集" });
+    expect(checkUpload).toHaveBeenNthCalledWith(1, { channelId: "channel-a", bookId: "book-1", dramaTitle: "都市归来", title: "都市全集", uploadFormat: "auto", sourcePath: "/Downloads/都市全集.mp4" });
+    expect(checkUpload).toHaveBeenNthCalledWith(2, { channelId: "channel-a", bookId: "book-2", dramaTitle: "仙侠奇缘", title: "仙侠全集", uploadFormat: "auto", sourcePath: "/Downloads/仙侠全集.mp4" });
     expect(view.getAllByText("已加入上传队列")).toHaveLength(2);
     expect(view.props.onClose).not.toHaveBeenCalled();
     view.start();
@@ -131,6 +131,70 @@ describe("YouTubeBatchUploadDialog", () => {
     expect(checkUpload).toHaveBeenCalledTimes(3);
     expect(view.props.onSubmit.mock.calls[1][0].dedup).toEqual({ channelId: "channel-a", bookId: "book-1", dramaTitle: "都市归来", allowDuplicate: true });
     expect(view.props.onQueued.mock.calls).toEqual([[1], [1]]);
+  });
+
+  it("holds possible duplicates for review while continuing unique jobs", async () => {
+    checkUpload.mockResolvedValueOnce([{ ...duplicate[0], reason: "identityIncomplete", confidence: "possible" }]);
+    const view = setup();
+    view.start();
+    await waitFor(() => expect(view.props.onQueued).toHaveBeenCalledWith(1));
+    expect(view.getByText("疑似重复 · 待核对")).toBeTruthy();
+    expect(view.getByText(/已入队 1 · 重复跳过 0 · 待核对 1/)).toBeTruthy();
+    view.start();
+    expect(checkUpload).toHaveBeenCalledTimes(2);
+    fireEvent.click(view.row("都市归来").getByRole("button", { name: "确认是不同内容，上传" }));
+    await waitFor(() => expect(view.props.onSubmit).toHaveBeenCalledTimes(2));
+    expect(view.props.onSubmit.mock.calls[1][0].dedup?.allowDuplicate).toBe(true);
+  });
+
+  it("lets users skip legacy uncertain results without labeling them confirmed duplicates", async () => {
+    checkUpload.mockResolvedValueOnce([{ ...duplicate[0], confidence: undefined }]);
+    const view = setup([sources[0]]);
+    view.start();
+    await waitFor(() => expect(view.getByText("疑似重复 · 待核对")).toBeTruthy());
+    fireEvent.click(view.getByRole("button", { name: "本次不上传" }));
+    expect(view.getByText("已手动跳过")).toBeTruthy();
+    view.start();
+    expect(checkUpload).toHaveBeenCalledTimes(1);
+    expect(view.props.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("rechecks season edits without reusing a prior duplicate override", async () => {
+    checkUpload.mockResolvedValueOnce(duplicate);
+    const view = setup([sources[0]]);
+    view.start();
+    await waitFor(() => expect(view.getByRole("button", { name: "仍然上传" })).toBeTruthy());
+    fireEvent.change(view.getByRole("spinbutton"), { target: { value: "3" } });
+    expect(view.queryByRole("button", { name: "仍然上传" })).toBeNull();
+    view.start();
+    await waitFor(() => expect(view.props.onQueued).toHaveBeenCalledWith(1));
+    expect(checkUpload).toHaveBeenLastCalledWith(expect.objectContaining({ season: 3, uploadFormat: "auto", sourcePath: sources[0].sourcePath }));
+    expect(view.props.onSubmit.mock.calls[0][0].dedup).toMatchObject({ season: 3, allowDuplicate: false });
+  });
+
+  it("rechecks a format change and preserves manually skipped rows", async () => {
+    checkUpload.mockResolvedValueOnce([{ ...duplicate[0], confidence: "possible" }]).mockResolvedValueOnce(duplicate);
+    const view = setup();
+    view.start();
+    await waitFor(() => expect(view.row("都市归来").getByRole("button", { name: "本次不上传" })).toBeTruthy());
+    await waitFor(() => expect(view.row("仙侠奇缘").getByRole("button", { name: "仍然上传" })).toBeTruthy());
+    fireEvent.click(view.row("都市归来").getByRole("button", { name: "本次不上传" }));
+    fireEvent.change(view.getByLabelText("YouTube 上传类型"), { target: { value: "shorts" } });
+    expect(view.queryByRole("button", { name: "仍然上传" })).toBeNull();
+    view.start();
+    await waitFor(() => expect(view.props.onSubmit).toHaveBeenCalledTimes(1));
+    expect(checkUpload).toHaveBeenLastCalledWith(expect.objectContaining({ bookId: "book-2", uploadFormat: "shorts" }));
+    expect(view.getByText("已手动跳过")).toBeTruthy();
+  });
+
+  it("rejects invalid season per item while allowing other rows to proceed", async () => {
+    const view = setup();
+    fireEvent.change(view.row("都市归来").getByRole("spinbutton"), { target: { value: "0" } });
+    view.start();
+    await waitFor(() => expect(view.props.onQueued).toHaveBeenCalledWith(1));
+    expect(checkUpload).toHaveBeenCalledTimes(1);
+    expect(checkUpload).toHaveBeenCalledWith(expect.objectContaining({ bookId: "book-2" }));
+    expect(view.row("都市归来").getByRole("alert").textContent).toContain("季数");
   });
 
   it("continues after check and enqueue failures; retry rechecks failures and never resubmits queued jobs", async () => {

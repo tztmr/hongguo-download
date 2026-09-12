@@ -317,6 +317,26 @@ impl YouTubeService {
                 "请填写有效的上传标题",
             ));
         }
+        if query.season.is_some_and(|n| n == 0 || n > 999) {
+            return Err(AppError::new(
+                "UPLOAD_SEASON_INVALID",
+                "季数须为 1～999，留空则自动识别",
+            ));
+        }
+        let mut query = query.clone();
+        if let Some(path) = query.source_path.clone() {
+            let requested = query.upload_format;
+            query.upload_format = tokio::task::spawn_blocking(move || {
+                if requested == super::format::UploadFormat::Auto {
+                    super::format::detect_file(&path)
+                } else {
+                    super::format::validate_file(requested, &path)?;
+                    Ok(requested)
+                }
+            })
+            .await
+            .map_err(|_| AppError::new("UPLOAD_FORMAT_PROBE_FAILED", "无法检查上传视频"))??;
+        }
         self.ensure_check_channel(&query.channel_id)?;
         let token = self
             .oauth_service()?
@@ -328,13 +348,15 @@ impl YouTubeService {
         for item in uploads.iter() {
             if let Some(video_id) = &item.job.video_id {
                 videos.push(known_video(item, video_id));
+            } else if is_active(item.job.status) || item.job.status == YouTubeJobStatus::Paused {
+                videos.push(known_video(item, &format!("queued:{}", item.job.id)));
             }
         }
         drop(uploads);
         let _history_guard = self.history_lock.lock().map_err(state_lock_error)?;
         videos.extend(duplicates::read_history(&self.data_dir)?);
         self.ensure_check_channel(&query.channel_id)?;
-        Ok(duplicates::find_matches(query, &videos))
+        Ok(duplicates::find_matches(&query, &videos))
     }
 
     fn ensure_check_channel(&self, channel_id: &str) -> Result<(), AppError> {
@@ -365,6 +387,19 @@ impl YouTubeService {
             }
         }
         intent.validate()?;
+        if intent.upload_format == super::format::UploadFormat::Auto {
+            let path = intent.file_path.clone();
+            intent.upload_format =
+                tokio::task::spawn_blocking(move || super::format::detect_file(&path))
+                    .await
+                    .map_err(|_| {
+                        AppError::new("UPLOAD_FORMAT_PROBE_FAILED", "无法检查上传视频")
+                    })??;
+        }
+        if let Some(identity) = &mut intent.dedup {
+            identity.season =
+                duplicates::inferred_season(identity.season, &identity.drama_title, &intent.title);
+        }
         let identity = intent.dedup.as_ref().ok_or_else(|| {
             AppError::new("YOUTUBE_CHECK_REQUIRED", "请重新打开上传窗口完成频道查重")
         })?;
@@ -373,12 +408,15 @@ impl YouTubeService {
             title: intent.title.clone(),
             book_id: identity.book_id.clone(),
             drama_title: identity.drama_title.clone(),
+            season: identity.season,
+            upload_format: intent.upload_format,
+            source_path: None,
         };
         let matches = self.check_upload(&query).await?;
         if !identity.allow_duplicate && !matches.is_empty() {
             return Err(AppError::new(
                 "YOUTUBE_DUPLICATE_FOUND",
-                "频道内已有同名或相近影片，请再次点击确认上传查看重复项",
+                "发现重复或身份信息不完整的影片，请重新查重并核对季数与视频类型",
             ));
         }
         self.ensure_check_channel(&identity.channel_id)?;
@@ -1040,7 +1078,16 @@ fn reserve_uploads(
 }
 
 fn known_video(stored: &StoredUpload, video_id: &str) -> KnownVideo {
+    let identity = stored.intent.dedup.as_ref();
+    let drama_title = identity.map(|i| i.drama_title.clone()).unwrap_or_default();
     KnownVideo {
+        season: duplicates::inferred_season(
+            identity.and_then(|i| i.season),
+            &drama_title,
+            &stored.job.title,
+        ),
+        drama_title,
+        upload_format: stored.intent.upload_format,
         channel_id: stored.job.channel_id.clone(),
         video_id: video_id.into(),
         title: stored.job.title.clone(),
@@ -1069,17 +1116,33 @@ fn ensure_no_local_duplicate(
         title: intent.title.clone(),
         book_id: identity.book_id.clone(),
         drama_title: identity.drama_title.clone(),
+        season: identity.season,
+        upload_format: intent.upload_format,
+        source_path: None,
     };
-    if uploads.iter().any(|item| {
-        item.job.id != job.id
-            && (is_active(item.job.status)
-                || item.job.status == YouTubeJobStatus::Paused
-                || item.job.video_id.is_some())
-            && duplicates::match_reason(&query, &known_video(item, "")).is_some()
-    }) {
+    let decisions: Vec<_> = uploads
+        .iter()
+        .filter(|item| {
+            item.job.id != job.id
+                && (is_active(item.job.status)
+                    || item.job.status == YouTubeJobStatus::Paused
+                    || item.job.video_id.is_some())
+        })
+        .filter_map(|item| duplicates::match_decision(&query, &known_video(item, "")))
+        .collect();
+    if decisions
+        .iter()
+        .any(|(_, confidence)| *confidence == duplicates::MatchConfidence::Confirmed)
+    {
         return Err(AppError::new(
             "UPLOAD_DUPLICATE_QUEUED",
-            "当前频道的上传队列中已有同名或同剧任务，请先查看上传列表",
+            "当前频道已有同一部剧、同季、同类型的上传任务",
+        ));
+    }
+    if !decisions.is_empty() {
+        return Err(AppError::new(
+            "UPLOAD_DUPLICATE_REVIEW_REQUIRED",
+            "队列中有疑似重复项，请重新查重并核对季数和视频类型",
         ));
     }
     Ok(())
@@ -1503,9 +1566,12 @@ mod tests {
             channel_id: existing.job.channel_id.clone(),
             book_id: "book-1".into(),
             drama_title: "同一部剧".into(),
+            season: None,
             allow_duplicate: false,
         });
         let mut incoming = queued("second");
+        existing.intent.upload_format = super::super::format::UploadFormat::Standard;
+        incoming.intent.upload_format = super::super::format::UploadFormat::Standard;
         incoming.intent.dedup = existing.intent.dedup.clone();
         incoming.intent.title = "改过的标题".into();
         assert_eq!(
@@ -1539,6 +1605,44 @@ mod tests {
             "UPLOAD_DUPLICATE_ACTIVE"
         );
     }
+    #[test]
+    fn local_guard_and_history_preserve_season_and_actual_format() {
+        use super::super::{duplicates::UploadIdentity, format::UploadFormat};
+        let mut existing = queued("first");
+        existing.intent.upload_format = UploadFormat::Standard;
+        existing.intent.dedup = Some(UploadIdentity {
+            channel_id: existing.job.channel_id.clone(),
+            book_id: "book-1".into(),
+            drama_title: "作品第二季".into(),
+            season: Some(2),
+            allow_duplicate: false,
+        });
+        let mut incoming = queued("second");
+        incoming.intent = existing.intent.clone();
+        incoming.intent.dedup.as_mut().unwrap().season = Some(3);
+        assert!(
+            ensure_no_local_duplicate(&[existing.clone()], &incoming.intent, &incoming.job).is_ok()
+        );
+        incoming.intent.dedup.as_mut().unwrap().season = Some(2);
+        incoming.intent.upload_format = UploadFormat::Shorts;
+        assert!(
+            ensure_no_local_duplicate(&[existing.clone()], &incoming.intent, &incoming.job).is_ok()
+        );
+        incoming.intent.upload_format = UploadFormat::Standard;
+        existing.intent.upload_format = UploadFormat::Auto;
+        assert_eq!(
+            ensure_no_local_duplicate(&[existing.clone()], &incoming.intent, &incoming.job)
+                .unwrap_err()
+                .code,
+            "UPLOAD_DUPLICATE_REVIEW_REQUIRED"
+        );
+        existing.intent.upload_format = UploadFormat::Shorts;
+        let history = known_video(&existing, "uploaded");
+        assert_eq!(history.season, Some(2));
+        assert_eq!(history.drama_title, "作品第二季");
+        assert_eq!(history.upload_format, UploadFormat::Shorts);
+    }
+
     #[test]
     fn restart_never_requeues_a_video_that_already_has_a_youtube_id() {
         for has_cover in [false, true] {

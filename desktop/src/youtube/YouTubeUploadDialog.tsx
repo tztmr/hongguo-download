@@ -1,3 +1,4 @@
+import { DuplicateSeasonPicker, duplicateReasonLabels, hasConfirmedDuplicate, seasonFields, validSeason } from "./duplicateReview";
 import { UploadFormatPicker } from "./UploadFormatPicker";
 import { useUploadPreferences } from "./uploadPreferences";
 import { SubtitlePicker, subtitleRequest, type SubtitleChoice } from "./SubtitlePicker";
@@ -36,6 +37,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
   const [choice, setChoice] = useState({ key: sourceKey, path: preferredUploadSource(sources) });
   const selectedSourcePath = choice.key === sourceKey && sources.some((source) => source.path === choice.path)
     ? choice.path : preferredUploadSource(sources);
+  const [season, setSeason] = useState("");
   const [title, setTitle] = useState(batch.title.slice(0, 100));
   const [description, setDescription] = useState((batch.series.abstract || batch.title).slice(0, 5000));
   const [tags, setTags] = useState(youtubeTags(batch).join(", "));
@@ -55,7 +57,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
   const [audienceConfirmed, setAudienceConfirmed] = useState(true);
   const [syntheticConfirmed, setSyntheticConfirmed] = useState(true);
   const [publishConfirmed, setPublishConfirmed] = useState(true);
-  const canSubmit = Boolean(selectedSourcePath) && title.trim().length > 0 && audienceConfirmed && syntheticConfirmed && publishConfirmed;
+  const canSubmit = validSeason(season) && Boolean(selectedSourcePath) && title.trim().length > 0 && audienceConfirmed && syntheticConfirmed && publishConfirmed;
 
   const [phase, setPhase] = useState<"idle" | "checking" | "submitting">("idle");
   const [matches, setMatches] = useState<YouTubeDuplicateMatch[]>([]);
@@ -70,7 +72,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
     setError("");
     setPhase("idle");
     return () => { generation.current += 1; };
-  }, [title, channelId, sourcePath, selectedSourcePath, sourceKey, settings.uploadFormat]);
+  }, [title, channelId, sourcePath, selectedSourcePath, sourceKey, settings.uploadFormat, season]);
 
   function close() {
     generation.current += 1;
@@ -89,11 +91,11 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
       tags: tags.split(/[,，]/).map((value) => value.trim()).filter(Boolean),
       categoryId, privacyStatus: privacy, selfDeclaredMadeForKids: madeForKids,
       containsSyntheticMedia: synthetic, hasPaidProductPlacement: paidPromotion, audienceConfirmed, syntheticMediaConfirmed: syntheticConfirmed, publishConfirmed,
-      dedup: { channelId, bookId: batch.bookId, dramaTitle: batch.series.title, allowDuplicate },
+      dedup: { channelId, bookId: batch.bookId, dramaTitle: batch.series.title, ...seasonFields(season), allowDuplicate },
     };
     try {
       if (!allowDuplicate) {
-        const found = await checkYouTubeUpload({ channelId, title: request.title, bookId: batch.bookId, dramaTitle: batch.series.title });
+        const found = await checkYouTubeUpload({ channelId, title: request.title, bookId: batch.bookId, dramaTitle: batch.series.title, ...seasonFields(season), uploadFormat: settings.uploadFormat, sourcePath: selectedSourcePath });
         if (generation.current !== current) return;
         setMatches(found);
         if (found.length) return;
@@ -131,6 +133,7 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
           <label>合成内容<select aria-label="合成内容" value={synthetic ? "yes" : "no"} onChange={(event) => setSynthetic(event.target.value === "yes")}><option value="no">不包含</option><option value="yes">包含 AI/合成内容</option></select></label>
           <label className="youtube-form-wide">付费宣传内容<select aria-label="付费宣传内容" value={paidPromotion ? "yes" : "no"} onChange={(event) => setPaidPromotion(event.target.value === "yes")}><option value="no">否，我的影片不含付費宣傳內容</option><option value="yes">是，我的影片含有付費宣傳內容</option></select></label>
         </div>
+        <DuplicateSeasonPicker value={season} onChange={setSeason} disabled={busy} />
         <SubtitlePicker sourcePath={selectedSourcePath} value={subtitle} onChange={setSubtitle} language={settings.subtitleLanguage} onLanguageChange={(value) => setSetting("subtitleLanguage", value)} disabled={busy} />
         <div className="cover-picker"><button type="button" className="secondary-button" onClick={() => void chooseCover()}>选择本地封面</button><small>{coverPath || "不设置自定义封面"}</small></div>
         <div className="upload-confirmations">
@@ -142,10 +145,10 @@ export function YouTubeUploadDialog({ batch, sourcePath, sourceOptions, channelI
         {phase === "checking" ? <p role="status">正在检查当前频道的全部影片…</p> : null}
         {error ? <p className="warning-banner" role="alert">{error}</p> : null}
         {matches.length ? <div className="youtube-duplicate-warning" role="alert">
-          <strong>{matches.some((match) => match.reason !== "similarTitle") ? "发现重复影片，本次尚未上传" : "发现可能重复的影片，请核对"}</strong>
+          <strong>{hasConfirmedDuplicate(matches) ? "发现重复影片，本次尚未上传" : "发现可能重复的影片，请核对"}</strong>
           <ul>{matches.map((match) => <li key={match.videoId}>
-            <span>{match.title} · {{ sameTitle: "标题相同", sameDrama: "同一部剧的上传记录", similarTitle: "剧名相近" }[match.reason]}</span>
-            <YouTubeVideoLink url={match.youtubeUrl} />
+            <span>{match.title} · {duplicateReasonLabels[match.reason]}</span>
+            {match.youtubeUrl ? <YouTubeVideoLink url={match.youtubeUrl} /> : <small>本地上传队列中的任务</small>}
           </li>)}</ul>
         </div> : null}
         <footer>

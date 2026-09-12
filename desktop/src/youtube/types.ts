@@ -57,12 +57,12 @@ export type YouTubeSnapshot = {
   jobs: YouTubeJob[];
 };
 
-export type YouTubeDuplicateQuery = { channelId: string; title: string; bookId: string; dramaTitle: string };
-export type YouTubeDuplicateMatch = { title: string; videoId: string; youtubeUrl: string; reason: "sameTitle" | "sameDrama" | "similarTitle" };
+export type YouTubeDuplicateQuery = { channelId: string; title: string; bookId: string; dramaTitle: string; season?: number; uploadFormat?: YouTubeUploadFormat; sourcePath?: string };
+export type YouTubeDuplicateMatch = { title: string; videoId: string; youtubeUrl: string; reason: "sameTitle" | "sameDrama" | "similarTitle" | "identityIncomplete"; confidence?: "confirmed" | "possible" };
 
 export type YouTubeUploadIntent = {
   uploadFormat?: YouTubeUploadFormat;
-  dedup?: { channelId: string; bookId: string; dramaTitle: string; allowDuplicate: boolean };
+  dedup?: { channelId: string; bookId: string; dramaTitle: string; season?: number; allowDuplicate: boolean };
   jobId: string;
   filePath: string;
   coverPath: string | null;
