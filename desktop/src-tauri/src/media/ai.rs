@@ -728,6 +728,11 @@ struct WorkerInvocation<'a> {
     options: Value,
 }
 
+fn worker_cpu_threads(budget: u64, windows: bool, available: usize) -> u64 {
+    let platform_limit = if windows { 16 } else { 4 };
+    budget.clamp(1, platform_limit).min(available.max(1) as u64)
+}
+
 fn run_worker(
     invocation: WorkerInvocation<'_>,
     cancellation: &CancellationToken,
@@ -739,13 +744,11 @@ fn run_worker(
         .and_then(|options| options.remove("cpuThreads"))
         .and_then(|value| value.as_u64())
         .map(|threads| {
-            if cfg!(windows) {
-                std::thread::available_parallelism()
-                    .map_or(1, usize::from)
-                    .clamp(1, 16) as u64
-            } else {
-                threads.clamp(1, 4)
-            }
+            worker_cpu_threads(
+                threads,
+                cfg!(windows),
+                std::thread::available_parallelism().map_or(1, usize::from),
+            )
         });
     if invocation.operation == "transcribe" && cfg!(target_os = "macos") {
         // The installed Torch 2.5.1 runtime cannot move Whisper's sparse alignment
@@ -1155,6 +1158,25 @@ mod tests {
             ["runtime-cpu", "runtime-modern", "runtime-legacy"]
         );
         assert_eq!(runtime_candidates_for("macos", "cuda"), ["runtime"]);
+    }
+
+    #[test]
+    fn windows_workers_respect_each_jobs_cpu_budget() {
+        // Five manually scheduled jobs reserve one CPU thread each. Launching
+        // them must not expand that reservation to 16 threads per process.
+        let total: u64 = (0..5).map(|_| super::worker_cpu_threads(1, true, 32)).sum();
+        assert_eq!(total, 5);
+        assert_eq!(super::worker_cpu_threads(2, true, 32), 2);
+        assert_eq!(super::worker_cpu_threads(4, true, 32), 4);
+    }
+
+    #[test]
+    fn worker_cpu_budget_is_bounded_by_platform_and_available_cores() {
+        assert_eq!(super::worker_cpu_threads(0, true, 32), 1);
+        assert_eq!(super::worker_cpu_threads(32, true, 32), 16);
+        assert_eq!(super::worker_cpu_threads(4, true, 2), 2);
+        assert_eq!(super::worker_cpu_threads(8, false, 8), 4);
+        assert_eq!(super::worker_cpu_threads(2, false, 1), 1);
     }
 
     #[cfg(unix)]
