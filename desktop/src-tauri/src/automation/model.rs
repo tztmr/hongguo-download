@@ -299,12 +299,25 @@ impl Task {
             Status::Completed | Status::Skipped | Status::Review | Status::Failed
         )
     }
+    pub fn defer_retry(&mut self) {
+        // The configured count controls quick retries, not whether unattended
+        // work is abandoned. After that, leave the job eligible after cooldown.
+        if self.attempts <= number(&self.config, "retries", 3) {
+            self.status = Status::Pending;
+            self.retry_at = now() + (30 * (1u64 << self.attempts.saturating_sub(1).min(5))).min(900);
+        } else {
+            self.status = Status::Observing;
+            self.retry_at = now() + 900;
+        }
+        self.retry_ready = true;
+    }
     pub fn next(&mut self, stage: &str, message: &str) {
         self.stage = stage.into();
         self.message = message.into();
         self.status = Status::Pending;
         self.attempts = 0;
         self.retry_at = 0;
+        self.retry_ready = false;
         self.progress = 0.0;
     }
     pub fn upload_id(&self, short: bool) -> String {

@@ -42,6 +42,15 @@ describe("native automation boundaries", () => {
     expect(view.getByText(/阶段进度 6%/)).toBeTruthy();
     expect(view.getByText(/第 1 次重试/)).toBeTruthy();
   });
+  it("shows automatic cooldown recovery without requiring a retry click", async () => {
+    state.mode = "running";
+    state.jobs = [{ id: "cooldown", title: "等待恢复剧目", bookId: "book", stage: "separate", status: "observing",
+      message: "音频预处理失败", episodeDone: 152, episodeTotal: 152, progress: 0, updatedAt: 1,
+      attempts: 4, retryAt: Math.floor(Date.now() / 1000) + 900 }];
+    const view = page(); await loaded(view);
+    expect(view.getByText(/等待自动恢复/)).toBeTruthy();
+    expect(view.queryByRole("button", { name: "重试此任务" })).toBeNull();
+  });
   it("prefers saved backend config and starts only after saved target confirmation, without a config argument", async () => {
     storage.set(storageKey, JSON.stringify({ title: "旧本地模板" }));
     const view = page(); await loaded(view);

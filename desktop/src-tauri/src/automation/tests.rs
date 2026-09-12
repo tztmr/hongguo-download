@@ -128,3 +128,47 @@ fn corrupt_state_does_not_silently_start_fresh_or_erase_history() {
     assert_eq!(fs::read(&path).unwrap(), b"broken");
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
+
+#[test]
+fn automatic_retry_keeps_running_after_quick_retries_without_manual_action() {
+    let mut job = task();
+    job.stage = "separate".into();
+    job.files.push(PathBuf::from("downloaded.mp4"));
+    job.separate_job = Some("existing-separation".into());
+    for attempt in [1, 2, 3, 4, 50, u64::MAX] {
+        job.attempts = attempt;
+        let before = now();
+        job.defer_retry();
+        assert!(!job.terminal());
+        assert!(job.retry_ready);
+        assert!(job.retry_at > before && job.retry_at <= now() + 900);
+        assert_eq!(job.files.len(), 1);
+        assert_eq!(job.separate_job.as_deref(), Some("existing-separation"));
+    }
+    job.config["retries"] = json!("0");
+    job.attempts = 1;
+    job.defer_retry();
+    assert_eq!(job.status, Status::Observing);
+    assert!(job.retry_at >= now() + 899);
+}
+
+#[test]
+fn upgrade_automatically_requeues_failed_media_but_respects_stop_and_review() {
+    let path = temporary();
+    let mut failed = task();
+    failed.status = Status::Failed;
+    failed.stage = "merge".into();
+    failed.merge_job = Some("old-copy-only".into());
+    failed.files.push(PathBuf::from("all-152-downloaded.mp4"));
+    let mut review = task(); review.id = "review".into(); review.status = Status::Review;
+    let saved = Snapshot { config: Some(config()), mode: Mode::Stopped, jobs: vec![failed.clone(), review], ..Default::default() };
+    storage::save(&path, &saved).unwrap();
+    let state = Service::load(path.clone()).unwrap().snapshot();
+    assert_eq!(state.mode, Mode::Stopped);
+    assert_eq!(state.jobs[0].status, Status::Pending);
+    assert!(state.jobs[0].retry_ready);
+    assert_eq!(state.jobs[0].files, failed.files);
+    assert_eq!(state.jobs[0].merge_job, failed.merge_job);
+    assert_eq!(state.jobs[1].status, Status::Review);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}

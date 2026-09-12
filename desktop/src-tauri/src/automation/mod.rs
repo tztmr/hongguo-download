@@ -36,6 +36,13 @@ impl Service {
             }
         }
         for job in &mut snapshot.jobs {
+            if job.status == Status::Failed {
+                job.status = Status::Pending;
+                job.attempts = 0;
+                job.retry_at = 0;
+                job.retry_ready = true;
+                job.message = format!("已加入自动恢复队列，复用已完成文件；上次错误：{}", job.message);
+            }
             if job.status == Status::Working {
                 job.status = Status::Pending;
                 job.message = "应用重启，核对上次阶段结果后继续".into();
@@ -294,7 +301,7 @@ impl Service {
                                 let before = task.message.clone();
                                 let outcome = runner::advance(&a, &owner, &mut task).await;
                                 if let Err(e) = outcome {
-                                    task.attempts += 1;
+                                    task.attempts = task.attempts.saturating_add(1);
                                     task.message = e.message.clone();
                                     if matches!(
                                         e.code.as_str(),
@@ -309,12 +316,8 @@ impl Service {
                                         task.attempts = 0;
                                     } else if e.code == "AUTOMATION_PAUSED" {
                                         task.status = Status::Pending;
-                                    } else if task.attempts <= number(&task.config, "retries", 3) {
-                                        task.status = Status::Pending;
-                                        task.retry_at = now() + 30 * task.attempts.min(10);
-                                        task.retry_ready = true;
                                     } else {
-                                        task.status = Status::Failed;
+                                        task.defer_retry();
                                     }
                                 }
                                 task.updated_at = now();
