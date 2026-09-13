@@ -320,6 +320,12 @@ impl Service {
                                 service.busy.lock().unwrap().remove(&id);
                                 continue;
                             }
+                            // Reserve this drama's group slot durably before any
+                            // download side effect. First-episode retries and
+                            // restarts must not admit a fresh batch each time.
+                            if task.stage == "download" {
+                                task.download_admitted = true;
+                            }
                             task.status = Status::Working;
                             if service.checkpoint(&task).is_err() {
                                 service.busy.lock().unwrap().remove(&task.id);

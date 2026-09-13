@@ -45,11 +45,18 @@ describe("native automation boundaries", () => {
     fireEvent.change(view.getByRole("searchbox", { name: "搜索后台任务" }), { target: { value: "不匹配" } });
     expect(view.queryByRole("article")).toBeNull();
   });
-  it("explains that one slot pipelines stages instead of locking an entire drama", async () => {
+  it("uses ten dramas per group and saves the selected group count", async () => {
     state.config = { ...state.config, concurrency: "1" };
     const view = page(); await loaded(view);
-    expect(view.getByText(/每阶段最多 1 部/)).toBeTruthy();
+    expect(view.getByText(/1 组.*每组 10 部.*最多 10 部/)).toBeTruthy();
     expect(view.getByText(/上传时继续下载和处理/)).toBeTruthy();
+    fireEvent.click(view.getByRole("button", { name: /清理与运行/ }));
+    const groups = view.getByRole("combobox", { name: "并发处理组数" });
+    expect((groups as HTMLSelectElement).value).toBe("1");
+    fireEvent.change(groups, { target: { value: "3" } });
+    save(view);
+    await waitFor(() => expect(state.config?.concurrency).toBe("3"));
+    expect(view.getByText(/3 组.*每组 10 部.*最多 30 部/)).toBeTruthy();
   });
   it("saves ordered model selections without replacing saved keys and reloads the order", async () => {
     state.config = { ...state.config, coverSource: "moyuu", coverModel: "gpt-image-2.5-sunburst" };

@@ -253,6 +253,9 @@ pub struct OwnedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
+    /// Persist admission before the first download, including failed attempts.
+    #[serde(default)]
+    pub download_admitted: bool,
     #[serde(default)]
     pub cleanup_version: u32,
     pub id: String,
@@ -318,6 +321,7 @@ impl Task {
             &id[..8]
         ));
         Self {
+            download_admitted: false,
             cleanup_version: 0,
             id,
             title: source.title.clone(),

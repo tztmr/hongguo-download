@@ -168,3 +168,7 @@
 .auto-runtime-empty { grid-column: 1 / -1; padding: 22px 0; }
 @media (max-width: 1000px) { .auto-runtime-jobs { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .auto-pipeline > summary { align-items: flex-start; flex-direction: column; } .auto-task-toolbar input { width: 100%; } .auto-task-title { flex-wrap: wrap; } }
+
+.auto-batch-summary { margin: 16px 0; padding: 15px 17px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.auto-batch-summary strong { color: var(--text); font-size: 13px; line-height: 1.7; }
+.auto-batch-summary p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.8; }

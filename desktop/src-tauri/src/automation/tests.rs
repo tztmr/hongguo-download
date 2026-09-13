@@ -69,7 +69,7 @@ fn upgrade_requeues_only_completed_jobs_that_need_folder_cleanup() {
 }
 
 #[test]
-fn one_slot_pipelines_download_merge_ai_and_upload_without_starvation() {
+fn one_group_pipelines_download_merge_ai_and_upload_without_starvation() {
     let mut jobs = vec![];
     for (id, stage) in [
         ("upload", "upload"),
@@ -90,13 +90,13 @@ fn one_slot_pipelines_download_merge_ai_and_upload_without_starvation() {
         ..Default::default()
     };
     let ready = pipeline::select(&state, &HashSet::from(["upload".into()]), now());
-    assert_eq!(ready, ["merge", "separate", "download"]);
+    assert_eq!(ready, ["merge", "separate", "download", "next-download"]);
 }
 
 #[test]
 fn pipeline_bounds_download_backlog_but_keeps_resuming_existing_downloads() {
     let mut jobs = vec![];
-    for i in 0..6 {
+    for i in 0..10 {
         let mut job = task();
         job.id = format!("cooldown-{i}");
         job.stage = "upload".into();
@@ -127,6 +127,139 @@ fn pipeline_bounds_download_backlog_but_keeps_resuming_existing_downloads() {
     );
     state.mode = Mode::Paused;
     assert!(pipeline::select(&state, &HashSet::new(), now()).is_empty());
+}
+#[test]
+fn each_concurrent_group_admits_ten_downloads_and_counts_busy_first_episodes() {
+    for groups in 1..=3 {
+        let mut c = config();
+        c["concurrency"] = json!(groups.to_string());
+        let mut state = Snapshot {
+            config: Some(c),
+            mode: Mode::Running,
+            ..Default::default()
+        };
+        for i in 0..35 {
+            let mut job = task();
+            job.id = format!("download-{i}");
+            job.stage = "download".into();
+            state.jobs.push(job);
+        }
+        let ready = pipeline::select(&state, &HashSet::new(), now());
+        assert_eq!(ready.len(), groups * 10);
+        let busy = ready.into_iter().collect();
+        assert!(pipeline::select(&state, &busy, now()).is_empty());
+        // Free just one slot while all other members are still processing.
+        state.jobs[0].status = Status::Completed;
+        let mut busy = busy;
+        busy.remove("download-0");
+        assert_eq!(
+            pipeline::select(&state, &busy, now()),
+            [format!("download-{}", groups * 10)]
+        );
+    }
+}
+
+#[test]
+fn full_group_keeps_all_media_stages_advancing_and_ignores_other_channels() {
+    let mut state = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for i in 0..10 {
+        let mut job = task();
+        job.id = format!("merge-{i}");
+        job.stage = "merge".into();
+        state.jobs.push(job);
+    }
+    let mut other = task();
+    other.id = "other-channel".into();
+    other.stage = "download".into();
+    other.config["channel"] = json!("other-channel");
+    state.jobs.push(other);
+    let mut waiting = task();
+    waiting.id = "waiting".into();
+    waiting.stage = "download".into();
+    state.jobs.push(waiting);
+    let ready = pipeline::select(&state, &HashSet::new(), now());
+    assert_eq!(
+        ready,
+        (0..10).map(|i| format!("merge-{i}")).collect::<Vec<_>>()
+    );
+    state.jobs[0].status = Status::Skipped;
+    assert!(pipeline::select(&state, &HashSet::new(), now()).contains(&"waiting".into()));
+    state.mode = Mode::Stopped;
+    assert!(pipeline::select(&state, &HashSet::new(), now()).is_empty());
+}
+
+#[test]
+fn first_episode_retries_retain_group_slots_across_restart() {
+    let path = temporary();
+    let mut state = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for i in 0..10 {
+        let mut job = task();
+        job.id = format!("reserved-{i}");
+        job.stage = "download".into();
+        job.download_admitted = true;
+        job.status = Status::Observing;
+        job.retry_at = now() + 900;
+        state.jobs.push(job);
+    }
+    let mut incoming = task();
+    incoming.id = "incoming".into();
+    incoming.stage = "download".into();
+    state.jobs.push(incoming);
+    storage::save(&path, &state).unwrap();
+    let mut loaded = Service::load(path.clone()).unwrap().snapshot();
+    assert!(pipeline::select(&loaded, &HashSet::new(), now()).is_empty());
+    loaded.jobs[0].retry_at = 0;
+    assert_eq!(
+        pipeline::select(&loaded, &HashSet::new(), now()),
+        ["reserved-0"]
+    );
+    loaded.jobs[0].status = Status::Review;
+    assert!(pipeline::select(&loaded, &HashSet::new(), now()).is_empty());
+    loaded.jobs[0].status = Status::Skipped;
+    assert_eq!(
+        pipeline::select(&loaded, &HashSet::new(), now()),
+        ["incoming"]
+    );
+    // Existing v0.3.x task files remain readable with no admission field.
+    let mut legacy = serde_json::to_value(&state.jobs[0]).unwrap();
+    legacy.as_object_mut().unwrap().remove("downloadAdmitted");
+    assert!(
+        !serde_json::from_value::<Task>(legacy)
+            .unwrap()
+            .download_admitted
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn reducing_groups_drains_existing_work_without_starting_new_downloads() {
+    let mut state = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for i in 0..20 {
+        let mut job = task();
+        job.id = format!("existing-{i}");
+        job.stage = if i < 10 { "download" } else { "merge" }.into();
+        job.files.push(PathBuf::from("episode.mp4"));
+        state.jobs.push(job);
+    }
+    let mut incoming = task();
+    incoming.id = "incoming".into();
+    incoming.stage = "download".into();
+    state.jobs.insert(0, incoming);
+    let ready = pipeline::select(&state, &HashSet::new(), now());
+    assert_eq!(ready.len(), 20);
+    assert!(!ready.contains(&"incoming".into()));
 }
 #[test]
 fn validates_settings_and_never_persists_unknown_secret_fields() {

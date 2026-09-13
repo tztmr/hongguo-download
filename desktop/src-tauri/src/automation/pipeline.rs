@@ -1,6 +1,8 @@
 use super::model::{number, text, Mode, Snapshot, Status, Task};
 use std::collections::HashSet;
 
+const GROUP_SIZE: usize = 10;
+
 // Separate lanes keep slow network calls and media result polling from
 // monopolising the task runner. The media service owns CPU/GPU admission.
 fn lane(job: &Task) -> usize {
@@ -25,7 +27,9 @@ pub(super) fn select(snapshot: &Snapshot, busy: &HashSet<String>, timestamp: u64
     let Some(config) = &snapshot.config else {
         return Vec::new();
     };
-    let limit = number(config, "concurrency", 1).clamp(1, 3) as usize;
+    // The persisted 1–3 setting now represents groups of ten dramas.
+    let groups = number(config, "concurrency", 1).clamp(1, 3) as usize;
+    let capacity = groups * GROUP_SIZE;
     let jobs: Vec<_> = snapshot
         .jobs
         .iter()
@@ -37,11 +41,15 @@ pub(super) fn select(snapshot: &Snapshot, busy: &HashSet<String>, timestamp: u64
             occupied[lane(job)] += 1;
         }
     }
-    // One bounded window covers downloads, merge, two AI stages, metadata and
-    // upload. Stalled uploads/retries consume the window instead of filling disk.
+    // A group is a rolling production window, not a stage barrier: each drama
+    // advances independently and completion frees one slot immediately. Keep
+    // retries/reviews in the window so blocked uploads cannot fill the disk.
+    // Legacy jobs with files or later stages retain admission without migration.
     let in_window = |j: &Task| {
         !matches!(j.status, Status::Completed | Status::Skipped)
-            && (!j.files.is_empty() || !matches!(j.stage.as_str(), "inspect" | "download"))
+            && (j.download_admitted
+                || !j.files.is_empty()
+                || !matches!(j.stage.as_str(), "inspect" | "download"))
     };
     let mut buffered = jobs
         .iter()
@@ -53,11 +61,19 @@ pub(super) fn select(snapshot: &Snapshot, busy: &HashSet<String>, timestamp: u64
             continue;
         }
         let slot = lane(job);
+        // Keep remote preflight and generative API calls bounded separately.
+        // Media lanes submit/poll jobs; native CPU/GPU and upload queues still
+        // own actual execution admission rather than launching ten encoders.
+        let limit = if matches!(slot, 4 | 7) {
+            groups
+        } else {
+            capacity
+        };
         if occupied[slot] >= limit {
             continue;
         }
-        if job.stage == "download" && job.files.is_empty() {
-            if buffered >= limit * 6 {
+        if job.stage == "download" && !in_window(job) {
+            if buffered >= capacity {
                 continue;
             }
             buffered += 1;
