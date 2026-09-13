@@ -16,6 +16,7 @@ pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
 pub struct ExecutionBudget {
     pub cpu_threads: usize,
     pub force_cpu: bool,
+    pub(crate) merge: bool,
     pub(crate) memory: u64,
     pub(crate) gpu_memory: u64,
 }
@@ -217,6 +218,22 @@ fn configured_for_platform(
     concurrency: usize,
     windows: bool,
 ) -> Result<ExecutionBudget, &'static str> {
+    if windows && job.kind == MediaJobKind::Merge {
+        return admit_merge(job, active, resources);
+    }
+    if windows
+        && active.iter().any(|b| b.merge)
+        && (!resources
+            .available_memory
+            .is_some_and(|free| free >= memory_reservation(job, false) + 2 * GIB)
+            || !resources.cpu_usage.is_some_and(|usage| {
+                usage.is_finite()
+                    && (0.0..85.0).contains(&usage)
+                    && resources.cores as f32 * (1.0 - usage / 100.0) >= 3.0
+            }))
+    {
+        return Err("合并运行中，等待足够的 CPU 和内存启动 AI；下载与上传继续运行");
+    }
     if !parallel_kind_for_platform(job.kind, windows) && !active.is_empty() {
         return Err("合并任务等待其他媒体任务完成");
     }
@@ -225,7 +242,7 @@ fn configured_for_platform(
     } else {
         MAX_AI_JOBS
     };
-    if active.len() >= limit {
+    if active.iter().filter(|b| !windows || !b.merge).count() >= limit {
         return Err("已达到同时处理上限；完成一个任务后自动补位（暂停任务仍占用名额）");
     }
     // Only auto may change devices. Keep the saved preference intact and carry
@@ -285,6 +302,7 @@ fn configured_for_platform(
                 .clamp(1, 8)
                 .min(resources.cores.max(1)),
             force_cpu: false,
+            merge: false,
             memory,
             gpu_memory: if auto {
                 gpu_reservation(job)
@@ -301,6 +319,51 @@ fn configured_for_platform(
         } else {
             "自动模式等待可用 CPU、内存或显存；可调整同时处理数"
         }
+    })
+}
+
+fn admit_merge(
+    job: &MediaJob,
+    active: &[ExecutionBudget],
+    resources: Resources,
+) -> Result<ExecutionBudget, &'static str> {
+    if active.iter().any(|b| b.merge) {
+        return Err("已有合并任务运行，等待合并通道空闲；其他资源可继续处理");
+    }
+    let copy_only = job.merge_request.as_ref().is_some_and(|r| {
+        r.mode == Some(super::model::MergeMode::Copy) || r.mode.is_none() && !r.transcode_h264
+    });
+    let gpu_ready = resources
+        .gpu
+        .is_some_and(|g| !g.shared_memory && g.usage < 85.0 && g.free_memory >= 2 * GIB);
+    let force_cpu = copy_only || !gpu_ready && (!active.is_empty() || resources.gpu.is_some());
+    let cpu_threads = if copy_only {
+        1
+    } else if gpu_ready {
+        2
+    } else {
+        (resources.cores / 3).clamp(1, 4)
+    }
+    .min(resources.cores.max(1));
+    let memory = if copy_only { GIB / 2 } else { GIB };
+    if !active.is_empty()
+        && (!resources
+            .available_memory
+            .is_some_and(|free| free >= memory + 2 * GIB)
+            || !resources.cpu_usage.is_some_and(|usage| {
+                usage.is_finite()
+                    && (0.0..85.0).contains(&usage)
+                    && resources.cores as f32 * (1.0 - usage / 100.0) >= (cpu_threads + 1) as f32
+            }))
+    {
+        return Err("合并等待可用 CPU 或内存，下载和上传通道继续运行");
+    }
+    Ok(ExecutionBudget {
+        cpu_threads,
+        force_cpu,
+        merge: true,
+        memory,
+        gpu_memory: if force_cpu { 0 } else { GIB },
     })
 }
 
@@ -324,11 +387,12 @@ fn admit_with_limit(
         return active.is_empty().then_some(ExecutionBudget {
             cpu_threads: 1,
             force_cpu: false,
+            merge: job.kind == MediaJobKind::Merge,
             memory: 0,
             gpu_memory: 0,
         });
     }
-    if active.len() >= limit {
+    if active.iter().filter(|b| !windows || !b.merge).count() >= limit {
         return None;
     }
     let Some(request) = job.ai_request.as_ref() else {
@@ -336,6 +400,7 @@ fn admit_with_limit(
         return active.is_empty().then_some(ExecutionBudget {
             cpu_threads: 1,
             force_cpu: false,
+            merge: false,
             memory: 0,
             gpu_memory: 0,
         });
@@ -357,6 +422,7 @@ fn admit_with_limit(
     let budget = ExecutionBudget {
         cpu_threads,
         force_cpu: false,
+        merge: false,
         memory,
         gpu_memory,
     };
@@ -552,6 +618,68 @@ mod tests {
             available_memory: Some(128 * GIB),
             gpu: None,
         }
+    }
+
+    #[test]
+    fn windows_merge_uses_spare_gpu_while_cpu_ai_is_running_even_with_one_ai_slot() {
+        let resources = Resources {
+            cores: 16,
+            gpu: Some(GpuResources {
+                free_memory: 8 * GIB,
+                usage: 0.0,
+                shared_memory: false,
+            }),
+            ..idle()
+        };
+        let ai = configured_for_platform(&job("cpu", "htdemucs"), &[], resources, 1, true).unwrap();
+        let mut merge = job("cpu", "htdemucs");
+        merge.kind = MediaJobKind::Merge;
+        merge.ai_request = None;
+        let budget = configured_for_platform(&merge, &[ai], resources, 1, true)
+            .expect("idle GPU must not wait for CPU separation");
+        assert!(budget.gpu_memory > 0);
+        assert!(!budget.force_cpu);
+        assert!(configured_for_platform(
+            &merge,
+            &[ai],
+            Resources {
+                cpu_usage: Some(98.0),
+                ..resources
+            },
+            1,
+            true
+        )
+        .is_err());
+        assert!(configured_for_platform(
+            &merge,
+            &[ai],
+            Resources {
+                available_memory: Some(GIB),
+                ..resources
+            },
+            1,
+            true
+        )
+        .is_err());
+        assert!(configured_for_platform(&merge, &[budget], resources, 1, true).is_err());
+        assert!(
+            configured_for_platform(&job("cpu", "htdemucs"), &[budget], resources, 1, true).is_ok()
+        );
+        let busy_gpu = Resources {
+            gpu: Some(GpuResources {
+                free_memory: GIB,
+                usage: 99.0,
+                shared_memory: false,
+            }),
+            ..resources
+        };
+        let cpu_merge = configured_for_platform(&merge, &[ai], busy_gpu, 1, true).unwrap();
+        assert!(cpu_merge.force_cpu);
+        assert_eq!(cpu_merge.gpu_memory, 0);
+        let cpu_ai =
+            configured_for_platform(&job("auto", "htdemucs"), &[budget], busy_gpu, 1, true)
+                .unwrap();
+        assert!(cpu_ai.force_cpu);
     }
 
     #[test]

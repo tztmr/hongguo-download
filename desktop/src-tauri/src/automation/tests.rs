@@ -32,6 +32,67 @@ fn temporary() -> PathBuf {
     fs::create_dir_all(&root).unwrap();
     root.join("state.json")
 }
+
+#[test]
+fn one_slot_pipelines_download_merge_ai_and_upload_without_starvation() {
+    let mut jobs = vec![];
+    for (id, stage) in [
+        ("upload", "upload"),
+        ("merge", "merge"),
+        ("separate", "separate"),
+        ("download", "download"),
+        ("next-download", "download"),
+    ] {
+        let mut job = task();
+        job.id = id.into();
+        job.stage = stage.into();
+        jobs.push(job);
+    }
+    let state = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        jobs,
+        ..Default::default()
+    };
+    let ready = pipeline::select(&state, &HashSet::from(["upload".into()]), now());
+    assert_eq!(ready, ["merge", "separate", "download"]);
+}
+
+#[test]
+fn pipeline_bounds_download_backlog_but_keeps_resuming_existing_downloads() {
+    let mut jobs = vec![];
+    for i in 0..6 {
+        let mut job = task();
+        job.id = format!("cooldown-{i}");
+        job.stage = "upload".into();
+        job.retry_at = now() + 900;
+        job.files.push(PathBuf::from("ready.mp4"));
+        jobs.push(job);
+    }
+    let mut download = task();
+    download.id = "incoming".into();
+    download.stage = "download".into();
+    jobs.push(download);
+    let mut state = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        jobs,
+        ..Default::default()
+    };
+    assert!(pipeline::select(&state, &HashSet::new(), now()).is_empty());
+    state
+        .jobs
+        .last_mut()
+        .unwrap()
+        .files
+        .push(PathBuf::from("already-downloaded-episode.mp4"));
+    assert_eq!(
+        pipeline::select(&state, &HashSet::new(), now()),
+        ["incoming"]
+    );
+    state.mode = Mode::Paused;
+    assert!(pipeline::select(&state, &HashSet::new(), now()).is_empty());
+}
 #[test]
 fn validates_settings_and_never_persists_unknown_secret_fields() {
     let mut c = config();

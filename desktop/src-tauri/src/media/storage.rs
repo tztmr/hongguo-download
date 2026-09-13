@@ -241,12 +241,18 @@ impl MediaJobManager {
     }
 
     pub fn claim_oldest_queued(&self) -> Result<Option<MediaJob>, AppError> {
+        self.claim_queued_matching(None)
+    }
+
+    pub(super) fn claim_queued(&self, id: &str) -> Result<Option<MediaJob>, AppError> {
+        self.claim_queued_matching(Some(id))
+    }
+
+    fn claim_queued_matching(&self, id: Option<&str>) -> Result<Option<MediaJob>, AppError> {
         let mut guard = self.state.lock().map_err(|_| manager_unavailable_error())?;
-        let Some(index) = guard
-            .jobs
-            .iter()
-            .position(|job| job.status == MediaJobStatus::Queued)
-        else {
+        let Some(index) = guard.jobs.iter().position(|job| {
+            job.status == MediaJobStatus::Queued && id.is_none_or(|id| id == job.id)
+        }) else {
             return Ok(None);
         };
         let mut next = guard.clone();
@@ -318,11 +324,20 @@ impl MediaJobManager {
         self.retry_merge_inner(id, revalidated, false)
     }
 
-    pub(super) fn retry_automation_merge(&self, id: &str, revalidated: ValidatedMergeRequest) -> Result<MediaJob, AppError> {
+    pub(super) fn retry_automation_merge(
+        &self,
+        id: &str,
+        revalidated: ValidatedMergeRequest,
+    ) -> Result<MediaJob, AppError> {
         self.retry_merge_inner(id, revalidated, true)
     }
 
-    fn retry_merge_inner(&self, id: &str, revalidated: ValidatedMergeRequest, smart: bool) -> Result<MediaJob, AppError> {
+    fn retry_merge_inner(
+        &self,
+        id: &str,
+        revalidated: ValidatedMergeRequest,
+        smart: bool,
+    ) -> Result<MediaJob, AppError> {
         let mut guard = self.state.lock().map_err(|_| manager_unavailable_error())?;
         let mut next = guard.clone();
         let index = next

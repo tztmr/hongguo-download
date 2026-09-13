@@ -1,6 +1,7 @@
 mod credentials;
 mod metadata;
 pub mod model;
+mod pipeline;
 mod runner;
 pub mod source;
 mod storage;
@@ -40,7 +41,10 @@ impl Service {
                 job.attempts = 0;
                 job.retry_at = 0;
                 job.retry_ready = true;
-                job.message = format!("已加入自动恢复队列，复用已完成文件；上次错误：{}", job.message);
+                job.message = format!(
+                    "已加入自动恢复队列，复用已完成文件；上次错误：{}",
+                    job.message
+                );
             }
             if job.status == Status::Working {
                 job.status = Status::Pending;
@@ -261,7 +265,7 @@ impl Service {
             loop {
                 if service.running() {
                     let s = service.snapshot();
-                    if let Some(c) = s.config.as_ref() {
+                    if s.config.is_some() {
                         if now() >= s.next_scan
                             && service
                                 .scanning
@@ -283,26 +287,27 @@ impl Service {
                                 owner.scanning.store(false, Ordering::SeqCst);
                             });
                         }
-                        let limit = number(c, "concurrency", 1) as usize;
-                        for job in s.jobs.iter().filter(|j| {
-                            !j.terminal()
-                                && j.retry_at <= now()
-                                && text(&j.config, "channel") == text(c, "channel")
-                        }) {
+                        let ready = pipeline::select(
+                            &s,
+                            &service.busy.lock().unwrap_or_else(|e| e.into_inner()),
+                            now(),
+                        );
+                        for id in ready {
                             let mut busy = service.busy.lock().unwrap_or_else(|e| e.into_inner());
-                            if busy.len() >= limit {
-                                break;
-                            }
-                            if !busy.insert(job.id.clone()) {
+                            if !busy.insert(id.clone()) {
                                 continue;
                             }
                             drop(busy);
                             let Some(mut task) =
-                                service.snapshot().jobs.into_iter().find(|j| j.id == job.id)
+                                service.snapshot().jobs.into_iter().find(|j| j.id == id)
                             else {
-                                service.busy.lock().unwrap().remove(&job.id);
+                                service.busy.lock().unwrap().remove(&id);
                                 continue;
                             };
+                            if !service.running() || task.terminal() || task.retry_at > now() {
+                                service.busy.lock().unwrap().remove(&id);
+                                continue;
+                            }
                             task.status = Status::Working;
                             if service.checkpoint(&task).is_err() {
                                 service.busy.lock().unwrap().remove(&task.id);

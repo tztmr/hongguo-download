@@ -2,9 +2,8 @@
 //! Usage: automation_media_smoke <new-output-directory> <episode-fixture.mp4>
 use hongguo_desktop_lib::{
     media::{
-        model::MergeMode,
-        MediaJob, MediaJobEventSink, MediaJobManager, MediaJobService, MediaJobStatus,
-        NativeMergeExecutor, StartMergeInput, StartMergeRequest,
+        model::MergeMode, MediaJob, MediaJobEventSink, MediaJobManager, MediaJobService,
+        MediaJobStatus, NativeMergeExecutor, StartMergeInput, StartMergeRequest,
     },
     youtube::format::{self, UploadFormat},
 };

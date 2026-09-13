@@ -31,6 +31,12 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it("explains that one slot pipelines stages instead of locking an entire drama", async () => {
+    state.config = { ...state.config, concurrency: "1" };
+    const view = page(); await loaded(view);
+    expect(view.getByText(/每阶段最多 1 部/)).toBeTruthy();
+    expect(view.getByText(/上传时继续下载和处理/)).toBeTruthy();
+  });
   it("saves ordered model selections without replacing saved keys and reloads the order", async () => {
     state.config = { ...state.config, coverSource: "moyuu", coverModel: "gpt-image-2.5-sunburst" };
     const view = page(); await loaded(view);

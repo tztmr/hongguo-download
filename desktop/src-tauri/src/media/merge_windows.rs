@@ -201,13 +201,26 @@ pub fn run_merge<F>(
     tools: &MediaTools,
     request: MergeRequest,
     cancellation: &CancellationToken,
+    progress: F,
+) -> Result<MergeResult, AppError>
+where
+    F: FnMut(MergeProgress),
+{
+    run_merge_with_budget(tools, request, cancellation, None, progress)
+}
+
+pub(super) fn run_merge_with_budget<F>(
+    tools: &MediaTools,
+    request: MergeRequest,
+    cancellation: &CancellationToken,
+    budget: Option<super::scheduling::ExecutionBudget>,
     mut progress: F,
 ) -> Result<MergeResult, AppError>
 where
     F: FnMut(MergeProgress),
 {
     progress(event("probing", 0.0, false));
-    let result = run_merge_inner(tools, request, cancellation, &mut progress);
+    let result = run_merge_inner(tools, request, cancellation, budget, &mut progress);
     match &result {
         Ok(_) => progress(event("completed", 100.0, true)),
         Err(error) => progress(event(
@@ -227,6 +240,7 @@ fn run_merge_inner(
     tools: &MediaTools,
     request: MergeRequest,
     cancellation: &CancellationToken,
+    budget: Option<super::scheduling::ExecutionBudget>,
     progress: &mut dyn FnMut(MergeProgress),
 ) -> Result<MergeResult, AppError> {
     if request.inputs.is_empty() {
@@ -311,12 +325,20 @@ fn run_merge_inner(
     let has_audio = probes.iter().any(|p| p.audio.is_some());
     let expected_duration = if normalize {
         let encoder = if needs_transcode {
-            let hardware = probe_video_hardware(tools);
-            select_video_encoder(true, hardware.nvenc_available)
+            if budget.is_some_and(|b| b.force_cpu) {
+                progress(event("GPU 暂忙，使用 CPU 空闲资源转码", 0.0, false));
+                VideoEncoder::Libx264
+            } else {
+                let hardware = probe_video_hardware(tools);
+                select_video_encoder(true, hardware.nvenc_available)
+            }
         } else {
             VideoEncoder::Copy
         };
-        let spec = NormalizeSpec::new(&details, encoder, request.quality)?;
+        let mut spec = NormalizeSpec::new(&details, encoder, request.quality)?;
+        if let Some(budget) = budget {
+            spec.cpu_threads = budget.cpu_threads.max(1);
+        }
         match normalize_inputs(
             tools,
             &inputs,
@@ -565,6 +587,7 @@ fn write_concat_file(path: &Path, inputs: &[MergeInput]) -> Result<(), AppError>
 }
 
 struct NormalizeSpec {
+    cpu_threads: usize,
     encoder: VideoEncoder,
     quality: MergeQuality,
     audio: bool,
@@ -589,6 +612,7 @@ impl NormalizeSpec {
             return Err(invalid_probe());
         }
         Ok(Self {
+            cpu_threads: 0,
             encoder,
             quality,
             audio: probes.iter().any(|p| p.media.audio.is_some()),
@@ -658,6 +682,14 @@ fn normalize_inputs(
         let result = loop {
             let mut command = tools.ffmpeg_command();
             command.args(["-hide_banner", "-y"]);
+            if spec.cpu_threads > 0 {
+                command.args([
+                    "-filter_threads",
+                    &spec.cpu_threads.to_string(),
+                    "-threads",
+                    &spec.cpu_threads.to_string(),
+                ]);
+            }
             if cuda_decode {
                 // Keep decoded frames in system memory for the existing timing,
                 // scale and pad filters; NVDEC and NVENC work alongside CPU filters.
@@ -704,6 +736,9 @@ fn normalize_inputs(
                 }
             }
             // PCM intermediates avoid accumulating AAC priming at each episode join.
+            if spec.cpu_threads > 0 {
+                command.args(["-threads", &spec.cpu_threads.to_string()]);
+            }
             if spec.audio {
                 command.args(["-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]);
             } else {
@@ -1195,7 +1230,23 @@ mod performance_tests {
             quality: MergeQuality::Balanced,
             conflict_policy: MergeConflictPolicy::FailIfExists,
         };
-        let result = run_merge(&tools, request, &CancellationToken::default(), |_| {}).unwrap();
+        let mut stages = Vec::new();
+        let result = run_merge_with_budget(
+            &tools,
+            request,
+            &CancellationToken::default(),
+            Some(super::super::scheduling::ExecutionBudget {
+                cpu_threads: 2,
+                force_cpu: true,
+                merge: true,
+                memory: 0,
+                gpu_memory: 0,
+            }),
+            |p| stages.push(p.stage),
+        )
+        .unwrap();
+        assert!(stages.iter().any(|s| s.contains("CPU")));
+        assert!(!stages.iter().any(|s| s.contains("GPU 编码")));
         let probe = probe_media(&tools, &result.output_path).unwrap();
         assert_eq!(
             (probe.video.width, probe.video.height),

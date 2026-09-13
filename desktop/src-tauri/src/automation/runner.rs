@@ -425,7 +425,16 @@ async fn download(
     let receipt = task.root.join(format!("下载完成-{}.json", episode.index));
     let orientation = text(&task.config, "orientation").to_owned();
     ensure_running(service)?;
-    task.message = format!("正在{}第 {}/{} 集", if existing.is_some() { "校验已有" } else { "下载" }, episode.index, wanted);
+    task.message = format!(
+        "正在{}第 {}/{} 集",
+        if existing.is_some() {
+            "校验已有"
+        } else {
+            "下载"
+        },
+        episode.index,
+        wanted
+    );
     service.checkpoint(task)?;
     let path = crate::run_blocking(move || {
         if let Some(path) = existing {

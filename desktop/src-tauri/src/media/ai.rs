@@ -269,8 +269,13 @@ fn process_separation(
     }
     let temp = JobTemp::create(&request.series_root)?;
     let wav = temp.root.join("input.wav");
-    super::audio_prepare::extract(context.tools, input, &wav, context.cancellation,
-        &mut |stage, percent| progress(stage, percent * 0.1))?;
+    super::audio_prepare::extract(
+        context.tools,
+        input,
+        &wav,
+        context.cancellation,
+        &mut |stage, percent| progress(stage, percent * 0.1),
+    )?;
     progress("separating".into(), 10.0);
     let worker_outputs = run_worker(
         WorkerInvocation {
@@ -399,8 +404,13 @@ fn process_subtitles(
             if let Some(vocals) = vocals.filter(|_| source == SubtitleSource::WhisperVocals) {
                 fs::copy(vocals, &wav).map_err(ai_io)?;
             } else {
-                super::audio_prepare::extract(context.tools, input, &wav, context.cancellation,
-                    &mut |stage, percent| progress(stage, percent * 0.1))?;
+                super::audio_prepare::extract(
+                    context.tools,
+                    input,
+                    &wav,
+                    context.cancellation,
+                    &mut |stage, percent| progress(stage, percent * 0.1),
+                )?;
             }
             let outputs = run_worker(
                 WorkerInvocation {
@@ -1166,15 +1176,38 @@ mod tests {
 
     #[test]
     fn audio_preprocessing_reports_missing_audio_instead_of_generic_ffmpeg_failure() {
-        let Ok(root) = std::env::var("HONGGUO_TEST_PLAYBACK_TOOLS") else { return; };
+        let Ok(root) = std::env::var("HONGGUO_TEST_PLAYBACK_TOOLS") else {
+            return;
+        };
         let tools = super::MediaTools::from_resource_root(root).unwrap();
         let temp = super::JobTemp::create(&std::env::temp_dir()).unwrap();
         let video = temp.root.join("无音轨.mp4");
-        assert!(tools.ffmpeg_command().args([
-            "-v", "error", "-f", "lavfi", "-i", "color=size=64x64:rate=10",
-            "-t", "0.5", "-an", "-c:v", "libx264",
-        ]).arg(&video).status().unwrap().success());
-        let error = super::extract_audio(&tools, &video, &temp.root.join("input.wav"), &super::CancellationToken::default()).unwrap_err();
+        assert!(tools
+            .ffmpeg_command()
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=size=64x64:rate=10",
+                "-t",
+                "0.5",
+                "-an",
+                "-c:v",
+                "libx264",
+            ])
+            .arg(&video)
+            .status()
+            .unwrap()
+            .success());
+        let error = super::extract_audio(
+            &tools,
+            &video,
+            &temp.root.join("input.wav"),
+            &super::CancellationToken::default(),
+        )
+        .unwrap_err();
         assert_eq!(error.code, "AI_AUDIO_STREAM_MISSING");
         assert!(error.message.contains("没有音轨"));
     }

@@ -506,6 +506,15 @@ fn strip_unix_private_prefix(path: &Path) -> PathBuf {
 }
 
 pub trait MergeExecutor: Send + Sync + 'static {
+    fn execute_with_budget(
+        &self,
+        request: MergeRequest,
+        cancellation: &CancellationToken,
+        progress: &mut dyn FnMut(MergeProgress),
+        _budget: scheduling::ExecutionBudget,
+    ) -> Result<MergeResult, AppError> {
+        self.execute(request, cancellation, progress)
+    }
     fn execute(
         &self,
         request: MergeRequest,
@@ -588,6 +597,17 @@ impl NativeMergeExecutor {
 }
 
 impl MergeExecutor for NativeMergeExecutor {
+    #[cfg(windows)]
+    fn execute_with_budget(
+        &self,
+        request: MergeRequest,
+        cancellation: &CancellationToken,
+        progress: &mut dyn FnMut(MergeProgress),
+        budget: scheduling::ExecutionBudget,
+    ) -> Result<MergeResult, AppError> {
+        let tools = self.tools.as_ref().map_err(Clone::clone)?;
+        merge::run_merge_with_budget(tools, request, cancellation, Some(budget), progress)
+    }
     fn execute(
         &self,
         request: MergeRequest,
@@ -949,7 +969,11 @@ impl MediaJobService {
         self.retry_with_merge_mode(job_id, None)
     }
 
-    fn retry_with_merge_mode(&self, job_id: &str, mode: Option<model::MergeMode>) -> Result<MediaJob, AppError> {
+    fn retry_with_merge_mode(
+        &self,
+        job_id: &str,
+        mode: Option<model::MergeMode>,
+    ) -> Result<MediaJob, AppError> {
         // Keep the same lock order as start_merge: request validation, then claim.
         let _request_guard = self.merge_request_lock.lock().map_err(|_| {
             AppError::new("MEDIA_JOB_MANAGER_UNAVAILABLE", "媒体任务管理器暂不可用")
@@ -1096,20 +1120,10 @@ fn worker_loop(
                 if context.shutting_down.load(AtomicOrdering::Acquire) {
                     break;
                 }
-                let candidate = context
-                    .manager
-                    .snapshot()
-                    .jobs
-                    .into_iter()
-                    .find(|job| job.status == MediaJobStatus::Queued);
-                let Some(mut candidate) = candidate else {
-                    break;
-                };
-                // Merge stays exclusive; Windows AI jobs share resource budgets.
-                // Other platforms retain exclusive subtitles and FIFO order.
-                if running
-                    .values()
-                    .any(|job| !scheduling::is_parallel_kind(job.kind))
+                if !cfg!(windows)
+                    && running
+                        .values()
+                        .any(|job| !scheduling::is_parallel_kind(job.kind))
                 {
                     *context
                         .queue_reason
@@ -1117,28 +1131,46 @@ fn worker_loop(
                         .unwrap_or_else(|e| e.into_inner()) = "等待当前合并任务完成".into();
                     break;
                 }
-                if let Some(request) = candidate.ai_request.as_mut() {
-                    request.device = context.ai_executor.scheduling_device(request);
-                }
                 let active: Vec<_> = running.values().map(|job| job.budget).collect();
                 let concurrency = if cfg!(windows) {
                     context.concurrency.load(AtomicOrdering::Acquire)
                 } else {
                     0
                 };
-                let budget =
+                // Take the oldest runnable job, allowing an available GPU/CPU
+                // lane to pass a job waiting on the other device on Windows.
+                let mut selected = None;
+                for mut candidate in context
+                    .manager
+                    .snapshot()
+                    .jobs
+                    .into_iter()
+                    .filter(|j| j.status == MediaJobStatus::Queued)
+                {
+                    if let Some(request) = candidate.ai_request.as_mut() {
+                        request.device = context.ai_executor.scheduling_device(request);
+                    }
                     match scheduling::admit_configured(&candidate, &active, resources, concurrency)
                     {
-                        Ok(budget) => budget,
+                        Ok(budget) => {
+                            selected = Some((candidate.id, budget));
+                            break;
+                        }
                         Err(reason) => {
                             *context
                                 .queue_reason
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner()) = reason.into();
-                            break;
+                            if !cfg!(windows) {
+                                break;
+                            }
                         }
-                    };
-                match context.manager.claim_oldest_queued() {
+                    }
+                }
+                let Some((candidate_id, budget)) = selected else {
+                    break;
+                };
+                match context.manager.claim_queued(&candidate_id) {
                     Ok(Some(job)) if context.shutting_down.load(AtomicOrdering::Acquire) => {
                         let _ = context.manager.restore_claimed_to_queued(&job.id);
                         break;
@@ -1176,7 +1208,7 @@ fn worker_loop(
             let notify = completion_sender.clone();
             let finished_notify = finished_sender.clone();
             let finished_id = id.clone();
-            // Publish Running in FIFO order before the worker can emit progress.
+            // Publish Running before the worker can emit progress.
             safe_emit(&context.event_sink, job.clone());
             match thread::Builder::new()
                 .name(format!("media-job-{id}"))
@@ -1226,15 +1258,9 @@ fn worker_loop(
 #[cfg(windows)]
 fn rebalance_cpu(running: &RunningJobs) {
     let jobs = running.lock().unwrap_or_else(|e| e.into_inner());
-    let active = jobs
-        .values()
-        .filter(|j| scheduling::is_parallel_kind(j.kind) && !j.token.is_paused())
-        .count();
+    let active = jobs.values().filter(|j| !j.token.is_paused()).count();
     let rate = scheduling::cpu_share(active);
-    for job in jobs
-        .values()
-        .filter(|j| scheduling::is_parallel_kind(j.kind))
-    {
+    for job in jobs.values() {
         // A failure is surfaced when registering a subprocess. Never terminate an
         // otherwise healthy task merely because a driver rejected a live update.
         let _ = job.token.set_cpu_rate(rate);
@@ -1304,10 +1330,11 @@ fn execute_job(
         };
         if let Some(request) = job.merge_request.clone() {
             executor
-                .execute(
+                .execute_with_budget(
                     request.execution_request(),
                     &cancellation,
                     &mut update_progress,
+                    budget,
                 )
                 .map(|result| AIExecutionResult {
                     output_path: result.output_path,
@@ -2098,11 +2125,19 @@ mod tests {
         let input = fixture.write_input("one.mp4", b"one");
         let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
         let sink = Arc::new(RecordingSink::default());
-        let service = MediaJobService::new_with_ai(
+        let service = MediaJobService::with_resource_probe(
             manager,
             Arc::new(ImmediateExecutor),
             Arc::new(FakeAIExecutor),
             sink,
+            // This tests dispatch/persistence, independent of the host GPU's
+            // current workload or the native telemetry warmup interval.
+            Box::new(|| scheduling::Resources {
+                cores: 16,
+                cpu_usage: Some(0.0),
+                available_memory: Some(32 * scheduling::GIB),
+                gpu: None,
+            }),
         );
         let job = service
             .start_ai(
@@ -2297,17 +2332,27 @@ mod tests {
     fn automation_retry_upgrades_persisted_copy_only_request_without_losing_inputs() {
         let fixture = MergeFixture::new();
         let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
-        let request = fixture.request("auto-fixture-merge", vec![fixture.write_input("retry.mp4", b"retry")]);
+        let request = fixture.request(
+            "auto-fixture-merge",
+            vec![fixture.write_input("retry.mp4", b"retry")],
+        );
         let expected = validate_merge_request(&request).unwrap();
         let job = manager.enqueue_merge(expected.clone()).unwrap();
         manager.update(&job.id, MediaJobTransition::Start).unwrap();
-        manager.update(&job.id, MediaJobTransition::Fail {
-            code: "MERGE_TRANSCODE_REQUIRED".into(), message: "输入媒体参数不一致".into(),
-        }).unwrap();
+        manager
+            .update(
+                &job.id,
+                MediaJobTransition::Fail {
+                    code: "MERGE_TRANSCODE_REQUIRED".into(),
+                    message: "输入媒体参数不一致".into(),
+                },
+            )
+            .unwrap();
         drop(manager);
         let service = MediaJobService::new(
             Arc::new(MediaJobManager::load(&fixture.store).unwrap()),
-            Arc::new(ErrorExecutor), Arc::new(RecordingSink::default()),
+            Arc::new(ErrorExecutor),
+            Arc::new(RecordingSink::default()),
         );
         let retried = service.retry_automation_merge(&job.id).unwrap();
         let actual = retried.merge_request.unwrap();
@@ -2507,7 +2552,7 @@ mod tests {
     }
 
     #[test]
-    fn subtitle_queue_uses_platform_concurrency_and_keeps_merge_exclusive() {
+    fn subtitle_queue_and_merge_follow_platform_resource_policy() {
         let fixture = MergeFixture::new();
         let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
         let (started_tx, started_rx) = mpsc::channel();
@@ -2575,11 +2620,15 @@ mod tests {
                 vec![fixture.write_input("merge.mp4", b"input")],
             ))
             .unwrap();
-        thread::sleep(Duration::from_millis(100));
-        assert_eq!(
-            service.manager.job(&merge.id).unwrap().status,
-            MediaJobStatus::Queued
-        );
+        if cfg!(windows) {
+            wait_for_job(&service, &merge.id, MediaJobStatus::Completed);
+        } else {
+            thread::sleep(Duration::from_millis(100));
+            assert_eq!(
+                service.manager.job(&merge.id).unwrap().status,
+                MediaJobStatus::Queued
+            );
+        }
         for job in &jobs {
             if service.manager.job(&job.id).unwrap().status == MediaJobStatus::Running {
                 service.cancel(&job.id).unwrap();
@@ -2587,6 +2636,72 @@ mod tests {
             }
         }
         wait_for_job(&service, &merge.id, MediaJobStatus::Completed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn queued_ai_at_its_limit_does_not_block_a_merge_behind_it() {
+        let fixture = MergeFixture::new();
+        let (tx, rx) = mpsc::channel();
+        let service = MediaJobService::with_resource_probe_and_limit(
+            Arc::new(MediaJobManager::load(&fixture.store).unwrap()),
+            Arc::new(ImmediateExecutor),
+            Arc::new(HoldingAIExecutor { started: tx }),
+            Arc::new(RecordingSink::default()),
+            Box::new(|| scheduling::Resources {
+                cores: 16,
+                cpu_usage: Some(0.0),
+                available_memory: Some(32 * scheduling::GIB),
+                gpu: None,
+            }),
+            1,
+        );
+        let mut jobs = Vec::new();
+        for index in 0..2 {
+            jobs.push(
+                service
+                    .start_ai(
+                        StartAIJobRequest {
+                            book_id: format!("pipeline-ai-{index}"),
+                            title: "流水线".into(),
+                            series_root: fixture.series.clone(),
+                            scope: MediaJobScope::Episodes,
+                            inputs: vec![fixture.write_input(&format!("ai-{index}.mp4"), b"input")],
+                            model: "htdemucs".into(),
+                            device: "cpu".into(),
+                        },
+                        MediaJobKind::SeparateBackgroundMusic,
+                    )
+                    .unwrap(),
+            );
+            if index == 0 {
+                assert_eq!(
+                    rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+                    "pipeline-ai-0"
+                );
+            }
+        }
+        let merge = service
+            .start_merge(fixture.request(
+                "pipeline-merge",
+                vec![fixture.write_input("pipeline-merge.mp4", b"input")],
+            ))
+            .unwrap();
+        wait_for_job(&service, &merge.id, MediaJobStatus::Completed);
+        assert_eq!(
+            service.manager.job(&jobs[0].id).unwrap().status,
+            MediaJobStatus::Running
+        );
+        assert_eq!(
+            service.manager.job(&jobs[1].id).unwrap().status,
+            MediaJobStatus::Queued
+        );
+        service.cancel(&jobs[0].id).unwrap();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(3)).unwrap(),
+            "pipeline-ai-1"
+        );
+        service.cancel(&jobs[1].id).unwrap();
     }
 
     #[cfg(windows)]
@@ -2813,6 +2928,7 @@ mod tests {
                 budget: scheduling::ExecutionBudget {
                     cpu_threads: 1,
                     force_cpu: false,
+                    merge: false,
                     memory: 0,
                     gpu_memory: 0,
                 },
