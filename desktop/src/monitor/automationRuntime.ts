@@ -4,6 +4,7 @@ export type AutomationSecrets = Partial<Record<"text" | "image", string>>;
 export type AutomationJob = {
   id: string; title: string; bookId: string; season?: number; stage: string;
   status: "pending" | "working" | "review" | "failed" | "completed" | "skipped" | "observing";
+  mediaState?: "queued" | "running" | "paused";
   message: string; episodeDone: number; episodeTotal: number; progress: number;
   mainVideoUrl?: string; shortVideoUrl?: string; updatedAt: number;
   attempts?: number; retryAt?: number;
@@ -12,6 +13,7 @@ export type AutomationSnapshot = {
   config: Record<string, unknown> | null;
   mode: "stopped" | "running" | "paused";
   jobs: AutomationJob[];
+  waiting?: AutomationJob[];
   logs: { at: number; jobId?: string; message: string }[];
   lastScan: number; nextScan: number; warning: string;
   keyStatus: { text: boolean; image: boolean };

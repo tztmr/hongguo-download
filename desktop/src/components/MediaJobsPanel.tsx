@@ -169,10 +169,10 @@ export function MediaJobsPanel({ media, batches, onRevealPath, onShowDownloads, 
   return (
     <section className="media-workspace" aria-label="媒体处理">
       <div className="media-overview">
-        <div><h2>媒体处理</h2><p>{media.scheduling?.windows ? "分离与字幕完成一个任务后自动补位；合并任务按顺序处理。" : "背景音乐分离按 CPU / GPU 资源自动调度，最多同时处理 5 个任务。"}</p></div>
+        <div><h2>媒体处理</h2><p>{media.scheduling?.windows ? "分离与字幕完成一个任务后自动补位；合并任务按顺序处理。" : "背景音乐分离可自动调度或手动设置 1～5 个并发；已开始的任务持续处理，完成后才释放名额。"}</p></div>
         <button type="button" className="secondary-button" onClick={onShowDownloads}><QueueIcon />从下载任务创建</button>
       </div>
-      {media.scheduling?.windows && media.scheduling.reason && media.jobs.some(job => job.status === "queued") ? <p role="status" className="media-queue-reason">{media.scheduling.reason}</p> : null}
+      {media.scheduling?.reason && media.jobs.some(job => job.status === "queued") ? <p role="status" className="media-queue-reason">{media.scheduling.reason}</p> : null}
       <div className="media-type-summary" role="group" aria-label="媒体处理类型">
         <button type="button" className="media-type-summary-card" aria-pressed={kindFilter === "all"} onClick={() => setKindFilter("all")}>
           <span className="media-summary-icon">全部</span>

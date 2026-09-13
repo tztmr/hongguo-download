@@ -100,8 +100,35 @@ fn identity(path: &Path) -> Result<OwnedFile, AppError> {
     })
 }
 
+fn admit_group(
+    snapshot: &mut Snapshot,
+    candidates: Vec<source::Candidate>,
+    config: &Value,
+    save_dir: &Path,
+) -> usize {
+    if !super::pipeline::can_scan(snapshot) {
+        return 0;
+    }
+    let mut count = 0;
+    for candidate in candidates {
+        if count == super::pipeline::GROUP_SIZE {
+            break;
+        }
+        let task = Task::new(candidate, config.clone(), save_dir.to_path_buf());
+        if snapshot.jobs.iter().any(|j| j.id == task.id) {
+            continue;
+        }
+        snapshot.jobs.push(task);
+        count += 1;
+    }
+    count
+}
+
 pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppError> {
     let snapshot = service.snapshot();
+    if !super::pipeline::can_scan(&snapshot) {
+        return Ok(());
+    }
     let config = snapshot
         .config
         .ok_or_else(|| AppError::new("AUTOMATION_NOT_CONFIGURED", "请先保存设置"))?;
@@ -110,12 +137,17 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         .unwrap()
         .iter()
         .filter_map(|v| match v.as_str() {
-            Some("真人剧") => Some("playlet"),
             Some("漫剧") => Some("comic_series_rank"),
             Some("AI剧") => Some("ai_playlet"),
             _ => None,
         })
         .collect();
+    if types.is_empty() {
+        return Err(AppError::new(
+            "AUTOMATION_SETTINGS_INVALID",
+            "请选择漫剧或 AI剧后保存设置",
+        ));
+    }
     let selected = snapshot.cursor_type % types.len();
     let page = api(
         app,
@@ -164,29 +196,18 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
             "扫描分页未前进，等待下次重试",
         ));
     }
-    let busy = service.busy.lock().map_err(|_| invalid_file())?;
     service.transaction(|s| {
-        if s.mode != Mode::Running || s.config.as_ref() != Some(&config) {
+        if !super::pipeline::can_scan(s) || s.config.as_ref() != Some(&config) {
             return Ok(());
         }
-        let mut count = 0;
-        for candidate in candidates {
-            let task = Task::new(candidate, config.clone(), save_dir.clone());
-            if let Some(existing) = s.jobs.iter_mut().find(|j| j.id == task.id) {
-                if existing.stage == "inspect"
-                    && !existing.terminal()
-                    && !busy.contains(&existing.id)
-                {
-                    existing.source = task.source;
-                }
-            } else {
-                s.jobs.push(task);
-                count += 1;
-            }
-        }
+        let count = admit_group(s, candidates, &config, &save_dir);
         s.warning.clear();
         s.last_scan = now();
-        if more {
+        if count > 0 {
+            s.cursor.clear();
+            s.cursor_type = (selected + 1) % types.len();
+            s.next_scan = now() + number(&config, "interval", 5) * 60;
+        } else if more {
             s.cursor = next;
             s.cursor_type = selected;
             s.next_scan = now() + 2;
@@ -202,7 +223,7 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         if count > 0 {
             s.log(
                 None,
-                format!("扫描发现 {count} 部符合条件的剧目，已加入检查队列"),
+                format!("本轮接收 {count} 部组成任务组，其余结果不保留；本组全部结束后再监听"),
             );
         }
         Ok(())
@@ -530,6 +551,19 @@ async fn download(
     Ok(())
 }
 
+fn reusable_media(job: &MediaJob) -> bool {
+    if job.status != MediaJobStatus::Completed {
+        return true;
+    }
+    // Missing completed outputs must not pin recovery to an obsolete history entry.
+    let outputs: Vec<_> = job
+        .output_path
+        .iter()
+        .chain(job.outputs.iter().map(|o| &o.path))
+        .collect();
+    !outputs.is_empty() && outputs.iter().all(|p| p.try_exists().unwrap_or(true))
+}
+
 fn current_media(
     app: &AppHandle,
     id: &Option<String>,
@@ -541,6 +575,7 @@ fn current_media(
         .snapshot()
         .jobs
         .into_iter()
+        .filter(reusable_media)
         .find(|j| {
             id.as_ref().is_some_and(|id| *id == j.id)
                 || j.kind == kind
@@ -553,6 +588,12 @@ fn refresh_media(
     task: &mut Task,
     job: MediaJob,
 ) -> Result<Option<MediaJob>, AppError> {
+    task.media_state = match job.status {
+        MediaJobStatus::Queued => Some("queued".into()),
+        MediaJobStatus::Running => Some("running".into()),
+        MediaJobStatus::Paused => Some("paused".into()),
+        _ => None,
+    };
     task.progress = job.percent;
     task.message = format!(
         "{}：{}",
@@ -711,6 +752,90 @@ async fn merge(
     }
     Ok(())
 }
+// Rebuild only missing derived files, from receipts that still match the originals.
+// The caller runs this on the blocking pool because validation hashes every source.
+fn recover_missing_media_input(task: &mut Task, input: &Path) -> Result<bool, AppError> {
+    if task.main_done
+        || !task.main_video_url.is_empty()
+        || !matches!(task.stage.as_str(), "separate" | "subtitles")
+    {
+        return Ok(false);
+    }
+    safe_root(input)?;
+    if input.try_exists().map_err(|_| invalid_file())? {
+        return Ok(false);
+    }
+    safe_root(&task.root)?;
+    let root = fs::canonicalize(&task.root).map_err(|_| invalid_file())?;
+    if !input.starts_with(&root)
+        || input
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(invalid_file());
+    }
+    let verify = |path: &Path| -> Result<(), AppError> {
+        safe_root(path)?;
+        let canonical = fs::canonicalize(path).map_err(|_| invalid_file())?;
+        if !canonical.starts_with(&root) {
+            return Err(invalid_file());
+        }
+        let recorded = task
+            .owned
+            .iter()
+            .find(|owned| owned.path == canonical)
+            .ok_or_else(invalid_file)?;
+        let actual = identity(&canonical)?;
+        if recorded.size != actual.size || recorded.hash != actual.hash {
+            return Err(invalid_file());
+        }
+        Ok(())
+    };
+    let merged = task
+        .merged
+        .as_ref()
+        .filter(|path| path.try_exists().unwrap_or(true));
+    let reuse_merged = if let Some(path) = merged {
+        verify(path)?;
+        true
+    } else {
+        if task.files.is_empty()
+            || task.files.len() != task.episode_done
+            || task.episode_done != task.episode_total
+        {
+            return Err(invalid_file());
+        }
+        for path in &task.files {
+            verify(path)?;
+        }
+        false
+    };
+    task.separate_job = None;
+    task.subtitle_job = None;
+    task.subtitle = None;
+    task.retry_ready = false;
+    if reuse_merged {
+        task.prepared = task.merged.clone();
+        task.next(
+            if flag(&task.config, "separate") {
+                "separate"
+            } else {
+                "subtitles"
+            },
+            "处理产物缺失，已校验原合并视频，重新生成媒体处理产物",
+        );
+    } else {
+        task.merge_job = None;
+        task.merged = None;
+        task.prepared = None;
+        task.next(
+            "merge",
+            "处理产物缺失，已校验全部原集文件，重建合并视频，无需重新下载",
+        );
+    }
+    Ok(true)
+}
+
 async fn ai_media(
     app: &AppHandle,
     service: &Arc<Service>,
@@ -752,6 +877,18 @@ async fn ai_media(
             task.prepared.clone()
         }
         .ok_or_else(invalid_file)?;
+        let mut recovered = task.clone();
+        let missing_input = input.clone();
+        let recovery = crate::run_blocking(move || {
+            recover_missing_media_input(&mut recovered, &missing_input)
+                .map(|changed| changed.then_some(recovered))
+        })
+        .await?;
+        if let Some(recovered) = recovery {
+            *task = recovered;
+            service.checkpoint(task)?;
+            return Ok(());
+        }
         let request = StartAIJobRequest {
             book_id: book,
             title: task.title.clone(),
@@ -841,6 +978,14 @@ async fn upload(
     let id = task.upload_id(is_short);
     let youtube = app.state::<AppState>().youtube.clone();
     if let Some(job) = youtube.snapshot().jobs.into_iter().find(|j| j.id == id) {
+        task.media_state = Some(
+            if job.status == YouTubeJobStatus::Paused {
+                "paused"
+            } else {
+                "running"
+            }
+            .into(),
+        );
         task.progress = job.percent;
         task.message = format!(
             "{}上传：{:?}",

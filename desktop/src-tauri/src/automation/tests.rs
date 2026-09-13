@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 use std::fs;
 fn config() -> Value {
-    json!({"uploadFormat":"auto","firstEpisodeShorts":false,"interval":"5","types":["真人剧"],"scope":"all","orientation":"all","keywords":"","exclude":"","completeOnly":true,"definition":"auto","concurrency":"1","separate":false,"subtitles":false,"subtitleSource":"original","subtitleFormat":"srt","retries":"3","channel":"channel-a","privacy":"private","title":"{剧名}","description":"{简介}","tags":"{剧名}","coverSource":"source","metadataSource":"template","category":"24","imageMode":"reference","minDisk":"20","resume":true,"notify":false})
+    json!({"uploadFormat":"auto","firstEpisodeShorts":false,"interval":"5","types":["漫剧"],"scope":"all","orientation":"all","keywords":"","exclude":"","completeOnly":true,"definition":"auto","concurrency":"1","separate":false,"subtitles":false,"subtitleSource":"original","subtitleFormat":"srt","retries":"3","channel":"channel-a","privacy":"private","title":"{剧名}","description":"{简介}","tags":"{剧名}","coverSource":"source","metadataSource":"template","category":"24","imageMode":"reference","minDisk":"20","resume":true,"notify":false})
 }
 fn task() -> Task {
     Task::new(
@@ -145,7 +145,7 @@ fn each_concurrent_group_admits_ten_downloads_and_counts_busy_first_episodes() {
             state.jobs.push(job);
         }
         let ready = pipeline::select(&state, &HashSet::new(), now());
-        assert_eq!(ready.len(), groups * 10);
+        assert_eq!(ready.len(), 10);
         let busy = ready.into_iter().collect();
         assert!(pipeline::select(&state, &busy, now()).is_empty());
         // Free just one slot while all other members are still processing.
@@ -154,7 +154,7 @@ fn each_concurrent_group_admits_ten_downloads_and_counts_busy_first_episodes() {
         busy.remove("download-0");
         assert_eq!(
             pipeline::select(&state, &busy, now()),
-            [format!("download-{}", groups * 10)]
+            ["download-10".to_owned()]
         );
     }
 }
@@ -224,9 +224,10 @@ fn first_episode_retries_retain_group_slots_across_restart() {
     loaded.jobs[0].status = Status::Review;
     assert!(pipeline::select(&loaded, &HashSet::new(), now()).is_empty());
     loaded.jobs[0].status = Status::Skipped;
+    pipeline::normalize_group(&mut loaded);
     assert_eq!(
         pipeline::select(&loaded, &HashSet::new(), now()),
-        ["incoming"]
+        Vec::<String>::new()
     );
     // Existing v0.3.x task files remain readable with no admission field.
     let mut legacy = serde_json::to_value(&state.jobs[0]).unwrap();
@@ -447,4 +448,103 @@ fn validates_ordered_cover_models_and_preserves_legacy_model() {
     }
     c.as_object_mut().unwrap().remove("coverModels");
     assert_eq!(validate_config(c).unwrap()["coverModel"], "gpt-image-2");
+}
+
+#[test]
+fn strict_group_discards_unstarted_backlog_and_waits_for_every_member() {
+    let mut s = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for n in 0..150 {
+        let mut j = task();
+        j.id = format!("job-{n}");
+        if n < 10 {
+            j.stage = "merge".into();
+            s.jobs.push(j);
+        } else {
+            s.waiting.push(j);
+        }
+    }
+    pipeline::normalize_group(&mut s);
+    assert_eq!(s.jobs.len(), 10);
+    assert!(s.waiting.is_empty());
+    assert!(!pipeline::can_scan(&s));
+    for j in s.jobs.iter_mut().take(9) {
+        j.status = Status::Completed;
+    }
+    pipeline::normalize_group(&mut s);
+    assert_eq!(s.jobs.len(), 10);
+    assert!(!pipeline::can_scan(&s));
+    s.jobs[9].status = Status::Review;
+    assert!(!pipeline::can_scan(&s));
+    s.jobs[9].status = Status::Skipped;
+    assert!(pipeline::can_scan(&s));
+    s.mode = Mode::Paused;
+    assert!(!pipeline::can_scan(&s));
+}
+
+#[test]
+fn strict_group_upgrade_is_durable_and_preserves_started_outputs() {
+    let path = temporary();
+    let mut s = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for n in 0..150 {
+        let mut j = task();
+        j.id = format!("job-{n}");
+        if n >= 140 {
+            j.files.push(PathBuf::from(format!("source-{n}.mp4")));
+        }
+        s.jobs.push(j);
+    }
+    storage::save(&path, &s).unwrap();
+    let service = Service::load(path.clone()).unwrap();
+    let loaded = service.snapshot();
+    assert_eq!(loaded.jobs.len(), 10);
+    assert!(loaded.waiting.is_empty());
+    assert_eq!(loaded.jobs[0].id, "job-140");
+    assert_eq!(loaded.jobs[0].files, s.jobs[140].files);
+    drop(service);
+    assert_eq!(
+        Service::load(path.clone()).unwrap().snapshot().jobs.len(),
+        10
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn live_action_is_rejected_in_new_automation_settings() {
+    let mut c = config();
+    c["types"] = json!(["真人剧", "漫剧"]);
+    assert!(validate_config(c).is_err());
+}
+
+#[test]
+fn legacy_live_action_selection_is_removed_on_load_without_broadening_scope() {
+    let path = temporary();
+    for (types, expected, mode) in [
+        (json!(["真人剧", "漫剧"]), json!(["漫剧"]), Mode::Running),
+        (json!(["真人剧"]), json!([]), Mode::Paused),
+    ] {
+        let mut c = config();
+        c["types"] = types;
+        storage::save(
+            &path,
+            &Snapshot {
+                config: Some(c),
+                mode: Mode::Running,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let s = Service::load(path.clone()).unwrap().snapshot();
+        assert_eq!(s.config.as_ref().unwrap()["types"], expected);
+        assert_eq!(s.mode, mode);
+        assert_eq!(storage::load(&path).unwrap().config, s.config);
+    }
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

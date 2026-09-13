@@ -11,7 +11,7 @@ export type UploadPreferences = {
   paidPromotion: boolean;
   subtitleLanguage: string;
 };
-const defaults: UploadPreferences = { uploadFormat: "auto", privacy: "private", categoryId: "1", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" };
+const defaults: UploadPreferences = { uploadFormat: "auto", privacy: "private", categoryId: "24", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" };
 export function readUploadPreferences(): UploadPreferences {
   try {
     const value = JSON.parse(window.localStorage.getItem(KEY) || "{}");

@@ -1,3 +1,4 @@
+import { MediaConcurrencyControl } from "../components/MediaConcurrencyControl";
 import { AutomationJobs } from "./AutomationJobs";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { isTauri } from "@tauri-apps/api/core";
@@ -15,7 +16,7 @@ const defaults = {
   ...studioDefaults,
   uploadFormat: "auto" as YouTubeUploadFormat,
   firstEpisodeShorts: false,
-  interval: "5", types: ["真人剧", "漫剧", "AI剧"], scope: "today", orientation: "all",
+  interval: "5", types: ["漫剧", "AI剧"], scope: "today", orientation: "all",
   keywords: "", exclude: "", completeOnly: true, definition: "auto", concurrency: "1",
   separate: true, subtitles: true, subtitleSource: "original", subtitleFormat: "srt", retries: "3",
   channel: "", privacy: "private", title: "{剧名}", description: "{简介}", tags: "{分类标签}, {剧名}",
@@ -65,7 +66,7 @@ function normalizeDraft(value: unknown): Draft {
       result.coverSource = defaults.coverSource;
       result.metadataSource = defaults.metadataSource;
     }
-    result.concurrency = String(Math.max(1, Math.min(3, Math.trunc(Number((value as Record<string, unknown>).concurrency) || 1))));
+    result.concurrency = "1";
     if (!Object.prototype.hasOwnProperty.call(scopes, result.scope)) result.scope = defaults.scope;
     if (!["source", "moyuu", "jucodex"].includes(result.coverSource)) result.coverSource = defaults.coverSource;
     if (!["template", "deepseek", "jucodex"].includes(result.metadataSource)) result.metadataSource = defaults.metadataSource;
@@ -101,7 +102,8 @@ function metadataExample(template: string, limit: number) {
   return template.replace(/\{(?:剧名|集数|简介|分类标签)\}/g, (key) => variables[key]).slice(0, limit);
 }
 
-export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtimeEnabled = isTauri() }: {
+export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcurrency, onAIConcurrencyChange, runtimeEnabled = isTauri() }: {
+  aiConcurrency?: number; onAIConcurrencyChange?: (value: number) => Promise<void>;
   saveDir: string; channels?: YouTubeChannel[]; onOpenSettings?: () => void; runtimeEnabled?: boolean;
 }) {
   const [draft, setDraft] = useState<Draft>(readDraft);
@@ -197,7 +199,8 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
   const modeText = !runtimeEnabled ? "浏览器预览" : !loaded ? "连接后台中" : ({ stopped: "已停止", running: "运行中", paused: "已暂停" }[mode]);
   const savedChannel = channels.find(channel => channel.channelId === snapshot?.config?.channel)?.title || String(snapshot?.config?.channel || "未选择");
   const savedPrivacy = ({ private: "私享", unlisted: "不公开列出", public: "公开" } as Record<string, string>)[String(snapshot?.config?.privacy)] || "未设置";
-  const savedGroups = Math.max(1, Math.min(3, Math.trunc(Number(snapshot?.config?.concurrency) || 1)));
+  const activeGroupCount = snapshot?.jobs.filter(job => job.status !== "completed" && job.status !== "skipped").length || 0;
+  const groupActive = activeGroupCount > 0;
   const canStart = runtimeEnabled && loaded && !!snapshot?.config && !dirty && !pending && mode === "stopped";
   function timeLabel(value: number) { return value ? new Date(value < 1e12 ? value * 1000 : value).toLocaleString() : "尚无"; }
   function toggle(key: ToggleKey, title: string, hint: string) {
@@ -221,10 +224,10 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
         <button type="button" disabled={!loaded || !!pending || mode !== "running"} onClick={() => void perform("暂停", () => automationRuntime.control("pause"))}>暂停</button>
         <button type="button" disabled={!loaded || !!pending || mode !== "paused"} onClick={() => void perform("继续", () => automationRuntime.control("resume"))}>继续运行</button>
         <button type="button" disabled={!loaded || !!pending || mode === "stopped"} onClick={() => void perform("停止", () => automationRuntime.control("stop"))}>停止</button>
-        <button type="button" disabled={!loaded || !!pending || mode !== "running"} onClick={() => void perform("立即扫描", () => automationRuntime.control("scan"))}>立即扫描</button>
+        <button type="button" disabled={!loaded || !!pending || mode !== "running" || groupActive} onClick={() => void perform("立即扫描", () => automationRuntime.control("scan"))}>立即扫描</button>
       </div></div>
-      <p className="auto-runtime-meta">已保存目标：{savedChannel} · {savedPrivacy}。上次扫描：{timeLabel(snapshot?.lastScan || 0)}；下次扫描：{mode === "running" ? timeLabel(snapshot?.nextScan || 0) : "等待启动或继续"}。</p>
-      <div className="auto-batch-summary"><strong>{savedGroups} 组 · 每组 10 部 · 最多 {savedGroups * 10} 部同时推进</strong><p>组内并发下载，每部独立合并、分离、上传，完成一部自动补入下一部。上传时继续下载和处理；CPU/GPU 按资源余量执行，组内积压满额时等待空位。</p></div>
+      <p className="auto-runtime-meta">已保存目标：{savedChannel} · {savedPrivacy}。上次扫描：{timeLabel(snapshot?.lastScan || 0)}；下次扫描：{mode === "running" ? groupActive ? "本组全部结束后" : timeLabel(snapshot?.nextScan || 0) : "等待启动或继续"}。</p>
+      <div className="auto-batch-summary"><strong>每轮 1 组 · 每组最多 10 部</strong><p>本组未完成 {activeGroupCount} 部 · {groupActive ? "处理本组期间暂停监听" : "等待下一轮监听"}</p><p>每轮只接收最多 10 部，其余监听结果不保留、不进入等待列表。本组全部完成或跳过后，再重新监听并创建下一组。组内按设置并发处理，已开始的媒体任务不被新任务替换。</p></div>
       {(error || pollError) && <p className="auto-runtime-error" role="alert">{error || pollError}</p>}
       {pending && <p className="auto-runtime-meta" role="status">{pending}，请等待…</p>}
       {snapshot?.warning && <p className="auto-runtime-error">{snapshot.warning}</p>}
@@ -248,7 +251,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
         <div className="auto-demo-result" role="status"><strong>{demoOutcome.title}</strong><p>{demoOutcome.detail}</p></div>
       </section>
       <div className="auto-path"><span>下载目录 · 沿用应用设置</span><code>{saveDir || "尚未设置"}</code>{onOpenSettings && <button className="text-action" type="button" onClick={onOpenSettings}>前往设置修改 →</button>}</div></>}
-      {tab === 1 && <><div className="auto-panel-heading"><h2>准备完整成片</h2><p>每个阶段成功后才进入下一步；缺集或文件校验失败时暂停该剧。</p></div><div className="auto-fixed"><CheckIcon size={16} /><div><strong>自动下载、解密与全集合并</strong><small>按集数顺序合并，检查文件、时长和完整性。</small></div><span>必选步骤</span></div>{toggle("separate", "分离背景音乐", "生成保留人声的成片，已成功处理的文件不重复分离。")}{toggle("subtitles", "提取字幕", "生成独立字幕文件，随成片上传到 YouTube。")}
+      {tab === 1 && <><div className="auto-panel-heading"><h2>准备完整成片</h2><p>每个阶段成功后才进入下一步；缺集或文件校验失败时暂停该剧。</p></div><div className="auto-fixed"><CheckIcon size={16} /><div><strong>自动下载、解密与全集合并</strong><small>按集数顺序合并，检查文件、时长和完整性。</small></div><span>必选步骤</span></div>{toggle("separate", "分离背景音乐", "生成保留人声的成片，已成功处理的文件不重复分离。")}{onAIConcurrencyChange && <MediaConcurrencyControl max={5} value={aiConcurrency} onChange={onAIConcurrencyChange} />}{toggle("subtitles", "提取字幕", "生成独立字幕文件，随成片上传到 YouTube。")}
       <div className="auto-grid"><Field label="字幕识别音轨"><select disabled={!draft.subtitles} value={draft.subtitleSource} onChange={(e) => update("subtitleSource", e.target.value)}><option value="original">原始音轨</option><option value="vocal" disabled={!draft.separate}>分离后的人声音轨</option></select></Field><Field label="字幕文件格式"><select disabled={!draft.subtitles} value={draft.subtitleFormat} onChange={(e) => update("subtitleFormat", e.target.value)}><option value="srt">SRT 字幕</option><option value="vtt">VTT 字幕</option></select></Field></div><div className="auto-inline-note">分离模型、字幕模型与计算设备沿用「设置 → 媒体处理模型」。模型未安装时暂停对应任务。</div></>}
       {tab === 2 && <><div className="auto-panel-heading"><h2>查重后上传到指定频道</h2><p>保留上传记录，避免同一部剧反复发布。</p></div><div className="auto-grid"><Field label="目标 YouTube 频道"><select value={draft.channel} onChange={(e) => update("channel", e.target.value)}><option value="">请选择已授权频道</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.title}</option>)}{draft.channel && !channels.some((c) => c.channelId === draft.channel) && <option value={draft.channel} disabled>原频道授权不可用，请重新选择</option>}</select></Field><Field label="上传可见性"><select value={draft.privacy} onChange={(e) => update("privacy", e.target.value)}><option value="private">私享</option><option value="unlisted">不公开列出</option><option value="public">公开</option></select></Field></div>{!channels.length && <div className="auto-inline-note">尚无已授权频道。{onOpenSettings && <button type="button" className="text-action" onClick={onOpenSettings}>前往设置连接 YouTube →</button>}</div>}
       <UploadFormatPicker value={draft.uploadFormat} onChange={value => update("uploadFormat", value)} />
@@ -286,8 +289,8 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
         aiMetadataApplied: true, title, description, tags: tags.join(", ") })); markDirty();
       }} onFallback={() => { setDraft(current => current.aiMetadataApplied ? { ...current, title: current.nonAiTitle, description: current.nonAiDescription, tags: current.nonAiTags, aiMetadataApplied: false } : current); markDirty(); setMessage("AI Key 不可用，已保留或恢复非 AI 上传模板；按原上传方式继续。"); }} /></div>
       {tab === 4 && <><div className="auto-panel-heading"><h2>成功后清理，失败时保留</h2><p>清理仅针对本次自动任务生成的媒体文件，始终保留剧名、唯一 ID 与处理记录作为去重标记。</p></div>{toggle("deleteEpisodes", "删除单集视频", draft.firstEpisodeShorts ? "正片和首集 Shorts、封面与字幕全部成功后清理；失败保留文件。" : "正片上传处理、封面与已启用的字幕全部成功后删除。")}{toggle("deleteFinal", "上传完成后删除本地成片", "全部上传成功后清理；同时启用删除单集时，字幕移至字幕留存，完整清理本任务文件夹。")}{toggle("keepSubtitles", "保留字幕文件", "完整清理任务文件夹时，将字幕移至「自动追剧/字幕留存」，保留去重记录。")}
-      <div className="auto-grid"><Field label="并发处理组数" hint="每组 10 部，完成后自动补位；不等待整组同步。重试中的任务保留名额，合并与 AI 按 CPU/GPU 余量执行。"><select aria-label="并发处理组数" value={draft.concurrency} onChange={(e) => update("concurrency", e.target.value)}>{[1, 2, 3].map((n) => <option key={n} value={n}>{n} 组 · {n * 10} 部{n === 1 ? "（默认）" : ""}</option>)}</select></Field><Field label="快速重试次数" hint="快速重试用完后每 15 分钟自动继续，无需手动点击；暂停和停止会暂停重试。"><select value={draft.retries} onChange={(e) => update("retries", e.target.value)}>{[0, 1, 3, 5].map((n) => <option key={n} value={n}>{n === 0 ? "仅定时重试" : `${n} 次后转为定时重试`}</option>)}</select></Field><Field label="磁盘剩余空间下限"><select value={draft.minDisk} onChange={(e) => update("minDisk", e.target.value)}>{[10, 20, 50, 100].map((n) => <option key={n} value={n}>{n} GB</option>)}</select></Field></div>{toggle("resume", "重启后恢复未完成任务", "从上次成功的步骤继续，避免重复下载和上传。")}{toggle("notify", "任务结果通知", "整部剧完成时发送通知；可恢复错误由后台定时重试。")}</>}
+      <div className="auto-grid"><div className="auto-fixed"><strong>每轮 1 组 · 最多 10 部</strong><small>本组全部结束后重新监听；本轮未入组选项不保留。</small></div><Field label="快速重试次数" hint="快速重试用完后每 15 分钟自动继续，无需手动点击；暂停和停止会暂停重试。"><select value={draft.retries} onChange={(e) => update("retries", e.target.value)}>{[0, 1, 3, 5].map((n) => <option key={n} value={n}>{n === 0 ? "仅定时重试" : `${n} 次后转为定时重试`}</option>)}</select></Field><Field label="磁盘剩余空间下限"><select value={draft.minDisk} onChange={(e) => update("minDisk", e.target.value)}>{[10, 20, 50, 100].map((n) => <option key={n} value={n}>{n} GB</option>)}</select></Field></div>{toggle("resume", "重启后恢复未完成任务", "从上次成功的步骤继续，避免重复下载和上传。")}{toggle("notify", "任务结果通知", "整部剧完成时发送通知；可恢复错误由后台定时重试。")}</>}
     </div><footer className="auto-editor-footer"><span role="status">{pending ? `${pending}，请等待…` : message || (dirty ? "有未保存的修改；启动前请保存" : runtimeEnabled ? "编辑区为设置草稿；已有任务保留创建时的配置" : "浏览器设置草稿")}</span><button className="primary-button" type="button" disabled={!!pending || !loaded} onClick={() => void save()}>{runtimeEnabled ? "保存设置" : "保存设置草稿"}</button></footer></section>
-    <aside className="auto-summary"><div className="auto-summary-title"><AutomationIcon size={20} /><h2>下次启动方案</h2><span>草稿</span></div><dl><div><dt>监听时段</dt><dd>全天 24 小时</dd></div><div><dt>扫描频率</dt><dd>每 {draft.interval} 分钟</dd></div><div><dt>剧目类型</dt><dd>{draft.types.join(" / ") || "尚未选择"}</dd></div><div><dt>剧目范围</dt><dd>{scopes[draft.scope]}</dd></div><div><dt>去重规则</dt><dd>YouTube + 本地记录</dd></div><div><dt>文案 / 封面</dt><dd>{draft.metadataSource === "jucodex" ? "Jucodex" : draft.metadataSource === "deepseek" ? (draft.textModel === "deepseek-v4-flash" ? "DeepSeek V4 Flash" : "DeepSeek V4 Pro") : "手动模板"}<br />{draft.coverSource === "jucodex" ? "Jucodex" : draft.coverSource === "moyuu" ? "Moyuu AI" : "源封面"}</dd></div><div><dt>并发处理</dt><dd>{draft.concurrency} 组 · {Number(draft.concurrency) * 10} 部<br /><small>每组 10 部 · 自动补位</small></dd></div><div><dt>上传频道</dt><dd>{channels.find((c) => c.channelId === draft.channel)?.title || "尚未选择"}</dd></div><div><dt>首集 Shorts</dt><dd>{draft.firstEpisodeShorts ? "额外上传 · 正片成功后" : "关闭 · 仅上传正片"}</dd></div><div><dt>字幕上传</dt><dd>{draft.subtitles ? "随成片上传" : "不上传"}</dd></div></dl><div className="auto-summary-rules"><h3>异常处理约定</h3><p><CheckIcon size={14} />缺集或处理失败，保留源文件</p><p><CheckIcon size={14} />{draft.firstEpisodeShorts ? "正片与首集分别查重，跳过已完成项" : "确认重复才跳过，疑似项待核对"}</p><p><CheckIcon size={14} />清理媒体，保留剧名与 ID 记录</p><p><CheckIcon size={14} />查重失败，等待重试</p><p><CheckIcon size={14} />AI Key 不可用，按原方式上传</p><p><CheckIcon size={14} />上传失败，不清理本地成片</p><p><CheckIcon size={14} />磁盘不足 {draft.minDisk} GB，暂停下载</p></div><button type="button" className="auto-start" disabled={!canStart} onClick={() => setConfirmStart(true)}>启动 24 小时自动任务</button><small className="auto-start-hint">{!runtimeEnabled ? "浏览器预览不能执行后台任务" : dirty ? "有未保存的修改，请先保存" : !snapshot?.config ? "请先保存后台配置" : "启动使用后台已保存的配置"}</small></aside></div>
+    <aside className="auto-summary"><div className="auto-summary-title"><AutomationIcon size={20} /><h2>下次启动方案</h2><span>草稿</span></div><dl><div><dt>监听时段</dt><dd>全天 24 小时</dd></div><div><dt>扫描频率</dt><dd>每 {draft.interval} 分钟</dd></div><div><dt>剧目类型</dt><dd>{draft.types.join(" / ") || "尚未选择"}</dd></div><div><dt>剧目范围</dt><dd>{scopes[draft.scope]}</dd></div><div><dt>去重规则</dt><dd>YouTube + 本地记录</dd></div><div><dt>文案 / 封面</dt><dd>{draft.metadataSource === "jucodex" ? "Jucodex" : draft.metadataSource === "deepseek" ? (draft.textModel === "deepseek-v4-flash" ? "DeepSeek V4 Flash" : "DeepSeek V4 Pro") : "手动模板"}<br />{draft.coverSource === "jucodex" ? "Jucodex" : draft.coverSource === "moyuu" ? "Moyuu AI" : "源封面"}</dd></div><div><dt>并发处理</dt><dd>1 组 · 最多 10 部<br /><small>整组结束后再监听</small></dd></div><div><dt>上传频道</dt><dd>{channels.find((c) => c.channelId === draft.channel)?.title || "尚未选择"}</dd></div><div><dt>首集 Shorts</dt><dd>{draft.firstEpisodeShorts ? "额外上传 · 正片成功后" : "关闭 · 仅上传正片"}</dd></div><div><dt>字幕上传</dt><dd>{draft.subtitles ? "随成片上传" : "不上传"}</dd></div></dl><div className="auto-summary-rules"><h3>异常处理约定</h3><p><CheckIcon size={14} />缺集或处理失败，保留源文件</p><p><CheckIcon size={14} />{draft.firstEpisodeShorts ? "正片与首集分别查重，跳过已完成项" : "确认重复才跳过，疑似项待核对"}</p><p><CheckIcon size={14} />清理媒体，保留剧名与 ID 记录</p><p><CheckIcon size={14} />查重失败，等待重试</p><p><CheckIcon size={14} />AI Key 不可用，按原方式上传</p><p><CheckIcon size={14} />上传失败，不清理本地成片</p><p><CheckIcon size={14} />磁盘不足 {draft.minDisk} GB，暂停下载</p></div><button type="button" className="auto-start" disabled={!canStart} onClick={() => setConfirmStart(true)}>启动 24 小时自动任务</button><small className="auto-start-hint">{!runtimeEnabled ? "浏览器预览不能执行后台任务" : dirty ? "有未保存的修改，请先保存" : !snapshot?.config ? "请先保存后台配置" : "启动使用后台已保存的配置"}</small></aside></div>
   </main>;
 }

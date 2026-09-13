@@ -177,7 +177,7 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         || c["types"].as_array().is_none_or(|a| {
             a.is_empty()
                 || a.iter()
-                    .any(|v| !["真人剧", "漫剧", "AI剧"].contains(&v.as_str().unwrap_or("")))
+                    .any(|v| !["漫剧", "AI剧"].contains(&v.as_str().unwrap_or("")))
         })
     {
         return Err(AppError::new(
@@ -265,6 +265,8 @@ pub struct Task {
     pub stage: String,
     pub status: Status,
     pub message: String,
+    #[serde(default)]
+    pub media_state: Option<String>,
     pub progress: f64,
     pub episode_done: usize,
     pub episode_total: usize,
@@ -330,6 +332,7 @@ impl Task {
             stage: "inspect".into(),
             status: Status::Pending,
             message: "等待检查源目录与频道记录".into(),
+            media_state: None,
             progress: 0.0,
             episode_done: 0,
             episode_total: 0,
@@ -382,6 +385,7 @@ impl Task {
         self.retry_ready = true;
     }
     pub fn next(&mut self, stage: &str, message: &str) {
+        self.media_state = None;
         self.stage = stage.into();
         self.message = message.into();
         self.status = Status::Pending;
@@ -407,6 +411,8 @@ pub struct Snapshot {
     pub config: Option<Value>,
     pub mode: Mode,
     pub jobs: Vec<Task>,
+    #[serde(default)]
+    pub waiting: Vec<Task>,
     pub logs: Vec<Log>,
     pub last_scan: u64,
     pub next_scan: u64,

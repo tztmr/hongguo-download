@@ -314,3 +314,110 @@ fn resumed_cleanup_is_idempotent_and_preserves_stage_handles_and_identity() {
     assert!(!final_path.exists());
     assert_eq!(serde_json::to_value(&f.task).unwrap(), before);
 }
+
+#[test]
+fn missing_derived_input_rebuilds_from_verified_originals_without_redownload() {
+    let mut f = Fixture::new();
+    f.task.main_done = false;
+    f.task.stage = "separate".into();
+    f.task.files = vec![f.owned("0001.mp4"), f.owned("0002.mp4")];
+    f.task.episode_done = 2;
+    f.task.episode_total = 2;
+    let missing = f.task.root.join("合并视频/成片.mp4");
+    f.task.merged = Some(missing.clone());
+    f.task.prepared = Some(missing.clone());
+    f.task.merge_job = Some("old-merge".into());
+    f.task.separate_job = Some("old-separate".into());
+    let files = f.task.files.clone();
+    assert!(recover_missing_media_input(&mut f.task, &missing).unwrap());
+    assert_eq!(f.task.stage, "merge");
+    assert_eq!(f.task.files, files);
+    assert!(f.task.merge_job.is_none());
+    assert!(f.task.separate_job.is_none());
+    assert!(f.task.message.contains("重建"));
+}
+
+#[test]
+fn missing_vocals_reuses_verified_merged_video() {
+    let mut f = Fixture::new();
+    f.task.main_done = false;
+    f.task.stage = "subtitles".into();
+    f.task.config["separate"] = json!(true);
+    f.task.merged = Some(f.owned("合并视频/成片.mp4"));
+    let missing = f.task.root.join("音频分离/成片.mp4");
+    f.task.prepared = Some(missing.clone());
+    assert!(recover_missing_media_input(&mut f.task, &missing).unwrap());
+    assert_eq!(f.task.stage, "separate");
+    assert_eq!(f.task.prepared, f.task.merged);
+}
+
+#[test]
+fn missing_media_recovery_rejects_changed_source_and_never_rewinds_uploaded_work() {
+    let mut f = Fixture::new();
+    f.task.main_done = false;
+    f.task.stage = "subtitles".into();
+    let original = f.owned("0001.mp4");
+    f.task.files = vec![original.clone()];
+    f.task.episode_done = 1;
+    f.task.episode_total = 1;
+    fs::write(original, b"changed").unwrap();
+    let missing = f.task.root.join("missing.mp4");
+    assert!(recover_missing_media_input(&mut f.task, &missing).is_err());
+    assert_eq!(f.task.stage, "subtitles");
+    f.task.main_done = true;
+    assert!(!recover_missing_media_input(&mut f.task, &missing).unwrap());
+    assert_eq!(f.task.stage, "subtitles");
+}
+
+#[test]
+fn missing_completed_media_output_is_not_reused_but_active_work_is_preserved() {
+    let f = Fixture::new();
+    let path = f.task.root.join("missing.mp4");
+    let mut job: MediaJob = serde_json::from_value(json!({
+        "id":"old", "dedupeKey":"old", "kind":"merge", "status":"completed",
+        "stage":"completed", "percent":100, "inputs":[], "outputPath":path
+    }))
+    .unwrap();
+    assert!(!reusable_media(&job));
+    job.status = MediaJobStatus::Running;
+    assert!(reusable_media(&job));
+    job.status = MediaJobStatus::Completed;
+    fs::write(&path, b"output").unwrap();
+    assert!(reusable_media(&job));
+}
+
+#[test]
+fn a_scan_of_150_creates_only_one_group_and_never_fills_partial_group() {
+    let f = Fixture::new();
+    let config = json!({"channel":"fixture-channel", "concurrency":"3"});
+    let candidates: Vec<_> = (0..150)
+        .map(|i| {
+            let mut c = f.task.source.clone();
+            c.book_id = format!("book-{i}");
+            c
+        })
+        .collect();
+    let mut snapshot = Snapshot {
+        config: Some(config.clone()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    assert_eq!(
+        admit_group(&mut snapshot, candidates.clone(), &config, &f.base),
+        10
+    );
+    assert_eq!(snapshot.jobs.len(), 10);
+    assert!(snapshot.waiting.is_empty());
+    for job in snapshot.jobs.iter_mut().take(9) {
+        job.status = Status::Completed;
+    }
+    assert_eq!(
+        admit_group(&mut snapshot, candidates.clone(), &config, &f.base),
+        0
+    );
+    snapshot.jobs[9].status = Status::Completed;
+    assert_eq!(admit_group(&mut snapshot, candidates, &config, &f.base), 10);
+    assert_eq!(snapshot.jobs.len(), 20);
+    assert_eq!(snapshot.jobs[10].book_id, "book-10");
+    assert!(snapshot.waiting.is_empty());
+}

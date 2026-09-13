@@ -6,6 +6,17 @@ const statuses = { pending: "等待 / 后台处理中", working: "处理中", re
 type Filter = "active" | "attention" | "completed" | "all";
 const finished = (job: AutomationJob) => job.status === "completed" || job.status === "skipped";
 const attention = (job: AutomationJob) => job.status === "failed" || job.status === "review";
+const activityStatus = (job: AutomationJob) => (job.status === "pending" || job.status === "working") && job.mediaState
+  ? job.mediaState === "running" ? "working" : "pending"
+  : job.status;
+const activityLabel = (job: AutomationJob) => {
+  if (job.status === "pending" || job.status === "working") {
+    if (job.mediaState === "running") return "处理中";
+    if (job.mediaState === "queued") return "排队中";
+    if (job.mediaState === "paused") return "已暂停";
+  }
+  return statuses[job.status];
+};
 const time = (value: number) => new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
 
 export function AutomationJobs({ jobs, loaded, pending, onAction }: { jobs: AutomationJob[]; loaded: boolean; pending: boolean; onAction: (id: string, action: "continue" | "skip" | "retry") => void }) {
@@ -13,17 +24,19 @@ export function AutomationJobs({ jobs, loaded, pending, onAction }: { jobs: Auto
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const counts = { active: jobs.filter(job => !finished(job)).length, attention: jobs.filter(attention).length, completed: jobs.filter(finished).length, all: jobs.length };
-  const visible = jobs.filter(job => (filter === "all" || filter === "active" && !finished(job) || filter === "attention" && attention(job) || filter === "completed" && finished(job)) && `${job.title} ${job.bookId}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
-    .sort((a, b) => Number(b.status === "working") - Number(a.status === "working") || Number(attention(b)) - Number(attention(a)) || b.updatedAt - a.updatedAt);
+  // The backend appends jobs in queue order. Polling changes status and updatedAt
+  // even while a media job waits, so neither value is a stable display order.
+  const visible = jobs.filter(job => (filter === "all" || filter === "active" && !finished(job) || filter === "attention" && attention(job) || filter === "completed" && finished(job)) && `${job.title} ${job.bookId}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   const pages = Math.max(1, Math.ceil(visible.length / 20));
   const currentPage = Math.min(page, pages);
   useEffect(() => setPage(1), [filter, query]);
   return <div className="auto-task-board">
+    <p className="auto-runtime-meta">按入队顺序显示 · 进度自动更新，任务不随刷新重新排序</p>
     <div className="auto-task-toolbar"><div className="auto-task-filters" aria-label="后台任务筛选">{([['active', '未完成'], ['attention', '需关注'], ['completed', '已结束'], ['all', '全部']] as const).map(([id, label]) => <button type="button" key={id} aria-pressed={filter === id} onClick={() => setFilter(id)}>{label}<span>{counts[id]}</span></button>)}</div><input type="search" aria-label="搜索后台任务" placeholder="搜索剧名或 ID" value={query} onChange={e => setQuery(e.target.value)} /></div>
     <div className="auto-runtime-jobs">{!visible.length ? <p className="auto-runtime-empty">{!loaded ? "正在读取后台状态…" : !jobs.length ? "尚无后台任务。保存并启动后显示真实进度。" : filter === "active" && !query ? "当前任务已全部结束，可在「已结束」查看上传与清理结果。" : "没有符合条件的任务"}</p> : visible.slice((currentPage - 1) * 20, currentPage * 20).map(job => {
       const progress = Math.round(Math.max(0, Math.min(100, job.progress || 0)));
-      return <article className={`auto-runtime-job status-${job.status}`} key={job.id} aria-label={`${job.title}任务`}>
-        <header className="auto-task-title"><strong>{job.title}{job.season && <small>第 {job.season} 季</small>}</strong><span className="auto-task-status">{statuses[job.status]}</span></header>
+      return <article className={`auto-runtime-job status-${activityStatus(job)}`} key={job.id} aria-label={`${job.title}任务`}>
+        <header className="auto-task-title"><strong>{job.title}{job.season && <small>第 {job.season} 季</small>}</strong><span className="auto-task-status">{activityLabel(job)}</span></header>
         <div className="auto-task-stage"><b>{labels[job.stage] || job.stage}</b>{!finished(job) && <span>阶段进度 {progress}%</span>}</div>
         {!finished(job) && <progress max={100} value={progress} aria-label={`${job.title}进度`} />}
         <p className="auto-task-message">{job.message}</p>

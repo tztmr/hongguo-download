@@ -1145,11 +1145,7 @@ fn worker_loop(
                     break;
                 }
                 let active: Vec<_> = running.values().map(|job| job.budget).collect();
-                let concurrency = if cfg!(windows) {
-                    context.concurrency.load(AtomicOrdering::Acquire)
-                } else {
-                    0
-                };
+                let concurrency = context.concurrency.load(AtomicOrdering::Acquire);
                 // Take the oldest runnable job, allowing an available GPU/CPU
                 // lane to pass a job waiting on the other device on Windows.
                 let mut selected = None;
@@ -2863,6 +2859,95 @@ mod tests {
         );
         completed.lock().unwrap().insert("refill-5".into());
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "refill-6");
+    }
+
+    #[test]
+    fn manual_single_slot_finishes_its_worker_before_starting_the_next() {
+        struct FinishingAI {
+            started: mpsc::Sender<String>,
+            completed: Arc<Mutex<HashSet<String>>>,
+        }
+        impl AIExecutor for FinishingAI {
+            fn execute(
+                &self,
+                request: ValidatedAIJobRequest,
+                cancellation: &CancellationToken,
+                _progress: &mut dyn FnMut(MergeProgress),
+            ) -> Result<AIExecutionResult, AppError> {
+                self.started.send(request.book_id.clone()).unwrap();
+                loop {
+                    if cancellation.is_cancelled() {
+                        return Err(AppError::new("AI_CANCELLED", "cancelled"));
+                    }
+                    if self.completed.lock().unwrap().contains(&request.book_id) {
+                        return Ok(AIExecutionResult {
+                            output_path: request.inputs[0].path.clone(),
+                            outputs: Vec::new(),
+                        });
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        let (tx, rx) = mpsc::channel();
+        let completed = Arc::new(Mutex::new(HashSet::new()));
+        let service = MediaJobService::with_resource_probe_and_limit(
+            manager,
+            Arc::new(ImmediateExecutor),
+            Arc::new(FinishingAI {
+                started: tx,
+                completed: completed.clone(),
+            }),
+            Arc::new(RecordingSink::default()),
+            Box::new(|| scheduling::Resources {
+                cores: 64,
+                cpu_usage: Some(0.0),
+                available_memory: Some(128 * scheduling::GIB),
+                gpu: None,
+            }),
+            1,
+        );
+        let jobs: Vec<_> = (0..2)
+            .map(|i| {
+                service
+                    .start_ai(
+                        StartAIJobRequest {
+                            book_id: format!("sticky-{i}"),
+                            title: "连续处理测试".into(),
+                            series_root: fixture.series.clone(),
+                            scope: MediaJobScope::Episodes,
+                            inputs: vec![fixture.write_input(&format!("sticky-{i}.mp4"), b"input")],
+                            model: "htdemucs".into(),
+                            device: "cpu".into(),
+                        },
+                        MediaJobKind::SeparateBackgroundMusic,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), "sticky-0");
+        for _ in 0..20 {
+            service.set_concurrency(1);
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        assert_eq!(
+            service.manager.job(&jobs[0].id).unwrap().status,
+            MediaJobStatus::Running
+        );
+        assert_eq!(
+            service.manager.job(&jobs[1].id).unwrap().status,
+            MediaJobStatus::Queued
+        );
+        completed.lock().unwrap().insert("sticky-0".into());
+        assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), "sticky-1");
+        assert_eq!(
+            service.manager.job(&jobs[0].id).unwrap().status,
+            MediaJobStatus::Completed
+        );
+        completed.lock().unwrap().insert("sticky-1".into());
+        wait_for_job(&service, &jobs[1].id, MediaJobStatus::Completed);
     }
 
     #[test]

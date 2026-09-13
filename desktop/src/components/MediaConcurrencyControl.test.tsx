@@ -24,3 +24,8 @@ it("keeps the saved selection and shows a failed update", async () => {
   expect(view.getByRole("alert").textContent).toContain("保存失败");
   expect(view.getByRole("combobox")).toHaveProperty("value", "5");
 });
+
+it("limits macOS choices to automatic or one through five", () => {
+  const view = render(<MediaConcurrencyControl max={5} value={0} onChange={vi.fn()} />);
+  expect(view.getAllByRole("option").map(o => (o as HTMLOptionElement).value)).toEqual(["0", "1", "2", "3", "4", "5"]);
+});

@@ -1,7 +1,7 @@
 import { useState } from "react";
 
-export function MediaConcurrencyControl({ value = 0, onChange, disabled = false }: {
-  value?: number; onChange: (value: number) => Promise<void>; disabled?: boolean;
+export function MediaConcurrencyControl({ value = 0, onChange, disabled = false, max = 10 }: {
+  value?: number; onChange: (value: number) => Promise<void>; disabled?: boolean; max?: number;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -15,7 +15,7 @@ export function MediaConcurrencyControl({ value = 0, onChange, disabled = false 
         finally { setBusy(false); }
       }}>
         <option value={0}>自动（最多 5 个）</option>
-        {Array.from({ length: 10 }, (_, i) => i + 1).map(n => <option value={n} key={n}>{n} 个任务</option>)}
+        {Array.from({ length: max }, (_, i) => i + 1).map(n => <option value={n} key={n}>{n} 个任务</option>)}
       </select>
     </label>
     <small>分离与字幕共用名额，完成一个自动补入一个。设置会保留；降低上限不打断正在处理的任务。内存或显存不足时等待。</small>

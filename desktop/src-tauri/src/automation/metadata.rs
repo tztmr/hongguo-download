@@ -210,7 +210,7 @@ fn generated(result: &Value, task: &Task) -> Option<Value> {
     };
     Some(
         json!({"title":clamp(title,100),"description":description,"tags":generated_tags,
-        "categoryId":category(&result["category_suggestion"],text(&task.config,"category"))}),
+        "categoryId":category(&task.config["category"],"24")}),
     )
 }
 
@@ -694,6 +694,17 @@ mod tests {
             std::env::temp_dir(),
         )
     }
+    #[test]
+    fn ai_category_respects_upload_setting_and_defaults_to_entertainment() {
+        let mut task = task();
+        let result = json!({"recommended_title":"剧情冲突标题","description":"剧情简介","tags":["短剧"],"category_suggestion":{"id":"22"}});
+        assert_eq!(generated(&result, &task).unwrap()["categoryId"], "24");
+        task.config["category"] = json!("1");
+        assert_eq!(generated(&result, &task).unwrap()["categoryId"], "1");
+        task.config.as_object_mut().unwrap().remove("category");
+        assert_eq!(generated(&result, &task).unwrap()["categoryId"], "24");
+    }
+
     #[test]
     fn source_templates_do_not_expand_tokens_in_source() {
         let task = task();

@@ -30,6 +30,23 @@ pub struct Service {
 impl Service {
     pub fn load(path: PathBuf) -> Result<Arc<Self>, AppError> {
         let mut snapshot = storage::load(&path)?;
+        if let Some(types) = snapshot
+            .config
+            .as_mut()
+            .and_then(|c| c["types"].as_array_mut())
+        {
+            if types.iter().any(|v| v.as_str() == Some("真人剧")) {
+                types.retain(|v| v.as_str() != Some("真人剧"));
+                snapshot.cursor.clear();
+                snapshot.cursor_type = 0;
+                if types.is_empty() {
+                    if snapshot.mode == Mode::Running {
+                        snapshot.mode = Mode::Paused;
+                    }
+                    snapshot.warning = "自动追剧已取消真人剧，请选择漫剧或 AI剧后保存设置".into();
+                }
+            }
+        }
         if let Some(config) = snapshot.config.as_ref() {
             if !flag(config, "resume") && snapshot.mode == Mode::Running {
                 snapshot.mode = Mode::Paused;
@@ -63,6 +80,7 @@ impl Service {
                 job.message = "应用重启，核对上次阶段结果后继续".into();
             }
         }
+        pipeline::normalize_group(&mut snapshot);
         snapshot.next_scan = 0;
         storage::save(&path, &snapshot)?;
         Ok(Arc::new(Self {
@@ -85,6 +103,7 @@ impl Service {
         let mut guard = self.state.lock().map_err(|_| unavailable())?;
         let mut next = guard.clone();
         let result = f(&mut next)?;
+        pipeline::normalize_group(&mut next);
         if let Err(error) = storage::save(&self.path, &next) {
             guard.mode = Mode::Paused;
             guard.warning = error.message.clone();
@@ -134,6 +153,7 @@ impl Service {
             .config
             .as_ref()
             .ok_or_else(|| AppError::new("AUTOMATION_NOT_CONFIGURED", "请先保存设置"))?;
+        validate_config(c.clone())?;
         let yt = state.youtube.snapshot();
         if !yt
             .channels
@@ -201,6 +221,12 @@ impl Service {
                 "scan" => {
                     if s.mode != Mode::Running {
                         return Err(AppError::new("AUTOMATION_NOT_RUNNING", "请先启动自动追剧"));
+                    }
+                    if !pipeline::can_scan(s) {
+                        return Err(AppError::new(
+                            "AUTOMATION_GROUP_ACTIVE",
+                            "本组尚未全部结束，完成或跳过后再监听下一组",
+                        ));
                     }
                     s.next_scan = 0;
                 }
@@ -278,7 +304,8 @@ impl Service {
                 if service.running() {
                     let s = service.snapshot();
                     if s.config.is_some() {
-                        if now() >= s.next_scan
+                        if pipeline::can_scan(&s)
+                            && now() >= s.next_scan
                             && service
                                 .scanning
                                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)

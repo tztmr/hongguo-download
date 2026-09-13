@@ -45,18 +45,35 @@ describe("native automation boundaries", () => {
     fireEvent.change(view.getByRole("searchbox", { name: "搜索后台任务" }), { target: { value: "不匹配" } });
     expect(view.queryByRole("article")).toBeNull();
   });
-  it("uses ten dramas per group and saves the selected group count", async () => {
-    state.config = { ...state.config, concurrency: "1" };
+  it("removes live action from options and legacy saved selections", async () => {
+    state.config = { ...state.config, types: ["真人剧", "漫剧", "AI剧"] };
     const view = page(); await loaded(view);
-    expect(view.getByText(/1 组.*每组 10 部.*最多 10 部/)).toBeTruthy();
-    expect(view.getByText(/上传时继续下载和处理/)).toBeTruthy();
-    fireEvent.click(view.getByRole("button", { name: /清理与运行/ }));
-    const groups = view.getByRole("combobox", { name: "并发处理组数" });
-    expect((groups as HTMLSelectElement).value).toBe("1");
-    fireEvent.change(groups, { target: { value: "3" } });
+    expect(view.queryByRole("button", { name: "真人剧" })).toBeNull();
+    expect(view.getByRole("button", { name: "漫剧" }).getAttribute("aria-pressed")).toBe("true");
+    expect(view.getByRole("button", { name: "AI剧" }).getAttribute("aria-pressed")).toBe("true");
     save(view);
-    await waitFor(() => expect(state.config?.concurrency).toBe("3"));
-    expect(view.getByText(/3 组.*每组 10 部.*最多 30 部/)).toBeTruthy();
+    await waitFor(() => expect(state.config?.types).toEqual(["漫剧", "AI剧"]));
+  });
+  it("waits for the whole group and exposes no rolling backlog or group multiplier", async () => {
+    state.mode = "running";
+    state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `job-${i}`, bookId: `book-${i}`, title: `剧目${i}`, stage: "merge", status: i === 0 ? "completed" as const : "pending" as const, message: "等待处理", episodeDone: 2, episodeTotal: 2, progress: 0, updatedAt: 1 }));
+    const view = page(); await loaded(view);
+    expect(view.getByText(/每轮 1 组.*每组最多 10 部/)).toBeTruthy();
+    expect(view.getByText(/本组未完成 9 部/)).toBeTruthy();
+    expect(view.getByRole("button", { name: "立即扫描" })).toHaveProperty("disabled", true);
+    expect(view.queryByText(/待入队 140/)).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: /清理与运行/ }));
+    expect(view.queryByRole("combobox", { name: "并发处理组数" })).toBeNull();
+  });
+  it("persists the real AI concurrency setting from the media tab", async () => {
+    const update = vi.fn().mockResolvedValue(undefined);
+    const view = render(<AutomationPage saveDir="/fixture" runtimeEnabled aiConcurrency={0} onAIConcurrencyChange={update} />);
+    await loaded(view);
+    fireEvent.click(view.getByRole("button", { name: /媒体处理/ }));
+    const select = view.getByRole("combobox", { name: "AI 同时处理" });
+    expect(select.querySelectorAll("option")).toHaveLength(6);
+    fireEvent.change(select, { target: { value: "1" } });
+    await waitFor(() => expect(update).toHaveBeenCalledWith(1));
   });
   it("saves ordered model selections without replacing saved keys and reloads the order", async () => {
     state.config = { ...state.config, coverSource: "moyuu", coverModel: "gpt-image-2.5-sunburst" };
@@ -151,13 +168,13 @@ describe("native automation boundaries", () => {
     fireEvent.click(button(view, "暂停"));
     await waitFor(() => expect(button(view, "继续运行").disabled).toBe(false));
     fireEvent.click(button(view, "继续运行"));
-    await waitFor(() => expect(button(view, "立即扫描").disabled).toBe(false));
-    fireEvent.click(button(view, "立即扫描")); await loaded(view);
+    await waitFor(() => expect(button(view, "暂停").disabled).toBe(false));
+    expect(button(view, "立即扫描").disabled).toBe(true);
     fireEvent.click(button(view, "确认继续处理")); await loaded(view);
     fireEvent.click(button(view, "跳过此任务")); await loaded(view);
     fireEvent.click(button(view, "重试此任务")); await loaded(view);
     fireEvent.click(button(view, "停止")); await loaded(view);
-    for (const action of ["pause", "resume", "scan", "stop"]) expect(invoke).toHaveBeenCalledWith("control_automation", { action });
+    for (const action of ["pause", "resume", "stop"]) expect(invoke).toHaveBeenCalledWith("control_automation", { action });
     for (const action of ["continue", "skip"]) expect(invoke).toHaveBeenCalledWith("review_automation_job", { jobId: "review-id", action });
     expect(invoke).toHaveBeenCalledWith("review_automation_job", { jobId: "retry-id", action: "retry" });
   });

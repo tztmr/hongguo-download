@@ -555,7 +555,7 @@ function DownloadManagerPageView({
       ) : null}
 
       <div hidden={section !== "media"} className="manager-section-content">
-        {media.scheduling?.windows && onAIConcurrencyChange ? <MediaConcurrencyControl value={aiConcurrency} onChange={onAIConcurrencyChange} /> : null}
+        {onAIConcurrencyChange ? <MediaConcurrencyControl max={media.scheduling?.windows ? 10 : 5} value={aiConcurrency} onChange={onAIConcurrencyChange} /> : null}
         <MediaJobsPanel
           media={media}
           batches={manager.state.batches}
@@ -656,7 +656,7 @@ function DownloadManagerPageView({
           }}
         />
       ) : null}
-      {bulkMedia ? <BatchMediaDialog concurrencyControl={media.scheduling?.windows && onAIConcurrencyChange ? <MediaConcurrencyControl value={aiConcurrency} onChange={onAIConcurrencyChange} /> : undefined} targets={bulkMedia.targets} kind={bulkMedia.kind} modelName={bulkModel}
+      {bulkMedia ? <BatchMediaDialog concurrencyControl={onAIConcurrencyChange ? <MediaConcurrencyControl max={media.scheduling?.windows ? 10 : 5} value={aiConcurrency} onChange={onAIConcurrencyChange} /> : undefined} targets={bulkMedia.targets} kind={bulkMedia.kind} modelName={bulkModel}
         aiComponents={aiComponents}
         missingComponents={bulkMissing} canInstall={Boolean(onInstallComponent) && bulkMissing.every(id => aiComponents?.some(item => item.id === id))}
         onInstall={async () => { for (const id of bulkMissing) await onInstallComponent!(id); }}

@@ -237,8 +237,8 @@ fn configured_for_platform(
     if !parallel_kind_for_platform(job.kind, windows) && !active.is_empty() {
         return Err("合并任务等待其他媒体任务完成");
     }
-    let limit = if windows && concurrency > 0 {
-        concurrency.min(10)
+    let limit = if concurrency > 0 {
+        concurrency.min(if windows { 10 } else { MAX_AI_JOBS })
     } else {
         MAX_AI_JOBS
     };
@@ -518,6 +518,15 @@ fn memory_reservation(job: &MediaJob, mps: bool) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mac_manual_limit_keeps_running_slots_until_completion() {
+        let j = job("cpu", "htdemucs");
+        let first = configured_for_platform(&j, &[], idle(), 1, false).unwrap();
+        assert!(configured_for_platform(&j, &[first], idle(), 1, false).is_err());
+        assert!(configured_for_platform(&j, &[], idle(), 1, false).is_ok());
+        assert!(configured_for_platform(&j, &[first; 5], idle(), 10, false).is_err());
+    }
 
     #[test]
     fn windows_manual_slots_allocate_cpu_threads_from_machine_capacity() {

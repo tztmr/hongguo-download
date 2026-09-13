@@ -42,7 +42,7 @@ describe("YouTubeUploadDialog", () => {
     expect(checkUpload).toHaveBeenCalledTimes(2);
   });
 
-  it("defaults to film and animation, synthetic content, and all three confirmations", async () => {
+  it("defaults to entertainment, synthetic content, and all three confirmations", async () => {
     const submit = vi.fn();
     const ordinaryBatch = {
       ...batch,
@@ -51,14 +51,14 @@ describe("YouTubeUploadDialog", () => {
     };
     const view = render(<YouTubeUploadDialog batch={ordinaryBatch} sourcePath="/Downloads/merged.mp4" channelId="channel-a" onClose={vi.fn()} onSubmit={submit} />);
     const button = view.getByRole("button", { name: "确认上传" }) as HTMLButtonElement;
-    expect((view.getByLabelText("YouTube 类别") as HTMLSelectElement).value).toBe("1");
+    expect((view.getByLabelText("YouTube 类别") as HTMLSelectElement).value).toBe("24");
     expect((view.getByLabelText("合成内容") as HTMLSelectElement).value).toBe("yes");
     expect(view.getByLabelText("付费宣传内容")).toHaveProperty("value", "no");
     expect(view.getAllByRole("checkbox").every((checkbox) => (checkbox as HTMLInputElement).checked)).toBe(true);
     expect(button.disabled).toBe(false);
     fireEvent.click(button);
     await waitFor(() => expect(submit).toHaveBeenCalledWith(expect.objectContaining({
-      filePath: "/Downloads/merged.mp4", categoryId: "1", privacyStatus: "private", containsSyntheticMedia: true, hasPaidProductPlacement: false,
+      filePath: "/Downloads/merged.mp4", categoryId: "24", privacyStatus: "private", containsSyntheticMedia: true, hasPaidProductPlacement: false,
       audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,
     })));
   });
