@@ -59,6 +59,13 @@ fn safe_root(root: &Path) -> Result<(), AppError> {
         if p.is_symlink() {
             return Err(invalid_file());
         }
+        #[cfg(windows)]
+        if let Ok(metadata) = fs::symlink_metadata(p) {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(invalid_file());
+            }
+        }
     }
     Ok(())
 }
@@ -228,14 +235,21 @@ pub async fn advance(
         "upload" => upload(app, service, task, false).await?,
         "short" => short(app, service, task).await?,
         "cleanup" => {
-            cleanup(task)?;
+            let mut cleaned = task.clone();
+            let (cleaned, summary) = crate::run_blocking(move || {
+                let summary = cleanup(&mut cleaned)?;
+                Ok((cleaned, summary))
+            })
+            .await?;
+            *task = cleaned;
+            task.cleanup_version = 1;
             task.stage = "done".into();
             task.status = Status::Completed;
             task.progress = 100.0;
             task.message = if !task.short_video_url.is_empty() {
-                "正片与首集 Shorts 已完成；可在 YouTube Studio 设置相关视频".into()
+                format!("{summary}；正片与首集 Shorts 已完成")
             } else {
-                "上传完成，已按设置清理本任务媒体并保留记录".into()
+                summary
             };
         }
         "done" => task.status = Status::Completed,
@@ -1050,7 +1064,10 @@ pub fn pause_owned(app: &AppHandle, task: &Task) {
     }
 }
 
-fn cleanup(task: &mut Task) -> Result<(), AppError> {
+#[path = "cleanup.rs"]
+mod cleanup_files;
+
+fn cleanup(task: &mut Task) -> Result<String, AppError> {
     if !task.main_done || (flag(&task.config, "firstEpisodeShorts") && !task.short_done) {
         return Err(AppError::new(
             "AUTOMATION_CLEANUP_BLOCKED",
@@ -1087,7 +1104,7 @@ fn cleanup(task: &mut Task) -> Result<(), AppError> {
         }
         fs::remove_file(&file.path).map_err(|_| invalid_file())?;
     }
-    Ok(())
+    cleanup_files::finish(task)
 }
 
 #[cfg(test)]

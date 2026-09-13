@@ -1067,6 +1067,20 @@ class DuanjuExtendedTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(data.get("date_scope"), date_scope)
                 self.assertEqual(data["date"], datetime.now(SHANGHAI).date().isoformat())
 
+    async def test_recent_live_action_checks_each_calendar_day_and_preserves_inner_cursor(self):
+        from unittest.mock import patch
+        from datetime import timedelta
+        calls = []
+        current = datetime.now(SHANGHAI)
+        async def fetch(_client, release_type, state, *, target_date):
+            calls.append((target_date, state))
+            return {"items": [], "next": "second" if state is None else None, "has_more": state is None}
+        with patch("endpoints.duanju._fetch_new_release_page", side_effect=fetch):
+            data = response_json(await duanju_new_releases(request_for(None), release_type="playlet", cursor="", limit=20, days=3))["data"]
+        self.assertFalse(data["has_more"])
+        self.assertEqual(data["date_scope"], "recent")
+        self.assertEqual(calls, [((current - timedelta(days=i)).strftime("%Y%m%d"), state) for i in range(3) for state in [None, "second"]])
+
     async def test_rank_reuses_recent_pages(self):
         async def handler(**_call):
             return {"ok": True, "upstream": {"data": {

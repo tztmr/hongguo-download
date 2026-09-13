@@ -91,6 +91,26 @@ class NewReleaseDomainTests(unittest.TestCase):
 
 
 class CursorAndCollectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recent_days_include_beijing_boundary_and_bind_cursor_to_range(self):
+        current = datetime(2026, 9, 3, 15, tzinfo=SHANGHAI)
+        dates = [("today", datetime(2026, 9, 3, 0, tzinfo=SHANGHAI)),
+                 ("boundary", datetime(2026, 9, 1, 0, tzinfo=SHANGHAI)),
+                 ("old", datetime(2026, 8, 31, 23, 59, 59, tzinfo=SHANGHAI)),
+                 ("future", datetime(2026, 9, 4, 0, tzinfo=SHANGHAI))]
+        async def fetch_page(state):
+            return {"items": [{"series_id": key, "online_time": int(date.timestamp())} for key, date in dates] + [{"series_id":"unknown"}], "has_more":False}
+        async def metrics(item):
+            return {"online_time":item.get("online_time")}
+        store = CursorStore()
+        kwargs = dict(fetch_page=fetch_page, fetch_metrics=metrics, release_type="playlet", now=current, cursor_store=store, days=3, limit=1)
+        first = await collect_today_releases(**kwargs)
+        self.assertEqual([i["series_id"] for i in first["items"]], ["today"])
+        second = await collect_today_releases(**kwargs, cursor=first["next_cursor"])
+        self.assertEqual([i["series_id"] for i in second["items"]], ["boundary"])
+        self.assertFalse(second["has_more"])
+        with self.assertRaises(ValueError):
+            await collect_today_releases(**{**kwargs, "days":1}, cursor=first["next_cursor"])
+
     def test_cursor_is_short_and_rejects_wrong_type_date_or_expiry(self):
         now = [1_000.0]
         store = CursorStore(ttl_seconds=600, max_entries=2, clock=lambda: now[0])

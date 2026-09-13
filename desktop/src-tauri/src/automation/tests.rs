@@ -34,6 +34,41 @@ fn temporary() -> PathBuf {
 }
 
 #[test]
+fn upgrade_requeues_only_completed_jobs_that_need_folder_cleanup() {
+    let path = temporary();
+    let mut job = task();
+    job.status = Status::Completed;
+    job.stage = "done".into();
+    job.main_done = true;
+    job.main_video_url = "https://www.youtube.com/watch?v=already-uploaded".into();
+    job.config["deleteEpisodes"] = json!(true);
+    job.config["deleteFinal"] = json!(true);
+    let snapshot = Snapshot {
+        jobs: vec![job.clone()],
+        ..Snapshot::default()
+    };
+    storage::save(&path, &snapshot).unwrap();
+    let service = Service::load(path.clone()).unwrap();
+    let loaded = service.snapshot();
+    assert_eq!(loaded.jobs[0].stage, "cleanup");
+    assert_eq!(loaded.jobs[0].main_video_url, job.main_video_url);
+    job.cleanup_version = 1;
+    storage::save(
+        &path,
+        &Snapshot {
+            jobs: vec![job],
+            ..Snapshot::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        Service::load(path.clone()).unwrap().snapshot().jobs[0].status,
+        Status::Completed
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn one_slot_pipelines_download_merge_ai_and_upload_without_starvation() {
     let mut jobs = vec![];
     for (id, stage) in [

@@ -40,6 +40,26 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe("useNewReleaseMonitor", () => {
+  it("persists the day range and rejects old results when the range changes", async () => {
+    const old = deferred<NewReleasePage>();
+    const today = Date.parse("2026-09-03T09:00:00+08:00") / 1000;
+    const api = { fetchNewReleases: vi.fn().mockReturnValueOnce(old.promise).mockResolvedValue({ ...page([]), items: [
+      { ...release("match"), onlineTime: today }, { ...release("too-old"), onlineTime: today - 7 * 86400 }, release("unknown"),
+    ] }) };
+    const local = storage();
+    const notifications = { getStatus: vi.fn(), send: vi.fn() };
+    const hook = renderHook(() => useNewReleaseMonitor({ api, storage: local, notifications, enabled: true, notify: true }));
+    await act(async () => { hook.result.current.setDays(3); await flush(); });
+    await act(async () => { old.resolve(page(["stale"])); await flush(); });
+    expect(api.fetchNewReleases).toHaveBeenLastCalledWith("playlet", "", 20, 3);
+    expect(hook.result.current.items.map(item => item.bookId)).toEqual(["match"]);
+    expect(notifications.send).not.toHaveBeenCalled();
+    hook.unmount();
+    const reopened = renderHook(() => useNewReleaseMonitor({ api, storage: local, notifications, enabled: true, notify: false }));
+    await act(flush);
+    expect(reopened.result.current.days).toBe(3);
+    expect(reopened.result.current.items.map(item => item.bookId)).toEqual(["match"]);
+  });
   it("drains every cursor page without a fixed hop limit", async () => {
     const pages = Array.from({ length: 12 }, (_, index) =>
       page([`release-${index + 1}`], index < 11, index < 11 ? `cursor-${index + 1}` : ""));

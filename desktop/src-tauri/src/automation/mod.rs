@@ -36,6 +36,18 @@ impl Service {
             }
         }
         for job in &mut snapshot.jobs {
+            if job.status == Status::Completed
+                && job.cleanup_version == 0
+                && flag(&job.config, "deleteEpisodes")
+                && flag(&job.config, "deleteFinal")
+                && job.main_done
+                && (!flag(&job.config, "firstEpisodeShorts") || job.short_done)
+            {
+                job.stage = "cleanup".into();
+                job.status = Status::Pending;
+                job.retry_at = 0;
+                job.message = "升级后补做目录清理，保留上传记录，不重复上传".into();
+            }
             if job.status == Status::Failed {
                 job.status = Status::Pending;
                 job.attempts = 0;

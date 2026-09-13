@@ -9,7 +9,7 @@ import json
 import secrets
 import time
 from collections import OrderedDict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -196,6 +196,7 @@ async def collect_today_releases(
     now: datetime | None = None,
     cursor_store: CursorStore,
     only_today: bool = True,
+    days: int | None = None,
 ) -> dict:
     """Collect one visible group while retaining over-fetched matching rows.
 
@@ -207,13 +208,16 @@ async def collect_today_releases(
 
     if limit < 1 or limit > 20:
         raise ValueError("limit must be between 1 and 20")
+    if days is not None and (type(days) is not int or not 1 <= days <= 30):
+        raise ValueError("days must be between 1 and 30")
     current = now or datetime.now(SHANGHAI)
     if current.tzinfo is None:
         current = current.replace(tzinfo=SHANGHAI)
     current = current.astimezone(SHANGHAI)
     date = current.date().isoformat()
+    cursor_type = release_type if days is None else f"{release_type}|days={days}"
     state = (
-        cursor_store.get(cursor, release_type, date)
+        cursor_store.get(cursor, cursor_type, date)
         if cursor
         else {"upstream": None, "has_more": True, "seen": [], "buffer": []}
     )
@@ -257,7 +261,11 @@ async def collect_today_releases(
             unique.append({**item, "series_id": series_id})
         if unique:
             enriched = await asyncio.gather(*(enrich(item) for item in unique))
-            if only_today:
+            if days is not None:
+                start = current.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+                end = current.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                matches.extend(item for item in enriched if start.timestamp() <= (_optional_int(item.get("online_time")) or 0) < end.timestamp())
+            elif only_today:
                 matches.extend(
                     item for item in enriched
                     if is_shanghai_today(item.get("online_time"), current)
@@ -275,7 +283,7 @@ async def collect_today_releases(
     next_cursor = ""
     if has_more:
         next_cursor = cursor_store.put(
-            release_type,
+            cursor_type,
             date,
             {
                 "upstream": upstream_state,

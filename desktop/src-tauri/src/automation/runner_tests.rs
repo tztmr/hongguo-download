@@ -63,6 +63,86 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn successful_cleanup_removes_owned_receipts_empty_directories_and_task_root() {
+    let mut f = Fixture::new();
+    let episode = f.owned("0001.mp4");
+    f.task.files.push(episode.clone());
+    f.owned("合并视频/成片.mp4");
+    let marker = json!({"id": f.task.id, "bookId": f.task.book_id});
+    f.file("自动追剧记录.json", &serde_json::to_vec(&marker).unwrap());
+    f.file(
+        "下载完成-1.json",
+        &serde_json::to_vec(&identity(&episode).unwrap()).unwrap(),
+    );
+    f.file(
+        "发布文案.json",
+        &serde_json::to_vec(&json!({"taskId":f.task.id})).unwrap(),
+    );
+    cleanup(&mut f.task).unwrap();
+    assert!(
+        !f.task.root.exists(),
+        "completed task folder should be removed"
+    );
+    assert!(f.base.exists());
+    assert!(!f.task.id.is_empty(), "central dedup identity must remain");
+    cleanup(&mut f.task).unwrap();
+}
+
+#[test]
+fn full_cleanup_archives_subtitles_and_preserves_untracked_files() {
+    for unrelated in [false, true] {
+        let mut f = Fixture::new();
+        let subtitle = f.owned("字幕/整季/字幕.srt");
+        f.task.subtitle = Some(subtitle.clone());
+        f.file(
+            "自动追剧记录.json",
+            &serde_json::to_vec(&json!({"id":f.task.id,"bookId":f.task.book_id})).unwrap(),
+        );
+        let unknown = if unrelated {
+            Some(f.file("我的笔记.txt", b"user notes"))
+        } else {
+            None
+        };
+        let summary = cleanup(&mut f.task).unwrap();
+        assert!(!subtitle.exists());
+        let saved = f.task.subtitle.as_ref().unwrap();
+        assert!(saved.starts_with(f.task.root.parent().unwrap().join("字幕留存")));
+        assert_eq!(fs::read(saved).unwrap(), b"fixture media contents");
+        if let Some(unknown) = unknown {
+            assert_eq!(fs::read(unknown).unwrap(), b"user notes");
+            assert!(summary.contains("未登记文件"));
+        } else {
+            assert!(!f.task.root.exists());
+            assert!(summary.contains("任务文件夹已删除"));
+        }
+        cleanup(&mut f.task).unwrap();
+    }
+}
+
+#[test]
+fn archive_collision_keeps_the_source_subtitle_and_existing_archive() {
+    let mut f = Fixture::new();
+    let source = f.owned("字幕.srt");
+    f.file(
+        "自动追剧记录.json",
+        &serde_json::to_vec(&json!({"id":f.task.id,"bookId":f.task.book_id})).unwrap(),
+    );
+    let target = f
+        .task
+        .root
+        .parent()
+        .unwrap()
+        .join("字幕留存")
+        .join(f.task.root.file_name().unwrap())
+        .join("字幕.srt");
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, b"existing subtitle").unwrap();
+    assert!(cleanup(&mut f.task).is_err());
+    assert_eq!(fs::read(source).unwrap(), b"fixture media contents");
+    assert_eq!(fs::read(target).unwrap(), b"existing subtitle");
+}
+
+#[test]
 fn cleanup_waits_for_main_and_every_enabled_short_output() {
     for (main_done, shorts_enabled, short_done, permitted) in [
         (false, false, false, false),

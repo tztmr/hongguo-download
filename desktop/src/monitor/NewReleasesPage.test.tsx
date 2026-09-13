@@ -12,7 +12,7 @@ const item: SeriesItem = {
 
 function model(overrides: Partial<NewReleaseMonitor> = {}): NewReleaseMonitor {
   return {
-    type: "playlet", date: "2026-09-03", dateScope: "today", source: "subscribe",
+    type: "playlet", date: "2026-09-03", dateScope: "today", source: "subscribe", days: null, setDays: vi.fn(),
     items: [item], filteredItems: [item], categories: ["校园", "古风", "其他"],
     selectedCategory: "", loading: false, error: "", refreshedAt: "2026-09-03T09:30:00+08:00",
     query: "", sort: "latest", scanPages: 2, scanComplete: true,
@@ -22,6 +22,20 @@ function model(overrides: Partial<NewReleaseMonitor> = {}): NewReleaseMonitor {
 }
 
 describe("NewReleasesPage", () => {
+  it("edits the day range only after saving the settings dialog", () => {
+    const setDays = vi.fn();
+    const view = render(<NewReleasesPage model={model({ days: 7, setDays } as Partial<NewReleaseMonitor>)} onSelect={vi.fn()} detectOrientation={false} />);
+    fireEvent.click(view.getByRole("button", { name: "监听设置" }));
+    fireEvent.change(view.getByRole("spinbutton", { name: "最近天数" }), { target: { value: "3" } });
+    fireEvent.click(view.getByRole("button", { name: "取消" }));
+    expect(setDays).not.toHaveBeenCalled();
+    fireEvent.click(view.getByRole("button", { name: "监听设置" }));
+    expect((view.getByRole("spinbutton", { name: "最近天数" }) as HTMLInputElement).value).toBe("7");
+    fireEvent.change(view.getByRole("spinbutton", { name: "最近天数" }), { target: { value: "3" } });
+    fireEvent.click(view.getByRole("button", { name: "保存并刷新" }));
+    expect(setDays).toHaveBeenCalledWith(3);
+    expect(view.queryByRole("dialog")).toBeNull();
+  });
   it("renders three types, detailed categories and scan status", () => {
     const state = model();
     const view = render(<NewReleasesPage model={state} onSelect={vi.fn()} detectOrientation={false} />);

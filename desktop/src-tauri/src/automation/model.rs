@@ -253,6 +253,8 @@ pub struct OwnedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
+    #[serde(default)]
+    pub cleanup_version: u32,
     pub id: String,
     pub title: String,
     pub book_id: String,
@@ -316,6 +318,7 @@ impl Task {
             &id[..8]
         ));
         Self {
+            cleanup_version: 0,
             id,
             title: source.title.clone(),
             book_id: source.book_id.clone(),

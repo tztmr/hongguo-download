@@ -15,8 +15,8 @@ function read(storage: Storage): SeenData {
   }
 }
 
-function key(date: string, type: NewReleaseType) {
-  return `${date}|${type}`;
+function key(date: string, type: NewReleaseType, days?: number | null) {
+  return `${date}|${type}${days == null ? "" : `|days=${days}`}`;
 }
 
 type ItemData = { version: 1; entries: Record<string, SeriesItem[]> };
@@ -37,8 +37,8 @@ function isSeriesItem(value: unknown): value is SeriesItem {
   return typeof item.bookId === "string" && typeof item.seriesId === "string" && typeof item.title === "string";
 }
 
-export function loadReleaseItems(storage: Storage, date: string, type: NewReleaseType) {
-  const values = readItems(storage).entries[key(date, type)];
+export function loadReleaseItems(storage: Storage, date: string, type: NewReleaseType, days?: number | null) {
+  const values = readItems(storage).entries[key(date, type, days)];
   return Array.isArray(values) ? values.filter(isSeriesItem) : [];
 }
 
@@ -47,24 +47,25 @@ export function saveReleaseItems(
   date: string,
   type: NewReleaseType,
   items: SeriesItem[],
+  days?: number | null,
 ) {
   const data = readItems(storage);
   const entries: Record<string, SeriesItem[]> = {};
   for (const [entryKey, values] of Object.entries(data.entries)) {
     if (entryKey.startsWith(`${date}|`) && Array.isArray(values)) entries[entryKey] = values.filter(isSeriesItem);
   }
-  entries[key(date, type)] = items.filter(isSeriesItem);
+  entries[key(date, type, days)] = items.filter(isSeriesItem);
   storage.setItem(NEW_RELEASES_ITEMS_KEY, JSON.stringify({ version: 1, entries } satisfies ItemData));
 }
 
-export function loadSeenReleases(storage: Storage, date: string, type: NewReleaseType) {
-  const values = read(storage).entries[key(date, type)];
+export function loadSeenReleases(storage: Storage, date: string, type: NewReleaseType, days?: number | null) {
+  const values = read(storage).entries[key(date, type, days)];
   return new Set(Array.isArray(values) ? values.filter((item): item is string => typeof item === "string") : []);
 }
 
-export function markSeenReleases(storage: Storage, date: string, type: NewReleaseType, ids: string[]) {
+export function markSeenReleases(storage: Storage, date: string, type: NewReleaseType, ids: string[], days?: number | null) {
   const data = read(storage);
-  const currentKey = key(date, type);
+  const currentKey = key(date, type, days);
   const existing = Array.isArray(data.entries[currentKey]) ? data.entries[currentKey] : [];
   const entries: Record<string, string[]> = {};
   for (const [entryKey, values] of Object.entries(data.entries)) {

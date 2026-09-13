@@ -5,7 +5,8 @@ import copy
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Annotated
 from typing import Any
 from urllib.parse import quote
 
@@ -881,6 +882,7 @@ async def duanju_new_releases(
     ),
     cursor: str = Query('', description='后端生成的短游标'),
     limit: int = Query(20, ge=1, le=20),
+    days: Annotated[int | None, Query(ge=1, le=30, description='含今天，最近多少个北京时间自然日')] = None,
 ):
     client = request.app.state.client
     if release_type not in TODAY_RELEASE_TYPES:
@@ -889,6 +891,14 @@ async def duanju_new_releases(
     target_date = current.strftime('%Y%m%d')
 
     async def fetch_page(offset):
+        if release_type == 'playlet' and days is not None:
+            state = offset or {}
+            day = int(state.get('calendar_day', 0))
+            page = await _fetch_new_release_page(client, release_type, state.get('page'),
+                target_date=(current - timedelta(days=day)).strftime('%Y%m%d'))
+            if page.get('has_more'):
+                return {**page, 'next': {'calendar_day': day, 'page': page.get('next')}}
+            return {**page, 'has_more': day + 1 < days, 'next': {'calendar_day': day + 1, 'page': None}}
         return await _fetch_new_release_page(
             client, release_type, offset, target_date=target_date,
         )
@@ -913,9 +923,11 @@ async def duanju_new_releases(
             now=current,
             cursor_store=_duanju_new_release_cursors,
             only_today=release_type == 'playlet',
+            days=days,
         )
         data['source'] = 'subscribe' if release_type == 'playlet' else 'rank'
-        data['date_scope'] = 'today' if release_type == 'playlet' else 'latest'
+        data['date_scope'] = 'recent' if days is not None else 'today' if release_type == 'playlet' else 'latest'
+        data['days'] = days
     except ValueError as exc:
         return error(str(exc), code=-2, status_code=400)
     except RuntimeError as exc:

@@ -1,4 +1,16 @@
 .monitor-page .monitor-header { align-items: center; margin-bottom: 18px; }
+.monitor-header-actions { display: flex; gap: 10px; flex-shrink: 0; }
+.monitor-settings-dialog { width: min(520px, calc(100vw - 32px)); }
+.monitor-settings-dialog p { font-size: 12px; color: var(--muted); line-height: 1.8; }
+.monitor-days-input { display: grid; gap: 10px; margin: 24px 0 12px; font-size: 13px; }
+.monitor-days-input input { width: 100%; padding: 12px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 7px; }
+.monitor-day-presets { display: flex; flex-wrap: wrap; gap: 8px; }
+.monitor-settings-dialog button { padding: 9px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); cursor: pointer; }
+.monitor-day-presets button[aria-pressed=true] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.monitor-settings-dialog footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 24px; }
+.monitor-settings-dialog footer button:first-child { margin-right: auto; }
+.monitor-settings-dialog button:disabled { opacity: .45; cursor: not-allowed; }
+.monitor-settings-dialog .primary-button { background: var(--accent); color: white; }
 .monitor-page .monitor-eyebrow { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 18px; }
 .monitor-page .monitor-eyebrow time { color: var(--muted); font-size: 11px; }
 .monitor-page .monitor-header h1 { margin: 8px 0; font-size: 28px; letter-spacing: -.03em; }

@@ -3,8 +3,9 @@ import type { NotificationAdapter } from "../notifications";
 import type { NewReleasePage, NewReleaseType, SeriesItem } from "../types";
 import { releaseCategoryNames, releaseCategoryOptions } from "./categories";
 import { loadReleaseItems, loadSeenReleases, markSeenReleases, saveReleaseItems } from "./storage";
+import { inMonitorRange, loadMonitorDays, MONITOR_SETTINGS_KEY } from "./settings";
 
-type MonitorApi = { fetchNewReleases(type: NewReleaseType, cursor?: string, limit?: number): Promise<NewReleasePage> };
+type MonitorApi = { fetchNewReleases(type: NewReleaseType, cursor?: string, limit?: number, days?: number): Promise<NewReleasePage> };
 export type MonitorSort = "latest" | "hot" | "collected";
 
 export type NewReleaseMonitorOptions = {
@@ -34,10 +35,12 @@ function mergeItems(persisted: SeriesItem[], fresh: SeriesItem[]) {
 export function useNewReleaseMonitor({ api, storage, notifications, enabled, notify, intervalMs = 300_000 }: NewReleaseMonitorOptions) {
   const [selection, setSelection] = useState<{ type: NewReleaseType }>({ type: "playlet" });
   const type = selection.type;
+  const [days, updateDays] = useState(() => loadMonitorDays(storage));
+  const daysRef = useRef(days);
   const [date, setDate] = useState(shanghaiDate);
-  const [dateScope, setDateScope] = useState<"today" | "latest">("today");
+  const [dateScope, setDateScope] = useState<"today" | "latest" | "recent">("today");
   const [source, setSource] = useState<"subscribe" | "rank">("subscribe");
-  const [items, setItems] = useState<SeriesItem[]>(() => loadReleaseItems(storage, shanghaiDate(), "playlet"));
+  const [items, setItems] = useState<SeriesItem[]>(() => loadReleaseItems(storage, shanghaiDate(), "playlet", days).filter(item => inMonitorRange(item, shanghaiDate(), days)));
   const [selectedCategory, setCategory] = useState("");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<MonitorSort>("latest");
@@ -56,6 +59,16 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
 
   useEffect(() => { notificationRef.current = { notifications, notify }; }, [notifications, notify]);
 
+  const setDays = useCallback((next: number | null) => {
+    if (next !== null && (!Number.isInteger(next) || next < 1 || next > 30)) throw new Error("请输入 1–30 之间的整数天数");
+    storage.setItem(MONITOR_SETTINGS_KEY, JSON.stringify({ version: 1, days: next }));
+    generation.current += 1;
+    inFlight.current = null;
+    daysRef.current = next;
+    updateDays(next);
+    setSelection({ type: typeRef.current });
+  }, [storage]);
+
   // Invalidate immediately, including a quick A → B → A switch before effects run.
   const setType = useCallback((next: NewReleaseType) => {
     if (next === typeRef.current) return;
@@ -71,11 +84,12 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
     const requestedGeneration = generation.current;
     const requestedType = typeRef.current;
     const requestedDate = shanghaiDate();
+    const requestedDays = daysRef.current;
     const valid = () => generation.current === requestedGeneration && typeRef.current === requestedType;
     const switchDate = (nextDate: string) => {
       dateRef.current = nextDate;
       setDate(nextDate);
-      setItems(loadReleaseItems(storage, nextDate, requestedType));
+      setItems(loadReleaseItems(storage, nextDate, requestedType, requestedDays).filter(item => inMonitorRange(item, nextDate, requestedDays)));
       setRefreshedAt("");
       setUnseenCount(0);
     };
@@ -90,10 +104,10 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
       const cursors = new Set<string>();
       let cursor = "";
       let scanDate = "";
-      let scope: "today" | "latest" = requestedType === "playlet" ? "today" : "latest";
+      let scope: "today" | "latest" | "recent" = requestedDays !== null ? "recent" : requestedType === "playlet" ? "today" : "latest";
       let merged: SeriesItem[] = [];
       while (valid()) {
-        const page = await api.fetchNewReleases(requestedType, cursor, 20);
+        const page = await (requestedDays === null ? api.fetchNewReleases(requestedType, cursor, 20) : api.fetchNewReleases(requestedType, cursor, 20, requestedDays));
         if (!valid()) return;
         if (shanghaiDate() !== requestedDate) {
           switchDate(shanghaiDate());
@@ -104,16 +118,17 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
         if (scanDate && pageDate !== scanDate) throw new Error("分页日期发生变化，本次检查未完成，请重新刷新");
         if (!scanDate) {
           scanDate = pageDate;
-          scope = page.dateScope ?? scope;
+          scope = requestedDays !== null ? "recent" : page.dateScope ?? scope;
           dateRef.current = scanDate;
           setDate(scanDate);
           setDateScope(scope);
           setSource(page.source ?? (requestedType === "playlet" ? "subscribe" : "rank"));
-          merged = loadReleaseItems(storage, scanDate, requestedType);
+          merged = loadReleaseItems(storage, scanDate, requestedType, requestedDays).filter(item => inMonitorRange(item, scanDate, requestedDays));
         }
-        for (const item of page.items) if (item.bookId) fresh.set(item.bookId, item);
-        merged = mergeItems(merged, page.items);
-        saveReleaseItems(storage, scanDate, requestedType, merged);
+        const matches = page.items.filter(item => inMonitorRange(item, scanDate, requestedDays));
+        for (const item of matches) if (item.bookId) fresh.set(item.bookId, item);
+        merged = mergeItems(merged, matches);
+        saveReleaseItems(storage, scanDate, requestedType, merged, requestedDays);
         setItems(merged);
         setScanPages((value) => value + 1);
         if (!page.hasMore) {
@@ -126,12 +141,12 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
         cursor = page.nextCursor;
       }
       if (!valid()) return;
-      const baselineKey = `${scanDate}|${requestedType}`;
+      const baselineKey = `${scanDate}|${requestedType}|${requestedDays}`;
       const isBaseline = !baseline.current.has(baselineKey);
-      const seen = loadSeenReleases(storage, scanDate, requestedType);
+      const seen = loadSeenReleases(storage, scanDate, requestedType, requestedDays);
       const newIds = [...fresh.keys()].filter((id) => !seen.has(id));
       baseline.current.add(baselineKey);
-      markSeenReleases(storage, scanDate, requestedType, merged.map((item) => item.bookId));
+      markSeenReleases(storage, scanDate, requestedType, merged.map((item) => item.bookId), requestedDays);
       if (!isBaseline && newIds.length) {
         setUnseenCount((value) => value + newIds.length);
         const currentNotifications = notificationRef.current;
@@ -139,7 +154,7 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
           // Notification delivery does not determine whether the feed scan completed.
           await currentNotifications.notifications.send({
             title: scope === "today" ? "发现今日新剧" : "发现新收录剧目",
-            body: scope === "today" ? `新发现 ${newIds.length} 部今日上线短剧` : `新剧榜新增收录 ${newIds.length} 部剧目`,
+            body: requestedDays !== null ? `最近 ${requestedDays} 天内新发现 ${newIds.length} 部剧目` : scope === "today" ? `新发现 ${newIds.length} 部今日上线短剧` : `新剧榜新增收录 ${newIds.length} 部剧目`,
             target: { kind: "monitor", id: requestedType },
           }).catch(() => false);
         }
@@ -162,11 +177,11 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
     const today = shanghaiDate();
     dateRef.current = today;
     setDate(today);
-    setDateScope(type === "playlet" ? "today" : "latest");
+    setDateScope(days !== null ? "recent" : type === "playlet" ? "today" : "latest");
     setSource(type === "playlet" ? "subscribe" : "rank");
     setCategory("");
     setQuery("");
-    setItems(loadReleaseItems(storage, today, type));
+    setItems(loadReleaseItems(storage, today, type, days).filter(item => inMonitorRange(item, today, days)));
     setError("");
     setLoading(false);
     setScanPages(0);
@@ -177,7 +192,7 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
       generation.current += 1;
       inFlight.current = null;
     };
-  }, [enabled, refresh, selection, storage, type]);
+  }, [enabled, refresh, selection, storage, type, days]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -198,7 +213,7 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
   }, [items, query, selectedCategory, sort]);
 
   return {
-    type, date, source, dateScope, items, filteredItems, categories, selectedCategory,
+    type, date, source, dateScope, days, setDays, items, filteredItems, categories, selectedCategory,
     query, sort, loading, error, scanPages, scanComplete, refreshedAt, unseenCount,
     hasMore: false, setType, setCategory, setQuery, setSort, refresh,
     loadMore: async () => undefined,

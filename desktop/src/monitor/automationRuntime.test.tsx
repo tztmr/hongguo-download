@@ -31,6 +31,20 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it("keeps completed tasks behind the finished filter and searches by title", async () => {
+    state.jobs = [
+      { id: "done", bookId: "done-book", title: "已完成剧目", stage: "done", status: "completed", message: "任务文件夹已删除", episodeDone: 12, episodeTotal: 12, progress: 100, updatedAt: 1 },
+      { id: "busy", bookId: "busy-book", title: "运行剧目", stage: "merge", status: "working", message: "正在转换", episodeDone: 12, episodeTotal: 12, progress: 40, updatedAt: 2 },
+    ];
+    const view = page(); await loaded(view);
+    expect(view.getByRole("article", { name: "运行剧目任务" })).toBeTruthy();
+    expect(view.queryByRole("article", { name: "已完成剧目任务" })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: /已结束/ }));
+    expect(view.getByRole("article", { name: "已完成剧目任务" })).toBeTruthy();
+    expect(view.queryByRole("progressbar")).toBeNull();
+    fireEvent.change(view.getByRole("searchbox", { name: "搜索后台任务" }), { target: { value: "不匹配" } });
+    expect(view.queryByRole("article")).toBeNull();
+  });
   it("explains that one slot pipelines stages instead of locking an entire drama", async () => {
     state.config = { ...state.config, concurrency: "1" };
     const view = page(); await loaded(view);

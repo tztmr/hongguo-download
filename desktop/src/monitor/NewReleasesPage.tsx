@@ -4,6 +4,7 @@ import { VideoOrientationBadge } from "../components/VideoOrientationBadge";
 import type { NewReleaseType } from "../types";
 import type { MonitorSort, NewReleaseMonitor } from "./useNewReleaseMonitor";
 import "./monitor.css";
+import { MonitorSettingsDialog } from "./MonitorSettingsDialog";
 
 const filters: Array<{ id: NewReleaseType; label: string }> = [
   { id: "playlet", label: "真人剧" },
@@ -39,6 +40,8 @@ function checkedTime(value: string) {
 
 export function NewReleasesPage({ model, onSelect, detectOrientation = true }: { model: NewReleaseMonitor; onSelect: (item: NewReleaseMonitor["items"][number]) => void; detectOrientation?: boolean }) {
   const [expandedCategories, setExpandedCategories] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const rangeText = model.days != null ? `仅显示最近 ${model.days} 天上线的剧目（含今天，北京时间）` : null;
   useEffect(() => setExpandedCategories(false), [model.type]);
   const emptyForFilter = model.items.length > 0 && model.filteredItems.length === 0;
   const isDailyFeed = model.dateScope === "today";
@@ -50,9 +53,9 @@ export function NewReleasesPage({ model, onSelect, detectOrientation = true }: {
         <div>
           <div className="monitor-eyebrow"><span>NEW RELEASE MONITOR</span><time dateTime={model.date}>{model.date} · 北京时间</time></div>
           <h1>新剧监听</h1>
-          <p>{isDailyFeed ? "仅显示北京时间今天上线的剧目" : "按新剧榜最新收录展示，上线时间可能早于今天"} · 已收录 {model.items.length} 部</p>
+          <p>{rangeText || (isDailyFeed ? "仅显示北京时间今天上线的剧目" : "按新剧榜最新收录展示，上线时间可能早于今天")} · 已收录 {model.items.length} 部</p>
         </div>
-        <button type="button" className="secondary-button" onClick={() => void model.refresh()} disabled={model.loading}>{model.loading ? "检查中…" : "立即刷新"}</button>
+        <div className="monitor-header-actions"><button type="button" className="secondary-button" aria-label="监听设置" onClick={() => setSettingsOpen(true)}>设置</button><button type="button" className="secondary-button" onClick={() => void model.refresh()} disabled={model.loading}>{model.loading ? "检查中…" : "立即刷新"}</button></div>
       </header>
       <div className="monitor-status-strip" role="status" aria-live="polite">
         <span className={`monitor-status-dot ${model.loading ? "scanning" : model.error ? "incomplete" : model.scanComplete ? "complete" : ""}`} aria-hidden="true" />
@@ -81,7 +84,7 @@ export function NewReleasesPage({ model, onSelect, detectOrientation = true }: {
         </div>
       </section>
       {model.error ? <div className="inline-error" role="alert">{model.error}</div> : null}
-      {!model.loading && !model.error && model.scanComplete && !model.items.length ? <div className="empty-monitor"><h2>{isDailyFeed ? "今天还没有新上线剧目" : "当前暂无可用新剧"}</h2><p>已完整检查当前类型的上新列表，下次检查会自动更新</p></div> : null}
+      {!model.loading && !model.error && model.scanComplete && !model.items.length ? <div className="empty-monitor"><h2>{rangeText ? `最近 ${model.days} 天暂无符合条件的新剧` : isDailyFeed ? "今天还没有新上线剧目" : "当前暂无可用新剧"}</h2><p>已完整检查当前类型的上新列表，下次检查会自动更新</p></div> : null}
       {!model.loading && !model.error && !model.scanComplete && !model.items.length ? <div className="empty-monitor"><h2>等待检查新剧</h2><p>点击“立即刷新”获取当前类型的上新列表</p></div> : null}
       {emptyForFilter ? <div className="empty-monitor"><h2>没有符合筛选条件的剧目</h2><p>试试其他剧名或题材</p><button type="button" className="secondary-button" onClick={() => { model.setQuery(""); model.setCategory(""); }}>清除筛选</button></div> : null}
       <section className="monitor-grid" aria-label="已收录新剧" aria-busy={model.loading}>
@@ -94,8 +97,9 @@ export function NewReleasesPage({ model, onSelect, detectOrientation = true }: {
           </button>
         ))}
       </section>
-      {model.loading ? <div className="load-more-row">{isDailyFeed ? "正在扫描今日上新列表" : "正在扫描新剧榜最新收录"} · 已检查 {model.scanPages} 页…</div> : null}
+      {model.loading ? <div className="load-more-row">{rangeText ? `正在扫描最近 ${model.days} 天的新剧` : isDailyFeed ? "正在扫描今日上新列表" : "正在扫描新剧榜最新收录"} · 已检查 {model.scanPages} 页…</div> : null}
       {model.refreshedAt ? <p className="monitor-refreshed">上次完整检查：{checkedTime(model.refreshedAt)}</p> : null}
+      {settingsOpen && <MonitorSettingsDialog days={model.days} onSave={model.setDays} onClose={() => setSettingsOpen(false)} />}
     </main>
   );
 }

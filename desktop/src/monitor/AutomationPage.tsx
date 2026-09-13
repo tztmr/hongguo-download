@@ -1,3 +1,4 @@
+import { AutomationJobs } from "./AutomationJobs";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { automationRuntime, automationError, type AutomationSecrets, type AutomationSnapshot } from "./automationRuntime";
@@ -10,11 +11,6 @@ import { orderedCoverModels } from "./coverModels";
 import { AIStudio, studioDefaults, type AIStudioSettings } from "./AIStudio";
 
 const STORAGE_KEY = "hongguo.automation.settings-draft.v1";
-const taskStageLabels: Record<string, string> = {
-  inspect: "检查剧集与查重", download: "下载并校验剧集", merge: "智能合并 / H.264 转码",
-  separate: "分离背景音乐", subtitles: "提取字幕", metadata: "准备文案与封面",
-  upload: "上传与远端处理", short: "首集 Shorts 处理", cleanup: "校验与清理", done: "全部完成",
-};
 const defaults = {
   ...studioDefaults,
   uploadFormat: "auto" as YouTubeUploadFormat,
@@ -216,7 +212,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
   ] as const;
   return <main className="auto-page">
     <header className="auto-header"><div><div className="auto-eyebrow">AUTOMATION <span>{runtimeEnabled ? "后台执行" : "设置预览"}</span></div><h1>24 小时自动追剧</h1><p>从发现新剧到上传完成，把每一步安排好。</p></div><div className="auto-header-actions"><span className="auto-idle">{modeText}</span><button className="primary-button" type="button" disabled={!!pending || !loaded} onClick={() => void save()}>{pending === "保存设置" ? "保存中…" : runtimeEnabled ? "保存设置" : "保存设置草稿"}</button></div></header>
-    <section className="auto-pipeline" aria-label="自动化流程"><div className="auto-section-heading"><h2><AutomationIcon size={18} />全流程自动处理</h2><span>单部按顺序 · 多部流水线并行</span></div><ol>{stages.map(([name, hint, enabled], index) => <li key={name} className={enabled ? "" : "is-skipped"}><span className="auto-step-number">{String(index + 1).padStart(2, "0")}</span><strong>{name}</strong><small>{enabled ? hint : "已跳过"}</small></li>)}</ol></section>
+    <details className="auto-pipeline" aria-label="自动化流程"><summary><span><AutomationIcon size={18} />全流程自动处理</span><small>单部按顺序 · 多部流水线并行</small></summary><ol>{stages.map(([name, hint, enabled], index) => <li key={name} className={enabled ? "" : "is-skipped"}><span className="auto-step-number">{String(index + 1).padStart(2, "0")}</span><strong>{name}</strong><small>{enabled ? hint : "已跳过"}</small></li>)}</ol></details>
     <div className="auto-preview-note"><span className="auto-note-dot" /><p>{runtimeEnabled ? "应用需保持运行，切换页面不影响后台。保存与启动分开；暂停或停止后，当前不可中断请求收尾，暂不开始新阶段。退出应用后不再监控，重开按恢复设置继续。" : "浏览器仅预览设置，不能启动、扫描或模拟后台进度。「AI 文案与封面」的手动生成会真实消耗对应服务额度。"}</p></div>
     {runtimeEnabled && <section className="auto-runtime" aria-label="自动追剧后台状态">
       <div className="auto-section-heading"><h2>后台任务 · {modeText}</h2><div className="auto-runtime-actions">
@@ -235,20 +231,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
         <button type="button" className="primary-button" disabled={!canStart} onClick={() => { setConfirmStart(false); void perform("启动", automationRuntime.start); }}>确认启动</button>
         <button type="button" onClick={() => setConfirmStart(false)}>取消</button>
       </div>}
-      <div className="auto-runtime-jobs">{!snapshot?.jobs.length ? <p className="auto-runtime-empty">{loaded ? "尚无后台任务。保存并启动后显示真实进度。" : "正在读取后台状态…"}</p> : snapshot.jobs.map(job => <article className="auto-runtime-job" key={job.id}>
-        <div><strong>{job.title}</strong><span>{job.season ? `第 ${job.season} 季 · ` : ""}{job.bookId}</span></div>
-        <div><b>{taskStageLabels[job.stage] || job.stage}</b><span>{({ pending: "等待 / 后台处理中", working: "处理中", review: "待核对", failed: "失败", completed: "完成", skipped: "已跳过", observing: "观察中" })[job.status]}</span></div>
-        <progress max={100} value={Math.max(0, Math.min(100, job.progress || 0))} aria-label={`${job.title}进度`} />
-        <p>{job.message}</p>
-        <p className="auto-runtime-meta">阶段进度 {Math.round(Math.max(0, Math.min(100, job.progress || 0)))}%{job.episodeTotal > 0 && ` · ${job.episodeDone >= job.episodeTotal ? "下载已完成" : "已下载"} ${job.episodeDone}/${job.episodeTotal} 集`}</p>
-        {!!job.retryAt && job.retryAt > Date.now() / 1000 && (job.status === "pending" || job.status === "observing") && <p className="auto-runtime-meta">{job.attempts ? `第 ${job.attempts} 次重试` : "自动复查"} · 预计 {timeLabel(job.retryAt)} · {job.status === "observing" ? "等待自动恢复，" : ""}复用已完成文件</p>}
-        <div className="auto-runtime-actions">
-          {job.status === "review" && <><button type="button" disabled={!!pending} onClick={() => void perform("确认继续", () => automationRuntime.review(job.id, "continue"))}>确认继续处理</button><button type="button" disabled={!!pending} onClick={() => void perform("跳过任务", () => automationRuntime.review(job.id, "skip"))}>跳过此任务</button></>}
-          {job.status === "failed" && <button type="button" disabled={!!pending} onClick={() => void perform("重试任务", () => automationRuntime.review(job.id, "retry"))}>重试此任务</button>}
-          {job.mainVideoUrl && <a href={job.mainVideoUrl} target="_blank" rel="noreferrer">查看正片</a>}
-          {job.shortVideoUrl && <a href={job.shortVideoUrl} target="_blank" rel="noreferrer">查看首集 Shorts（相关视频需在 Studio 手动关联）</a>}
-        </div>
-      </article>)}</div>
+      <AutomationJobs jobs={snapshot?.jobs || []} loaded={loaded} pending={!!pending} onAction={(id, action) => void perform(action === "retry" ? "重试任务" : action === "skip" ? "跳过任务" : "确认继续", () => automationRuntime.review(id, action))} />
       <details className="auto-runtime-logs"><summary>运行日志（{snapshot?.logs.length || 0}）</summary><ol>{snapshot?.logs.slice(-100).reverse().map((log, index) => <li key={`${log.at}-${index}`}><time>{timeLabel(log.at)}</time>{log.jobId && <code>{log.jobId}</code>}<span>{log.message}</span></li>)}</ol></details>
     </section>}
     <div className={`auto-workspace${tab === 3 ? " is-studio" : ""}`}><section className="auto-editor"><nav className="auto-tabs" aria-label="自动追剧设置分类">{tabs.map((name, index) => <button type="button" key={name} aria-pressed={tab === index} className={tab === index ? "active" : ""} onClick={() => setTab(index)}><span>0{index + 1}</span>{name}</button>)}</nav>
@@ -300,7 +283,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
         ...(!current.aiMetadataApplied ? { nonAiTitle: current.title, nonAiDescription: current.description, nonAiTags: current.tags } : {}),
         aiMetadataApplied: true, title, description, tags: tags.join(", ") })); markDirty();
       }} onFallback={() => { setDraft(current => current.aiMetadataApplied ? { ...current, title: current.nonAiTitle, description: current.nonAiDescription, tags: current.nonAiTags, aiMetadataApplied: false } : current); markDirty(); setMessage("AI Key 不可用，已保留或恢复非 AI 上传模板；按原上传方式继续。"); }} /></div>
-      {tab === 4 && <><div className="auto-panel-heading"><h2>成功后清理，失败时保留</h2><p>清理仅针对本次自动任务生成的媒体文件，始终保留剧名、唯一 ID 与处理记录作为去重标记。</p></div>{toggle("deleteEpisodes", "删除单集视频", draft.firstEpisodeShorts ? "正片和首集 Shorts、封面与字幕全部成功后清理；失败保留文件。" : "正片上传处理、封面与已启用的字幕全部成功后删除。")}{toggle("deleteFinal", "上传完成后删除本地成片", "视频上传、YouTube 处理及已启用的字幕上传全部成功后清理。")}{toggle("keepSubtitles", "保留字幕文件", "清理成片时保留字幕，方便修改和再次使用。")}
+      {tab === 4 && <><div className="auto-panel-heading"><h2>成功后清理，失败时保留</h2><p>清理仅针对本次自动任务生成的媒体文件，始终保留剧名、唯一 ID 与处理记录作为去重标记。</p></div>{toggle("deleteEpisodes", "删除单集视频", draft.firstEpisodeShorts ? "正片和首集 Shorts、封面与字幕全部成功后清理；失败保留文件。" : "正片上传处理、封面与已启用的字幕全部成功后删除。")}{toggle("deleteFinal", "上传完成后删除本地成片", "全部上传成功后清理；同时启用删除单集时，字幕移至字幕留存，完整清理本任务文件夹。")}{toggle("keepSubtitles", "保留字幕文件", "完整清理任务文件夹时，将字幕移至「自动追剧/字幕留存」，保留去重记录。")}
       <div className="auto-grid"><Field label="每阶段同时处理数" hint="设为 1 时也可同时下载、合并、AI 处理和上传；CPU/GPU 按资源余量自动安排。"><select value={draft.concurrency} onChange={(e) => update("concurrency", e.target.value)}>{[1, 2, 3].map((n) => <option key={n} value={n}>{n} 部{n === 1 ? "（建议）" : ""}</option>)}</select></Field><Field label="快速重试次数" hint="快速重试用完后每 15 分钟自动继续，无需手动点击；暂停和停止会暂停重试。"><select value={draft.retries} onChange={(e) => update("retries", e.target.value)}>{[0, 1, 3, 5].map((n) => <option key={n} value={n}>{n === 0 ? "仅定时重试" : `${n} 次后转为定时重试`}</option>)}</select></Field><Field label="磁盘剩余空间下限"><select value={draft.minDisk} onChange={(e) => update("minDisk", e.target.value)}>{[10, 20, 50, 100].map((n) => <option key={n} value={n}>{n} GB</option>)}</select></Field></div>{toggle("resume", "重启后恢复未完成任务", "从上次成功的步骤继续，避免重复下载和上传。")}{toggle("notify", "任务结果通知", "整部剧完成时发送通知；可恢复错误由后台定时重试。")}</>}
     </div><footer className="auto-editor-footer"><span role="status">{pending ? `${pending}，请等待…` : message || (dirty ? "有未保存的修改；启动前请保存" : runtimeEnabled ? "编辑区为设置草稿；已有任务保留创建时的配置" : "浏览器设置草稿")}</span><button className="primary-button" type="button" disabled={!!pending || !loaded} onClick={() => void save()}>{runtimeEnabled ? "保存设置" : "保存设置草稿"}</button></footer></section>
     <aside className="auto-summary"><div className="auto-summary-title"><AutomationIcon size={20} /><h2>下次启动方案</h2><span>草稿</span></div><dl><div><dt>监听时段</dt><dd>全天 24 小时</dd></div><div><dt>扫描频率</dt><dd>每 {draft.interval} 分钟</dd></div><div><dt>剧目类型</dt><dd>{draft.types.join(" / ") || "尚未选择"}</dd></div><div><dt>剧目范围</dt><dd>{scopes[draft.scope]}</dd></div><div><dt>去重规则</dt><dd>YouTube + 本地记录</dd></div><div><dt>文案 / 封面</dt><dd>{draft.metadataSource === "jucodex" ? "Jucodex" : draft.metadataSource === "deepseek" ? (draft.textModel === "deepseek-v4-flash" ? "DeepSeek V4 Flash" : "DeepSeek V4 Pro") : "手动模板"}<br />{draft.coverSource === "jucodex" ? "Jucodex" : draft.coverSource === "moyuu" ? "Moyuu AI" : "源封面"}</dd></div><div><dt>同时处理</dt><dd>{draft.concurrency} 部剧</dd></div><div><dt>上传频道</dt><dd>{channels.find((c) => c.channelId === draft.channel)?.title || "尚未选择"}</dd></div><div><dt>首集 Shorts</dt><dd>{draft.firstEpisodeShorts ? "额外上传 · 正片成功后" : "关闭 · 仅上传正片"}</dd></div><div><dt>字幕上传</dt><dd>{draft.subtitles ? "随成片上传" : "不上传"}</dd></div></dl><div className="auto-summary-rules"><h3>异常处理约定</h3><p><CheckIcon size={14} />缺集或处理失败，保留源文件</p><p><CheckIcon size={14} />{draft.firstEpisodeShorts ? "正片与首集分别查重，跳过已完成项" : "确认重复才跳过，疑似项待核对"}</p><p><CheckIcon size={14} />清理媒体，保留剧名与 ID 记录</p><p><CheckIcon size={14} />查重失败，等待重试</p><p><CheckIcon size={14} />AI Key 不可用，按原方式上传</p><p><CheckIcon size={14} />上传失败，不清理本地成片</p><p><CheckIcon size={14} />磁盘不足 {draft.minDisk} GB，暂停下载</p></div><button type="button" className="auto-start" disabled={!canStart} onClick={() => setConfirmStart(true)}>启动 24 小时自动任务</button><small className="auto-start-hint">{!runtimeEnabled ? "浏览器预览不能执行后台任务" : dirty ? "有未保存的修改，请先保存" : !snapshot?.config ? "请先保存后台配置" : "启动使用后台已保存的配置"}</small></aside></div>

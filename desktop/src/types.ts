@@ -72,7 +72,7 @@ export type NewReleasePage = {
   date: string;
   refreshedAt: string;
   source?: "subscribe" | "rank";
-  dateScope?: "today" | "latest";
+  dateScope?: "today" | "latest" | "recent";
 };
 
 export type AppSettings = {

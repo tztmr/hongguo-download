@@ -134,9 +134,11 @@ export async function fetchNewReleases(
   type: NewReleaseType,
   cursor = "",
   limit = 20,
+  days?: number,
 ): Promise<NewReleasePage> {
   const query = new URLSearchParams({ type, limit: String(limit) });
   if (cursor) query.set("cursor", cursor);
+  if (days !== undefined) query.set("days", String(days));
   const data = await apiGet<{
     items?: RawSeries[];
     next_cursor?: string;
@@ -144,7 +146,7 @@ export async function fetchNewReleases(
     date?: string;
     refreshed_at?: string;
     source?: "subscribe" | "rank";
-    date_scope?: "today" | "latest";
+    date_scope?: "today" | "latest" | "recent";
   }>(`/api/duanju/new-releases?${query.toString()}`);
   return {
     items: (data.items || []).map(asSeries),
