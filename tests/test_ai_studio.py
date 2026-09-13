@@ -80,6 +80,6 @@ class StudioTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
 
     def test_only_provider_auth_failures_use_key_fallback_code(self):
-        for status in (403, 429, 500):
+        for status in (402, 403, 429, 500):
             response = self.call('text', {'provider': 'deepseek', 'apiKey': 'fixture', 'model': 'deepseek-v4-flash', 'prompt': 'JSON'}, lambda _, code=status: httpx.Response(code, text='error'))
-            self.assertEqual(response.json()['code'], 'AI_KEY_INVALID' if status == 403 else 'AI_UPSTREAM_ERROR')
+            self.assertEqual(response.json()['code'], {402: 'AI_QUOTA_EXCEEDED', 403: 'AI_KEY_INVALID', 429: 'AI_RATE_LIMITED'}.get(status, 'AI_UPSTREAM_ERROR'))

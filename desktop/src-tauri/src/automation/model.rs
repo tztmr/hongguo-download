@@ -27,6 +27,39 @@ pub fn fingerprint(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))[..24].to_owned()
 }
 
+/// Ordered fallback models; a legacy single-model setting remains single-model.
+pub fn cover_models(config: &Value) -> Vec<String> {
+    let mut models = Vec::new();
+    if text(config, "coverSource") == "moyuu" {
+        if let Some(values) = config["coverModels"].as_array() {
+            for raw in values.iter().filter_map(Value::as_str) {
+                let model = raw.trim();
+                if !model.is_empty() && !models.iter().any(|m| m == model) {
+                    models.push(model.to_owned());
+                }
+                if models.len() == 4 {
+                    break;
+                }
+            }
+        }
+    }
+    if models.is_empty() {
+        let model = text(
+            config,
+            if text(config, "coverSource") == "jucodex" {
+                "jucodexImageModel"
+            } else {
+                "coverModel"
+            },
+        )
+        .trim();
+        if !model.is_empty() {
+            models.push(model.to_owned());
+        }
+    }
+    models
+}
+
 pub fn validate_config(value: Value) -> Result<Value, AppError> {
     let allowed = [
         "uploadFormat",
@@ -89,6 +122,35 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
                 clean.insert(key.into(), v.clone());
             }
         }
+    }
+    if let Some(raw) = value.get("coverModels") {
+        let values = raw.as_array().ok_or_else(|| {
+            AppError::new("AUTOMATION_SETTINGS_INVALID", "封面模型必须为有序列表")
+        })?;
+        if values.len() > 4
+            || values.iter().any(|v| {
+                v.as_str().is_none_or(|m| {
+                    let m = m.trim();
+                    m.is_empty()
+                        || m.len() > 200
+                        || !m
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+                })
+            })
+        {
+            return Err(AppError::new(
+                "AUTOMATION_SETTINGS_INVALID",
+                "请选择最多 4 个有效封面模型",
+            ));
+        }
+        let mut models = Vec::new();
+        for model in values.iter().map(|v| v.as_str().unwrap().trim()) {
+            if !models.contains(&model) {
+                models.push(model);
+            }
+        }
+        clean.insert("coverModels".into(), serde_json::json!(models));
     }
     let mut c = Value::Object(clean);
     for (key, options) in [
@@ -304,7 +366,8 @@ impl Task {
         // work is abandoned. After that, leave the job eligible after cooldown.
         if self.attempts <= number(&self.config, "retries", 3) {
             self.status = Status::Pending;
-            self.retry_at = now() + (30 * (1u64 << self.attempts.saturating_sub(1).min(5))).min(900);
+            self.retry_at =
+                now() + (30 * (1u64 << self.attempts.saturating_sub(1).min(5))).min(900);
         } else {
             self.status = Status::Observing;
             self.retry_at = now() + 900;

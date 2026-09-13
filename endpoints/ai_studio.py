@@ -91,7 +91,7 @@ async def upstream_json(client, method, url, key, **kwargs):
                     429: '服务商限流或额度不足，请稍后重试并检查额度。',
                     451: '服务商限制当前地区访问。',
                 }
-                fail(messages.get(status, f'服务商返回 HTTP {status}，请检查模型、尺寸及接口支持情况。'), status if status in (401, 402, 403, 429, 451) else 502, 'AI_KEY_INVALID' if status in (401, 403) else 'AI_UPSTREAM_ERROR')
+                fail(messages.get(status, f'服务商返回 HTTP {status}，请检查模型、尺寸及接口支持情况。'), status if status in (401, 402, 403, 429, 451) else 502, 'AI_KEY_INVALID' if status in (401, 403) else 'AI_QUOTA_EXCEEDED' if status == 402 else 'AI_RATE_LIMITED' if status == 429 else 'AI_UPSTREAM_ERROR')
             chunks, size = [], 0
             async for chunk in response.aiter_bytes():
                 size += len(chunk)

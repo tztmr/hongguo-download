@@ -30,7 +30,6 @@ impl Service {
     pub fn load(path: PathBuf) -> Result<Arc<Self>, AppError> {
         let mut snapshot = storage::load(&path)?;
         if let Some(config) = snapshot.config.as_ref() {
-            snapshot.key_status = credentials::status(config);
             if !flag(config, "resume") && snapshot.mode == Mode::Running {
                 snapshot.mode = Mode::Paused;
             }
@@ -243,6 +242,20 @@ impl Service {
         Ok(self.snapshot())
     }
     pub fn spawn(self: &Arc<Self>, app: AppHandle) {
+        // A macOS Keychain prompt may wait for the user indefinitely. Never open
+        // the vault on the UI setup thread or while holding the state mutex.
+        let owner = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Some(config) = owner.snapshot().config {
+                let status = credentials::status(&config);
+                let _ = owner.transaction(|snapshot| {
+                    if snapshot.config.as_ref() == Some(&config) {
+                        snapshot.key_status = status;
+                    }
+                    Ok(())
+                });
+            }
+        });
         let service = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {

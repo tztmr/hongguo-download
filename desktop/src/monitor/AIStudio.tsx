@@ -1,3 +1,5 @@
+import { CoverModelPicker } from "./CoverModelPicker";
+import { canTryNextCoverModel, orderedCoverModels, COVER_MODEL_CHOICES } from "./coverModels";
 import { useEffect, useRef, useState } from "react";
 import "./ai-studio.css";
 import { FIXED_TEXT_PROMPT, formatHashtags, formatTextResult, publicationDescription } from "./textPrompt";
@@ -5,18 +7,19 @@ import { buildCoverPrompt, COVER_IMAGE_SIZE, FIXED_COVER_PROMPT } from "./coverP
 import { StudioRequestError, isUnavailableAIKey, fileDataUrl, resultText, studioError, studioRequest, type StudioResult, type StudioImage } from "./studioApi";
 
 export type AIStudioSettings = {
-  metadataSource: string; textModel: string; coverSource: string; coverModel: string;
+  metadataSource: string; textModel: string; coverSource: string; coverModel: string; coverModels: string[];
   textPrompt: string; coverPrompt: string; jucodexBaseUrl: string;
   jucodexTextModel: string; jucodexImageModel: string; outputLanguage: string;
   audience: string; titleStyle: string; imageSize: string; imageMode: string;
 };
 export const studioDefaults = {
+  coverModels: [] as string[],
   imageSize: COVER_IMAGE_SIZE, imageMode: "reference",
   jucodexBaseUrl: "", jucodexTextModel: "", jucodexImageModel: "",
   outputLanguage: "繁體中文", audience: "喜欢完整短剧、逆袭与情感故事的观众", titleStyle: "剧情冲突 + 悬念",
 };
 // Returned by the Moyuu model-list API; each model still needs its own generation check.
-const imageModelSuggestions = ["gpt-image-2", "gemini-3.1-flash-image", "gemini-3.1-flash-image-1K", "gemini-3.1-flash-image-2K", "gemini-3.1-flash-image-4K", "gemini-3-pro-image", "gemini-3-pro-image-preview", "gpt-image-2-medium", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"];
+const imageModelSuggestions = COVER_MODEL_CHOICES;
 const example = {
   title: "归来的她",
   content: "【虚构演示剧情】林晚离开家族企业三年后，以新任审计顾问的身份回归。董事会上，前合伙人质疑她的能力。她拿出三年前的原始账本，逐项对照，证明自己当年被人栽赃。视频包含回归、董事会争执和公开账本三个情节，不涉及婚姻、重生或隐藏富豪身份。",
@@ -57,7 +60,7 @@ export function AIStudio({ settings, onChange, onApply, onFallback, onKeyChange,
   const revision = useRef(0);
   const inFlight = useRef(false);
   const textSignature = JSON.stringify([settings.metadataSource, settings.textModel, settings.jucodexTextModel, settings.textPrompt, settings.coverPrompt, settings.outputLanguage, settings.audience, settings.titleStyle, settings.metadataSource === "jucodex" ? settings.jucodexBaseUrl : ""]);
-  const imageSignature = JSON.stringify([settings.coverSource, settings.coverModel, settings.jucodexImageModel, settings.imageMode, settings.imageSize, settings.coverSource === "jucodex" ? settings.jucodexBaseUrl : ""]);
+  const imageSignature = JSON.stringify([settings.coverSource, settings.coverModel, settings.coverModels, settings.jucodexImageModel, settings.imageMode, settings.imageSize, settings.coverSource === "jucodex" ? settings.jucodexBaseUrl : ""]);
   useEffect(() => { revision.current += 1; setLiveResult(null); setLiveImage(null); setImagePrompt(""); }, [textSignature]);
   useEffect(() => { revision.current += 1; setLiveImage(null); }, [imageSignature]);
   useEffect(() => { setTextKey(""); setTextStatus(""); }, [settings.metadataSource, settings.jucodexBaseUrl]);
@@ -153,9 +156,28 @@ export function AIStudio({ settings, onChange, onApply, onFallback, onKeyChange,
       const referenceImage = settings.imageMode === "reference" && cover ? await fileDataUrl(cover.file) : undefined;
       if (current !== revision.current) return;
       setLiveImage(null);
-      const data = await studioRequest<StudioImage>("image", { ...config, model: settings.coverSource === "jucodex" ? settings.jucodexImageModel : settings.coverModel, prompt: fullImagePrompt, size: COVER_IMAGE_SIZE, referenceImage });
-      if (current !== revision.current) return;
-      setImageDimensions(""); setLiveImage(data); setMessage(`真实封面已返回 · ${data.usedReference ? "已发送源封面参考图" : "纯文字生图"}。请检查人物、文字与实际尺寸。`);
+      const order = settings.coverSource === "moyuu" ? orderedCoverModels(settings.coverModels, settings.coverModel) : [settings.jucodexImageModel];
+      const attempts: string[] = [];
+      for (const [index, model] of order.entries()) {
+        if (current !== revision.current) return;
+        setMessage(`正在尝试 ${index + 1}/${order.length}：${model}`);
+        try {
+          const data = await studioRequest<StudioImage>("image", { ...config, model, prompt: fullImagePrompt, size: COVER_IMAGE_SIZE, referenceImage });
+          if (current !== revision.current) return;
+          if (!data.image || (referenceImage && !data.usedReference)) throw new StudioRequestError("AI_INVALID_IMAGE", "返回图片或参考图校验失败");
+          setImageDimensions(""); setLiveImage(data);
+          setMessage(`${attempts.length ? attempts.join("；") + "；" : ""}采用 ${model} · ${data.usedReference ? "已发送源封面参考图" : "纯文字生图"}。请检查人物、文字与实际尺寸。`);
+          return;
+        } catch (error) {
+          if (current !== revision.current) return;
+          attempts.push(`${model}：${studioError(error)}`);
+          if (!canTryNextCoverModel(error) || index === order.length - 1) {
+            setMessage(`${attempts.join("；")}。已停止生成，保留原封面与已有文案。`);
+            if (isUnavailableAIKey(error)) throw error;
+            return;
+          }
+        }
+      }
     });
   }
   async function copyPrompt() {
@@ -215,7 +237,7 @@ export function AIStudio({ settings, onChange, onApply, onFallback, onKeyChange,
       <button type="button" className="primary-button" disabled={!!busy || settings.coverSource === "source"} onClick={generateImage}>{busy === "生成封面" ? "封面生成中…" : "生成真实封面"}</button>
       {liveImage && <div className="studio-generated-image"><img src={liveImage.image} referrerPolicy="no-referrer" alt="AI 接口实际生成的封面" onLoad={e => setImageDimensions(`${e.currentTarget.naturalWidth} × ${e.currentTarget.naturalHeight}`)} onError={() => setMessage("图片地址加载失败或已过期；请求可能已计费，请勿直接反复生成。")}/><p>{liveImage.model} · 实际尺寸 {imageDimensions || "读取中"} · {liveImage.usedReference ? "已传入源封面" : "纯文字生成"}</p><a href={liveImage.image} target="_blank" rel="noreferrer">打开原尺寸封面 ↗</a></div>}
     </section>
-    <p className="studio-status" role="status">{busy ? `${busy}，请等待…` : message || "本页手动调用由按钮触发。Key 不写入设置草稿。"}</p>
+    <p className="studio-status" role="status">{busy ? message || `${busy}，请等待…` : message || "本页手动调用由按钮触发。Key 不写入设置草稿。"}</p>
     {preview && <section className="studio-card studio-prompt" aria-label="本次提示词"><header><h3>本次提示词 · 随输入实时更新</h3><button type="button" className="text-action" onClick={copyPrompt}>复制完整提示词</button></header><textarea aria-label="完整提示词" readOnly rows={14} value={prompt} /><p className="studio-helper">当前文案：{textProvider} · 当前封面：{imageProvider}。此处只组装文字；选择图片不代表图片已传给模型。</p></section>}
     <details className="studio-config" open><summary>生成偏好与 API 配置 <span>设置草稿</span></summary><div className="auto-grid">
       <label className="auto-field"><span>输出语言</span><select value={settings.outputLanguage} onChange={(e) => onChange("outputLanguage", e.target.value)}><option>繁體中文</option><option>简体中文</option><option>English</option></select></label>
@@ -224,13 +246,15 @@ export function AIStudio({ settings, onChange, onApply, onFallback, onKeyChange,
       <label className="auto-field"><span>文字服务</span><select value={settings.metadataSource} onChange={(e) => onChange("metadataSource", e.target.value)}><option value="deepseek">DeepSeek · V4 Pro / V4 Flash</option><option value="jucodex">Jucodex · 待核验</option><option value="template">手动模板与源信息</option></select></label>
       <label className="auto-field"><span>封面服务</span><select value={settings.coverSource} onChange={(e) => onChange("coverSource", e.target.value)}><option value="moyuu">Moyuu · AI 封面</option><option value="jucodex">Jucodex · 待核验</option><option value="source">保留源封面</option></select></label>
       {settings.metadataSource === "deepseek" && <label className="auto-field"><span>DeepSeek 文字模型</span><select value={settings.textModel} onChange={(e) => onChange("textModel", e.target.value)}><option value="deepseek-v4-pro">V4 Pro · deepseek-v4-pro</option><option value="deepseek-v4-flash">V4 Flash · deepseek-v4-flash</option></select><small>V4 Flash 使用 deepseek-v4-flash；旧 Flash 设置自动迁移。</small></label>}
-      {settings.coverSource === "moyuu" && <label className="auto-field"><span>Moyuu 封面模型</span><select value={settings.coverModel} onChange={(e) => onChange("coverModel", e.target.value)}>{[...new Set([settings.coverModel, ...imageModelSuggestions, ...models])].filter(Boolean).map(model => <option key={model} value={model}>{model}</option>)}</select><input aria-label="手动填写封面模型" list="studio-image-models" value={settings.coverModel} onChange={(e) => onChange("coverModel", e.target.value)} /><small>GPT Image 2 已通过纯文字与参考图生成测试；其余为模型列表候选，具体模式与尺寸需试跑。</small></label>}
+      {settings.coverSource === "moyuu" && <CoverModelPicker selected={settings.coverModels} legacy={settings.coverModel} disabled={!!busy}
+        onChange={value => onChange("coverModels", value)} />}
+
       <label className="auto-field"><span>文字服务 API Key</span><input type="password" autoComplete="off" spellCheck={false} value={textKey} placeholder="填写 DeepSeek 或所选文字服务的 Key" onChange={e => changeTextKey(e.target.value)} /><small>{onKeyChange ? `${savedKeys?.text ? "后台已保存文字 Key，可供自动任务使用。" : "后台未保存文字 Key，将跳过文字 AI。"} 仅显式编辑后随保存更新，清空并保存可删除；手动测试需重新输入。` : "仅用于文字服务，刷新页面后清空。"}</small></label>
       <label className="auto-field"><span>封面服务 API Key</span><input type="password" autoComplete="off" spellCheck={false} value={imageKey} placeholder="填写 Moyuu / Jucodex 封面服务的 Key" onChange={e => changeImageKey(e.target.value)} /><small>{onKeyChange ? `${savedKeys?.image ? "后台已保存封面 Key，可供自动任务使用。" : "后台未保存封面 Key，将跳过封面 AI。"} 仅显式编辑后随保存更新，清空并保存可删除；手动测试需重新输入。` : "仅用于封面服务，切换服务商后清空。"}</small></label>
     </div>
     <div className="studio-connection-tests">{onKeyChange && <><button type="button" className="secondary-button" onClick={() => changeTextKey("")}>删除后台文字 Key（保存后生效）</button><button type="button" className="secondary-button" onClick={() => changeImageKey("")}>删除后台封面 Key（保存后生效）</button></>}<div><button type="button" className="secondary-button" disabled={!!busy || settings.metadataSource === "template"} onClick={() => testConnection("text")}>测试文字 Key</button><small>{textStatus || "检查文字服务模型列表，不生成内容"}</small></div><div><button type="button" className="secondary-button" disabled={!!busy || settings.coverSource === "source"} onClick={() => testConnection("image")}>查询封面模型 / 测试 Key</button><small>{imageStatus || "从服务商获取此 Key 的模型列表"}</small></div></div>
     <datalist id="studio-image-models">{[...new Set([...imageModelSuggestions, ...models])].map(model => <option key={model} value={model} />)}</datalist>
-    {models.length > 0 && <label className="auto-field"><span>服务商可用模型列表</span><select value={settings.coverSource === "jucodex" ? settings.jucodexImageModel : settings.coverModel} onChange={e => onChange(settings.coverSource === "jucodex" ? "jucodexImageModel" : "coverModel", e.target.value)}><option value="">选择模型；模型列表可能包含非图片模型</option>{!models.includes(settings.coverSource === "jucodex" ? settings.jucodexImageModel : settings.coverModel) && <option value={settings.coverSource === "jucodex" ? settings.jucodexImageModel : settings.coverModel}>当前手动填写的模型</option>}{models.map(model => <option key={model} value={model}>{model}</option>)}</select></label>}
+    {models.length > 0 && settings.coverSource === "jucodex" && <label className="auto-field"><span>服务商可用模型列表</span><select value={settings.coverSource === "jucodex" ? settings.jucodexImageModel : settings.coverModel} onChange={e => onChange(settings.coverSource === "jucodex" ? "jucodexImageModel" : "coverModel", e.target.value)}><option value="">选择模型；模型列表可能包含非图片模型</option>{!models.includes(settings.coverSource === "jucodex" ? settings.jucodexImageModel : settings.coverModel) && <option value={settings.coverSource === "jucodex" ? settings.jucodexImageModel : settings.coverModel}>当前手动填写的模型</option>}{models.map(model => <option key={model} value={model}>{model}</option>)}</select></label>}
     {(settings.metadataSource === "jucodex" || settings.coverSource === "jucodex") && <div className="studio-provider-note"><strong>Jucodex · 接口信息待核验</strong><p>按 OpenAI 兼容格式调用。文档此前返回 HTTP 451；请填写已确认的 API 基地址和模型，当前地区或模型不支持时会显示实际错误。</p><div className="auto-grid"><label className="auto-field"><span>Jucodex API 基地址</span><input type="url" autoComplete="off" value={settings.jucodexBaseUrl} placeholder="填接口基地址，不是文档地址；请勿包含密钥" onChange={(e) => onChange("jucodexBaseUrl", e.target.value)} /></label><label className="auto-field"><span>Jucodex 文字模型</span><input value={settings.jucodexTextModel} placeholder="以服务商可用模型为准" onChange={(e) => onChange("jucodexTextModel", e.target.value)} /></label><label className="auto-field"><span>Jucodex 封面模型</span><input value={settings.jucodexImageModel} list="studio-image-models" placeholder="查询可用模型或手动填写" onChange={(e) => onChange("jucodexImageModel", e.target.value)} /></label></div><a href="https://jucodex.com/docs" target="_blank" rel="noreferrer">查看 Jucodex 文档 ↗</a></div>}
     <details className="studio-advanced"><summary>补充文案与封面要求</summary><label className="auto-field"><span>文案额外要求</span><textarea rows={3} value={settings.textPrompt} onChange={(e) => onChange("textPrompt", e.target.value)} /></label><label className="auto-field"><span>封面额外要求</span><textarea rows={3} value={settings.coverPrompt} onChange={(e) => onChange("coverPrompt", e.target.value)} /></label></details>
     <div className="studio-docs"><a href="https://api-docs.deepseek.com/zh-cn/" target="_blank" rel="noreferrer">DeepSeek 文档 ↗</a><a href="https://docs.moyuu.cc/nano-banana" target="_blank" rel="noreferrer">Moyuu 文档 ↗</a><a href="https://jucodex.com/docs" target="_blank" rel="noreferrer">Jucodex 文档 ↗</a></div>

@@ -17,6 +17,30 @@ function fill(view: ReturnType<typeof render>) {
   fireEvent.change(view.getByLabelText(/^视频内容 \/ 字幕/), { target: { value: "真实剧情内容" } });
 }
 describe("AI studio live requests", () => {
+  it("selects and reorders fallback models, retries a rejected model with the same reference and key", async () => {
+    vi.mocked(studioRequest).mockRejectedValueOnce(new StudioRequestError("AI_UPSTREAM_ERROR", "HTTP 500"))
+      .mockResolvedValueOnce({ image: "data:image/png;base64,eA==", model: "gpt-image-2-medium", usedReference: false });
+    const view = render(<Harness />); fill(view);
+    fireEvent.click(view.getByRole("checkbox", { name: "gpt-image-2-medium" }));
+    fireEvent.click(view.getByRole("button", { name: "上移 gpt-image-2-medium" }));
+    fireEvent.click(view.getByRole("button", { name: "下移 gpt-image-2-medium" }));
+    fireEvent.change(view.getByLabelText("封面生成模式"), { target: { value: "text" } });
+    fireEvent.click(view.getByRole("button", { name: "生成真实封面" }));
+    await waitFor(() => expect(studioRequest).toHaveBeenCalledTimes(2));
+    const calls = vi.mocked(studioRequest).mock.calls;
+    expect(calls.map(c => c[1].model)).toEqual(["gpt-image-2", "gpt-image-2-medium"]);
+    expect(calls[1][1]).toEqual({ ...calls[0][1], model: "gpt-image-2-medium" });
+    await waitFor(() => expect(view.getByRole("status").textContent).toContain("gpt-image-2-medium"));
+  });
+  it.each(["AI_TIMEOUT", "AI_NETWORK_ERROR", "AI_KEY_INVALID", "AI_RATE_LIMITED", "AI_QUOTA_EXCEEDED"])("does not fan out uncertain or shared failures: %s", async code => {
+    vi.mocked(studioRequest).mockRejectedValue(new StudioRequestError(code, "生成失败"));
+    const view = render(<Harness />); fill(view);
+    fireEvent.click(view.getByRole("checkbox", { name: "gpt-image-2-medium" }));
+    fireEvent.change(view.getByLabelText("封面生成模式"), { target: { value: "text" } });
+    fireEvent.click(view.getByRole("button", { name: "生成真实封面" }));
+    await waitFor(() => expect(view.getByRole("button", { name: "生成真实封面" }).hasAttribute("disabled")).toBe(false));
+    expect(studioRequest).toHaveBeenCalledTimes(1);
+  });
   it("sends fixed A/B/C rules for existing settings and applies hashtags to the upload description", async () => {
     const onApply = vi.fn();
     const generated = { ...result, title_candidates: [

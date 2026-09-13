@@ -1433,13 +1433,16 @@ echo '{"type":"result","outputs":{"ok":true}}'
         std::fs::write(
             &ffmpeg,
             format!(
-                "#!/bin/sh\nlast=''\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{}'; last=$arg; done\nprintf x > \"$last\"\n",
+                "#!/bin/sh\nlast=''\nfor arg in \"$@\"; do printf '%s\\n' \"$arg\" >> '{}'; last=$arg; done\nprintf '%064d' 0 > \"$last\"\n",
                 arguments.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let tools = super::MediaTools::from_test_paths(ffmpeg.clone(), ffmpeg);
+        let ffprobe = temp.root.join("ffprobe");
+        std::fs::write(&ffprobe, "#!/bin/sh\nprintf '%s\\n' '{\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":64,\"height\":64},{\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"sample_rate\":\"48000\",\"channels\":2}],\"format\":{\"duration\":\"1\"}}'\n").unwrap();
+        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let tools = super::MediaTools::from_test_paths(ffmpeg, ffprobe);
         let input = temp.root.join("input.mp4");
         let output = temp.root.join("output.wav");
         std::fs::write(&input, b"input").unwrap();

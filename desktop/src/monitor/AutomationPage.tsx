@@ -6,7 +6,8 @@ import type { YouTubeChannel } from "../youtube/types";
 import "./automation.css";
 import { UploadFormatPicker } from "../youtube/UploadFormatPicker";
 import type { YouTubeUploadFormat } from "../youtube/types";
-import { AIStudio, studioDefaults } from "./AIStudio";
+import { orderedCoverModels } from "./coverModels";
+import { AIStudio, studioDefaults, type AIStudioSettings } from "./AIStudio";
 
 const STORAGE_KEY = "hongguo.automation.settings-draft.v1";
 const taskStageLabels: Record<string, string> = {
@@ -52,6 +53,8 @@ function normalizeDraft(value: unknown): Draft {
       const saved = (value as Record<string, unknown>)[key];
       if (key === "types") {
         if (Array.isArray(saved)) result.types = defaults.types.filter((item) => saved.includes(item));
+      } else if (key === "coverModels") {
+        if (Array.isArray(saved)) result.coverModels = orderedCoverModels(saved, "");
       } else if (typeof saved === typeof defaults[key]) {
         Object.assign(result, { [key]: saved });
       }
@@ -73,6 +76,7 @@ function normalizeDraft(value: unknown): Draft {
     result.duplicate = true;
     if (!["auto", "shorts", "standard"].includes(result.uploadFormat)) result.uploadFormat = "auto";
     if (result.coverModel === "nanobanana") result.coverModel = defaults.coverModel;
+    result.coverModels = orderedCoverModels(result.coverModels, result.coverModel);
     if (!["deepseek-v4-pro", "deepseek-v4-flash"].includes(result.textModel)) result.textModel = result.textModel.includes("flash") ? "deepseek-v4-flash" : "deepseek-v4-pro";
     // Manual single-series AI copy must not become the template for other series.
     if (result.aiMetadataApplied) {
@@ -158,6 +162,11 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
       });
     }
     setDraft((current) => ({ ...current, [key]: value, ...(key === "separate" && !value ? { subtitleSource: "original" } : {}), ...(key === "title" ? { nonAiTitle: String(value) } : key === "description" ? { nonAiDescription: String(value) } : key === "tags" ? { nonAiTags: String(value) } : {}) })); markDirty();
+  }
+  function updateStudio(key: keyof AIStudioSettings, value: string | string[]) {
+    if (key === "coverModels") {
+      if (Array.isArray(value)) update("coverModels", value);
+    } else if (typeof value === "string") update(key, value);
   }
   async function perform(label: string, command: () => Promise<AutomationSnapshot>) {
     if (busy.current) return false;
@@ -286,7 +295,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, runtime
       <Field label="默认视频分类" hint="AI 模式下由 AI 从 YouTube 可用分类中推荐；无有效推荐时使用此默认分类。视频分类与标签分别设置。"><select value={draft.category} onChange={(e) => update("category", e.target.value)}><option value="24">娱乐</option><option value="1">电影和动画</option><option value="22">人物和博客</option></select></Field>
       <div className="auto-fixed auto-source-cover"><CheckIcon size={18} /><div><strong>封面 · {draft.coverSource === "jucodex" ? "Jucodex · 待核验" : draft.coverSource === "moyuu" ? "Moyuu AI 生成" : "剧目源封面"}</strong><small>在「AI 文案与封面」中配置生成方式。</small></div></div>
       </>}
-      <div hidden={tab !== 3}><AIStudio savedKeys={snapshot?.keyStatus} onKeyChange={runtimeEnabled ? (kind, value) => { setSecrets(current => ({ ...current, [kind]: value })); markDirty(); } : undefined} settings={draft} onChange={update} onApply={(title, description, tags) => { setDraft(current => ({ ...current,
+      <div hidden={tab !== 3}><AIStudio savedKeys={snapshot?.keyStatus} onKeyChange={runtimeEnabled ? (kind, value) => { setSecrets(current => ({ ...current, [kind]: value })); markDirty(); } : undefined} settings={draft} onChange={updateStudio} onApply={(title, description, tags) => { setDraft(current => ({ ...current,
         ...(!current.aiMetadataApplied ? { nonAiTitle: current.title, nonAiDescription: current.description, nonAiTags: current.tags } : {}),
         aiMetadataApplied: true, title, description, tags: tags.join(", ") })); markDirty();
       }} onFallback={() => { setDraft(current => current.aiMetadataApplied ? { ...current, title: current.nonAiTitle, description: current.nonAiDescription, tags: current.nonAiTags, aiMetadataApplied: false } : current); markDirty(); setMessage("AI Key 不可用，已保留或恢复非 AI 上传模板；按原上传方式继续。"); }} /></div>

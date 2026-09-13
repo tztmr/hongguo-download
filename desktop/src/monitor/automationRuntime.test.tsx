@@ -31,6 +31,22 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it("saves ordered model selections without replacing saved keys and reloads the order", async () => {
+    state.config = { ...state.config, coverSource: "moyuu", coverModel: "gpt-image-2.5-sunburst" };
+    const view = page(); await loaded(view);
+    fireEvent.click(view.getByRole("button", { name: /AI 文案与封面/ }));
+    fireEvent.click(view.getByRole("checkbox", { name: "gpt-image-2-medium" }));
+    fireEvent.click(view.getByRole("button", { name: "上移 gpt-image-2-medium" }));
+    save(view);
+    await waitFor(() => expect(state.config?.coverModels).toEqual(["gpt-image-2-medium", "gpt-image-2.5-sunburst"]));
+    const payload = vi.mocked(invoke).mock.calls.find(([name]) => name === "save_automation_settings")![1];
+    expect(payload).not.toHaveProperty("secrets");
+    view.unmount();
+    const reopened = page(); await loaded(reopened);
+    fireEvent.click(reopened.getByRole("button", { name: /AI 文案与封面/ }));
+    const list = reopened.getByRole("list", { name: "封面模型回退顺序" });
+    expect(list.querySelector("li")?.textContent).toContain("gpt-image-2-medium");
+  });
   it("distinguishes completed downloads from ongoing audio preparation and scheduled retry", async () => {
     state.mode = "running";
     state.jobs = [{ id: "audio", title: "预处理剧目", bookId: "book", stage: "separate", status: "pending",

@@ -80,3 +80,15 @@
 @media(max-width: 600px) { .studio-connection-tests { grid-template-columns: 1fr; } }
 
 .studio-audience { grid-column: 1 / -1; }
+
+.studio-model-picker { grid-column: 1 / -1; border: 1px solid var(--border, #ddd); border-radius: 12px; padding: 16px; min-width: 0; }
+.studio-model-picker legend { font-weight: 600; padding: 0 6px; }
+.studio-model-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.studio-model-choices label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.studio-model-choices input { width: auto; }
+.studio-model-picker ol { padding: 0; margin: 16px 0; list-style: none; display: grid; gap: 8px; }
+.studio-model-picker li { display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--surface-hover); color: var(--text); border-radius: 8px; }
+.studio-model-picker li > span { flex: 1; overflow-wrap: anywhere; }
+.studio-model-picker b { display: inline-block; min-width: 58px; font-size: 12px; }
+.studio-model-picker li button { padding: 5px 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); }
+.studio-model-picker small { display: block; line-height: 1.6; color: var(--muted); }

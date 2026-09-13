@@ -97,6 +97,22 @@ fn restart_retains_side_effect_handles_and_respects_resume_policy() {
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 #[test]
+fn startup_preserves_cached_key_status_without_opening_the_system_vault() {
+    let path = temporary();
+    let saved = Snapshot {
+        config: Some(config()),
+        key_status: KeyStatus {
+            text: true,
+            image: true,
+        },
+        ..Default::default()
+    };
+    storage::save(&path, &saved).unwrap();
+    let snapshot = Service::load(path.clone()).unwrap().snapshot();
+    assert!(snapshot.key_status.text && snapshot.key_status.image);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+#[test]
 fn pause_stop_and_review_persist_without_dropping_completed_work() {
     let path = temporary();
     let runtime = Service::load(path.clone()).unwrap();
@@ -160,8 +176,15 @@ fn upgrade_automatically_requeues_failed_media_but_respects_stop_and_review() {
     failed.stage = "merge".into();
     failed.merge_job = Some("old-copy-only".into());
     failed.files.push(PathBuf::from("all-152-downloaded.mp4"));
-    let mut review = task(); review.id = "review".into(); review.status = Status::Review;
-    let saved = Snapshot { config: Some(config()), mode: Mode::Stopped, jobs: vec![failed.clone(), review], ..Default::default() };
+    let mut review = task();
+    review.id = "review".into();
+    review.status = Status::Review;
+    let saved = Snapshot {
+        config: Some(config()),
+        mode: Mode::Stopped,
+        jobs: vec![failed.clone(), review],
+        ..Default::default()
+    };
     storage::save(&path, &saved).unwrap();
     let state = Service::load(path.clone()).unwrap().snapshot();
     assert_eq!(state.mode, Mode::Stopped);
@@ -171,4 +194,28 @@ fn upgrade_automatically_requeues_failed_media_but_respects_stop_and_review() {
     assert_eq!(state.jobs[0].merge_job, failed.merge_job);
     assert_eq!(state.jobs[1].status, Status::Review);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn validates_ordered_cover_models_and_preserves_legacy_model() {
+    let mut c = config();
+    c["coverSource"] = json!("moyuu");
+    c["coverModel"] = json!("gpt-image-2");
+    c["coverModels"] = json!(["gpt-image-2-medium", "gpt-image-2", "gpt-image-2-medium"]);
+    let clean = validate_config(c.clone()).unwrap();
+    assert_eq!(
+        clean["coverModels"],
+        json!(["gpt-image-2-medium", "gpt-image-2"])
+    );
+    for invalid in [
+        json!("gpt-image-2"),
+        json!([null]),
+        json!([" "]),
+        json!(["a", "b", "c", "d", "e"]),
+    ] {
+        c["coverModels"] = invalid;
+        assert!(validate_config(c.clone()).is_err());
+    }
+    c.as_object_mut().unwrap().remove("coverModels");
+    assert_eq!(validate_config(c).unwrap()["coverModel"], "gpt-image-2");
 }
