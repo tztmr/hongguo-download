@@ -297,22 +297,25 @@ fn run_merge_inner(
         && details.iter().all(|p| {
             p.video_config == details[0].video_config && p.audio_config == details[0].audio_config
         });
-    let audio_only =
-        request.mode == Some(MergeMode::Auto) && !compatible && can_copy_video(&details);
-    let needs_transcode = match request.mode {
-        Some(MergeMode::Copy) => {
-            if !compatible {
-                return Err(AppError::new(
-                    "MERGE_TRANSCODE_REQUIRED",
-                    "输入媒体参数不一致，需要开启 H.264 转码",
-                ));
+    let audio_only = !request.square_canvas
+        && request.mode == Some(MergeMode::Auto)
+        && !compatible
+        && can_copy_video(&details);
+    let needs_transcode = request.square_canvas
+        || match request.mode {
+            Some(MergeMode::Copy) => {
+                if !compatible {
+                    return Err(AppError::new(
+                        "MERGE_TRANSCODE_REQUIRED",
+                        "输入媒体参数不一致，需要开启 H.264 转码",
+                    ));
+                }
+                false
             }
-            false
-        }
-        Some(MergeMode::Transcode) => true,
-        Some(MergeMode::Auto) => !compatible && !audio_only,
-        None => request.transcode_h264,
-    };
+            Some(MergeMode::Transcode) => true,
+            Some(MergeMode::Auto) => !compatible && !audio_only,
+            None => request.transcode_h264,
+        };
     if !needs_transcode && !compatible && !audio_only {
         return Err(AppError::new(
             "MERGE_TRANSCODE_REQUIRED",
@@ -336,6 +339,12 @@ fn run_merge_inner(
             VideoEncoder::Copy
         };
         let mut spec = NormalizeSpec::new(&details, encoder, request.quality)?;
+        if request.square_canvas {
+            spec.square_canvas = true;
+            spec.width = super::framing::square_side(spec.width, spec.height);
+            spec.height = spec.width;
+            progress(event("首集转换为 1:1 方形，保留完整画面", 0.0, false));
+        }
         if let Some(budget) = budget {
             spec.cpu_threads = budget.cpu_threads.max(1);
         }
@@ -399,6 +408,12 @@ fn run_merge_inner(
 
     let checked_output = probe_details(tools, &temp_output)?;
     let merged = &checked_output.media;
+    if request.square_canvas && merged.video.width != merged.video.height {
+        return Err(AppError::new(
+            "MERGE_VALIDATION_FAILED",
+            "首集方形画幅校验失败，保留源视频",
+        ));
+    }
     if !needs_transcode {
         let expected_frames = details
             .iter()
@@ -587,6 +602,7 @@ fn write_concat_file(path: &Path, inputs: &[MergeInput]) -> Result<(), AppError>
 }
 
 struct NormalizeSpec {
+    square_canvas: bool,
     cpu_threads: usize,
     encoder: VideoEncoder,
     quality: MergeQuality,
@@ -612,6 +628,7 @@ impl NormalizeSpec {
             return Err(invalid_probe());
         }
         Ok(Self {
+            square_canvas: false,
             cpu_threads: 0,
             encoder,
             quality,
@@ -720,7 +737,14 @@ fn normalize_inputs(
                     command.args(["-c:v", "copy"]);
                 }
                 encoder => {
-                    command.arg("-vf").arg(format!("setpts=PTS-STARTPTS,fps={},scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1", spec.rate, spec.width, spec.height, spec.width, spec.height));
+                    let framing = if spec.square_canvas {
+                        super::framing::square_filter(spec.width)
+                    } else {
+                        format!("scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1", spec.width, spec.height, spec.width, spec.height)
+                    };
+                    command
+                        .arg("-vf")
+                        .arg(format!("setpts=PTS-STARTPTS,fps={},{}", spec.rate, framing));
                     match encoder {
                         VideoEncoder::Nvenc => {
                             command.args(nvenc_args(spec.quality));
@@ -1169,6 +1193,7 @@ mod performance_tests {
             output_file_name: "时长验证.mp4".into(),
             inputs: vec![snapshot(source.clone(), 1), snapshot(second, 2)],
             transcode_h264: false,
+            square_canvas: false,
             mode: Some(MergeMode::Auto),
             quality: MergeQuality::High,
             conflict_policy: MergeConflictPolicy::FailIfExists,
@@ -1195,6 +1220,149 @@ mod performance_tests {
                 .flat_map(|_| frame_hashes(&tools, &source))
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn square_shorts_preserve_full_frame_audio_and_duration() {
+        let Some(tools) = tools() else {
+            return;
+        };
+        let temp = TempDirectory::create(&std::env::temp_dir()).unwrap();
+        for (name, dimensions, sar, side, bounds) in [
+            ("landscape", "320x180", "1", 320usize, (0, 70, 320, 180)),
+            ("portrait", "180x320", "1", 320, (70, 0, 180, 320)),
+            ("square", "240x240", "1", 240, (0, 0, 240, 240)),
+            ("anamorphic", "180x180", "2", 180, (0, 44, 180, 90)),
+            ("rotated", "320x180", "1", 320, (70, 0, 180, 320)),
+        ] {
+            let source = temp.path.join(format!("{name}.mp4"));
+            let out = tools
+                .ffmpeg_command()
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &format!("color=white:size={dimensions}:rate=12"),
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000",
+                    "-t",
+                    "1",
+                    "-vf",
+                    &format!("setsar={sar}"),
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                ])
+                .arg(&source)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if name == "rotated" {
+                let rotated = temp.path.join("with-rotation.mp4");
+                let out = tools
+                    .ffmpeg_command()
+                    .args(["-v", "error", "-display_rotation", "90", "-i"])
+                    .arg(&source)
+                    .args(["-c", "copy"])
+                    .arg(&rotated)
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                fs::copy(rotated, &source).unwrap();
+                let raw = tools
+                    .ffprobe_command()
+                    .args(["-v", "error", "-show_streams", "-of", "json"])
+                    .arg(&source)
+                    .output()
+                    .unwrap();
+                let probe: serde_json::Value = serde_json::from_slice(&raw.stdout).unwrap();
+                assert!(
+                    probe["streams"][0]["side_data_list"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|s| s["rotation"] == 90),
+                    "fixture must contain a rotation matrix"
+                );
+            }
+            let original = fs::read(&source).unwrap();
+            // Deserialize the public request, also exercising compatibility of the new option.
+            let request: MergeRequest = serde_json::from_value(serde_json::json!({
+                "seriesRoot": temp.path, "outputFileName": format!("{name}-short.mp4"),
+                "inputs": [snapshot(source.clone(), 1)], "mode": "auto", "squareCanvas": true
+            }))
+            .unwrap();
+            let result = run_merge_with_budget(
+                &tools,
+                request,
+                &CancellationToken::default(),
+                Some(super::super::scheduling::ExecutionBudget {
+                    cpu_threads: 2,
+                    force_cpu: true,
+                    merge: true,
+                    memory: 0,
+                    gpu_memory: 0,
+                }),
+                |_| {},
+            )
+            .unwrap();
+            let probe = probe_media(&tools, &result.output_path).unwrap();
+            assert_eq!(
+                (probe.video.width, probe.video.height),
+                (Some(side as u32), Some(side as u32)),
+                "{name}"
+            );
+            assert!((probe.duration_seconds - 1.0).abs() < 0.1, "{name}");
+            assert!(probe.audio.is_some(), "{name}: audio lost");
+            assert_eq!(
+                fs::read(&source).unwrap(),
+                original,
+                "source must remain intact"
+            );
+            let frame = tools
+                .ffmpeg_command()
+                .args(["-v", "error", "-i"])
+                .arg(&result.output_path)
+                .args([
+                    "-frames:v",
+                    "1",
+                    "-pix_fmt",
+                    "rgb24",
+                    "-f",
+                    "rawvideo",
+                    "pipe:1",
+                ])
+                .output()
+                .unwrap();
+            assert!(frame.status.success());
+            assert_eq!(frame.stdout.len(), side * side * 3);
+            let (x, y, w, h) = bounds;
+            for row in 0..side {
+                for col in 0..side {
+                    let expected_white = col >= x && col < x + w && row >= y && row < y + h;
+                    assert_eq!(
+                        frame.stdout[(row * side + col) * 3] > 128,
+                        expected_white,
+                        "{name}: stretched/cropped at {col},{row}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1226,6 +1394,7 @@ mod performance_tests {
             output_file_name: "不同参数.mp4".into(),
             inputs,
             transcode_h264: false,
+            square_canvas: false,
             mode: Some(MergeMode::Auto),
             quality: MergeQuality::Balanced,
             conflict_policy: MergeConflictPolicy::FailIfExists,
@@ -1332,6 +1501,7 @@ mod performance_tests {
             output_file_name: "合并.mp4".into(),
             inputs,
             transcode_h264: false,
+            square_canvas: false,
             mode: Some(MergeMode::Copy),
             quality: MergeQuality::High,
             conflict_policy: MergeConflictPolicy::FailIfExists,
@@ -1374,6 +1544,7 @@ mod performance_tests {
                 },
             ],
             transcode_h264: false,
+            square_canvas: false,
             mode: Some(MergeMode::Auto),
             quality: MergeQuality::High,
             conflict_policy: MergeConflictPolicy::FailIfExists,

@@ -2,6 +2,7 @@ pub mod ai;
 mod audio_prepare;
 pub mod components;
 pub mod deletion;
+mod framing;
 pub mod hardware;
 #[cfg(unix)]
 pub mod merge;
@@ -118,6 +119,11 @@ pub fn validate_merge_request(
         Some(mode) => format!("{dedupe_key}-{mode:?}-{:?}", request.quality),
         None => dedupe_key,
     };
+    let dedupe_key = if request.square_canvas {
+        format!("{dedupe_key}-square")
+    } else {
+        dedupe_key
+    };
 
     Ok(ValidatedMergeRequest {
         book_id: request.book_id.clone(),
@@ -127,6 +133,7 @@ pub fn validate_merge_request(
         output_file_name: request.output_file_name.clone(),
         inputs,
         transcode_h264: request.transcode_h264,
+        square_canvas: request.square_canvas,
         mode: request.mode,
         quality: request.quality,
         conflict_policy: request.conflict_policy,
@@ -315,6 +322,11 @@ fn revalidate_merge_request(
         Some(mode) => format!("{dedupe_key}-{mode:?}-{:?}", request.quality),
         None => dedupe_key,
     };
+    let dedupe_key = if request.square_canvas {
+        format!("{dedupe_key}-square")
+    } else {
+        dedupe_key
+    };
 
     Ok(ValidatedMergeRequest {
         book_id: request.book_id.clone(),
@@ -324,6 +336,7 @@ fn revalidate_merge_request(
         output_file_name: request.output_file_name.clone(),
         inputs,
         transcode_h264: request.transcode_h264,
+        square_canvas: request.square_canvas,
         mode: request.mode,
         quality: request.quality,
         conflict_policy: request.conflict_policy,
@@ -1881,6 +1894,7 @@ mod tests {
                 output_file_name: format!("{book_id}.mp4"),
                 inputs,
                 transcode_h264: true,
+                square_canvas: false,
                 mode: None,
                 quality: model::MergeQuality::High,
                 conflict_policy: MergeConflictPolicy::FailIfExists,
@@ -2327,6 +2341,54 @@ mod tests {
     }
 
     struct ErrorExecutor;
+
+    #[test]
+    fn square_canvas_survives_persisted_retry_and_has_distinct_dedupe() {
+        let fixture = MergeFixture::new();
+        let mut request = fixture.request(
+            "auto-first-square",
+            vec![fixture.write_input("first.mp4", b"first")],
+        );
+        let original = validate_merge_request(&request).unwrap();
+        // Old saved requests keep their original frame; newly requested square
+        // processing must not accidentally reuse that original-frame result.
+        let mut old_json = serde_json::to_value(&original).unwrap();
+        old_json.as_object_mut().unwrap().remove("squareCanvas");
+        assert!(
+            !serde_json::from_value::<ValidatedMergeRequest>(old_json)
+                .unwrap()
+                .square_canvas
+        );
+        request.square_canvas = true;
+        let square = validate_merge_request(&request).unwrap();
+        assert_ne!(original.dedupe_key, square.dedupe_key);
+        let manager = MediaJobManager::load(&fixture.store).unwrap();
+        let job = manager.enqueue_merge(square.clone()).unwrap();
+        manager.update(&job.id, MediaJobTransition::Start).unwrap();
+        manager
+            .update(
+                &job.id,
+                MediaJobTransition::Fail {
+                    code: "FFMPEG_FAILED".into(),
+                    message: "retry".into(),
+                },
+            )
+            .unwrap();
+        drop(manager);
+        let service = MediaJobService::new(
+            Arc::new(MediaJobManager::load(&fixture.store).unwrap()),
+            Arc::new(ErrorExecutor),
+            Arc::new(RecordingSink::default()),
+        );
+        let retried = service
+            .retry_automation_merge(&job.id)
+            .unwrap()
+            .merge_request
+            .unwrap();
+        assert!(retried.execution_request().square_canvas);
+        assert_eq!(retried.inputs, square.inputs);
+        assert_eq!(retried.output_file_name, square.output_file_name);
+    }
 
     #[test]
     fn automation_retry_upgrades_persisted_copy_only_request_without_losing_inputs() {

@@ -670,6 +670,7 @@ async fn merge(
                 })
                 .collect(),
             transcode_h264: false,
+            square_canvas: is_short,
             mode: Some(MergeMode::Auto),
             quality: Default::default(),
             conflict_policy: Default::default(),
@@ -1014,17 +1015,13 @@ async fn short(app: &AppHandle, service: &Arc<Service>, task: &mut Task) -> Resu
         return Ok(());
     }
     let first = task.files.first().cloned().ok_or_else(invalid_file)?;
-    let result = crate::run_blocking(move || {
-        crate::youtube::format::validate_file(UploadFormat::Shorts, &first)
-    })
-    .await;
+    let result =
+        crate::run_blocking(move || crate::youtube::format::validate_square_shorts_source(&first))
+            .await;
     if let Err(e) = result {
-        if e.code == "UPLOAD_SHORTS_FORMAT_REQUIRED" {
+        if e.code == "UPLOAD_SHORTS_DURATION_REQUIRED" {
             task.short_done = true;
-            task.next(
-                "cleanup",
-                "首集不是竖版/方形或超过 3 分钟，跳过 Shorts，不裁剪原视频",
-            );
+            task.next("cleanup", "首集超过 3 分钟，跳过 Shorts，不自动截断原视频");
             return Ok(());
         }
         return Err(e);

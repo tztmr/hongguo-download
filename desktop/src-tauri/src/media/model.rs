@@ -95,6 +95,8 @@ pub struct MergeRequest {
     #[serde(default)]
     pub transcode_h264: bool,
     #[serde(default)]
+    pub square_canvas: bool,
+    #[serde(default)]
     pub mode: Option<MergeMode>,
     #[serde(default)]
     pub quality: MergeQuality,
@@ -112,6 +114,8 @@ pub struct StartMergeRequest {
     pub inputs: Vec<StartMergeInput>,
     #[serde(default)]
     pub transcode_h264: bool,
+    #[serde(default)]
+    pub square_canvas: bool,
     #[serde(default)]
     pub mode: Option<MergeMode>,
     #[serde(default)]
@@ -183,6 +187,8 @@ pub struct ValidatedMergeRequest {
     #[serde(default)]
     pub transcode_h264: bool,
     #[serde(default)]
+    pub square_canvas: bool,
+    #[serde(default)]
     pub mode: Option<MergeMode>,
     #[serde(default)]
     pub quality: MergeQuality,
@@ -197,6 +203,7 @@ impl ValidatedMergeRequest {
             output_file_name: self.output_file_name.clone(),
             inputs: self.inputs.clone(),
             transcode_h264: self.transcode_h264,
+            square_canvas: self.square_canvas,
             mode: self.mode,
             quality: self.quality,
             conflict_policy: self.conflict_policy,

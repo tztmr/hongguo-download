@@ -331,7 +331,9 @@ fn admit_merge(
         return Err("已有合并任务运行，等待合并通道空闲；其他资源可继续处理");
     }
     let copy_only = job.merge_request.as_ref().is_some_and(|r| {
-        r.mode == Some(super::model::MergeMode::Copy) || r.mode.is_none() && !r.transcode_h264
+        !r.square_canvas
+            && (r.mode == Some(super::model::MergeMode::Copy)
+                || r.mode.is_none() && !r.transcode_h264)
     });
     let gpu_ready = resources
         .gpu

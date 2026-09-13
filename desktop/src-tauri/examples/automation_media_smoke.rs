@@ -49,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             output_file_name: "成片.mp4".into(),
             inputs,
             transcode_h264: false,
+            square_canvas: false,
             mode: Some(MergeMode::Auto),
             quality: Default::default(),
             conflict_policy: Default::default(),

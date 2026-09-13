@@ -279,6 +279,7 @@ fn audio_bitrate(quality: MergeQuality) -> &'static str {
 }
 
 struct NormalizeSpec {
+    square_canvas: bool,
     width: u32,
     height: u32,
     rate: String,
@@ -331,7 +332,15 @@ fn normalize_args(
     if spec.copy_video {
         args.extend(["-c:v".into(), "copy".into()]);
     } else {
-        args.extend(["-vf".into(), format!("setpts=PTS-STARTPTS,fps={},scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1", spec.rate, spec.width, spec.height, spec.width, spec.height)]);
+        let framing = if spec.square_canvas {
+            super::super::framing::square_filter(spec.width)
+        } else {
+            format!("scale={}:{}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={}:{}:(ow-iw)/2:(oh-ih)/2,setsar=1", spec.width, spec.height, spec.width, spec.height)
+        };
+        args.extend([
+            "-vf".into(),
+            format!("setpts=PTS-STARTPTS,fps={},{}", spec.rate, framing),
+        ]);
         args.extend(quality_args(
             spec.quality,
             encoder,
@@ -392,7 +401,7 @@ fn run_with_encoder(
     }
     revalidate_input_identities(&inputs)?;
     let safe = copy_safe(&probes);
-    if mode == MergeMode::Copy && !safe {
+    if !request.square_canvas && mode == MergeMode::Copy && !safe {
         return Err(AppError::new(
             "MERGE_TRANSCODE_REQUIRED",
             "各集参数或时间轴不适合无损拼接，请选择智能合并或 H.264 转码",
@@ -401,10 +410,11 @@ fn run_with_encoder(
     let audio = probes.iter().any(|p| p.audio_timing.is_some());
     // MP4 cannot reliably preserve per-episode AAC priming/padding when copying.
     // Keep compatible video lossless, but decode each episode's audio separately.
-    let copy = mode != MergeMode::Transcode
+    let copy = !request.square_canvas
+        && mode != MergeMode::Transcode
         && safe
         && (mode == MergeMode::Copy || !audio || probes.len() == 1);
-    let copy_video = mode == MergeMode::Auto && video_copy_safe(&probes);
+    let copy_video = !request.square_canvas && mode == MergeMode::Auto && video_copy_safe(&probes);
     let mut expected_duration: f64 = probes.iter().map(|p| p.video_duration).sum();
     destination.verify_public_root_entry()?;
     let mut temp = TempDirectory::create(&destination)?;
@@ -436,7 +446,14 @@ fn run_with_encoder(
             .ok_or_else(invalid_probe)?
             & !1;
         let (rate, fps) = frame_rate(first)?;
+        let (width, height) = if request.square_canvas {
+            let side = super::super::framing::square_side(width, height);
+            (side, side)
+        } else {
+            (width, height)
+        };
         let spec = NormalizeSpec {
+            square_canvas: request.square_canvas,
             width,
             height,
             rate,
@@ -550,6 +567,12 @@ fn run_with_encoder(
     let output = checked_probe(tools, &temp.output_path()?, Some(&temp), control)?;
     let validation = (|| {
         validate_merged_output(&output.media, audio, expected_duration)?;
+        if request.square_canvas && output.media.video.width != output.media.video.height {
+            return Err(AppError::new(
+                "MERGE_VALIDATION_FAILED",
+                "首集方形画幅校验失败，保留源视频",
+            ));
+        }
         if (output.video_duration - expected_duration).abs() > SYNC_TOLERANCE {
             return Err(timing_error("合并视频时长与各集总时长不一致"));
         }
@@ -990,6 +1013,7 @@ mod tests {
                 output_file_name: "全集.mp4".into(),
                 inputs: (1..=count).rev().map(|i| fixture.input(i)).collect(),
                 transcode_h264: false,
+                square_canvas: false,
                 mode: Some(
                     if scenario == "transcode"
                         || scenario == "fallback"

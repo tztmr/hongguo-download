@@ -44,6 +44,25 @@ pub fn detect_file(path: &Path) -> Result<UploadFormat, AppError> {
     detect_probe(&probe_with_tools(path, &tools)?)
 }
 
+// The automatic first-episode path converts the canvas before upload. Duration
+// still has to qualify; the regular uploader continues to validate both.
+pub fn validate_square_shorts_source(path: &Path) -> Result<(), AppError> {
+    let exe = std::env::current_exe().map_err(|_| invalid())?;
+    let tools = MediaTools::from_resource_root(exe.parent().ok_or_else(invalid)?)?;
+    validate_square_source_probe(&probe_with_tools(path, &tools)?)
+}
+
+fn validate_square_source_probe(data: &Value) -> Result<(), AppError> {
+    display_dimensions(data)?;
+    if duration_seconds(data)? > 180.0 {
+        return Err(AppError::new(
+            "UPLOAD_SHORTS_DURATION_REQUIRED",
+            "首集超过 3 分钟，不能完整上传 Shorts",
+        ));
+    }
+    Ok(())
+}
+
 pub fn orientation_file(path: &Path) -> Result<&'static str, AppError> {
     let exe = std::env::current_exe().map_err(|_| invalid())?;
     let tools = MediaTools::from_resource_root(exe.parent().ok_or_else(invalid)?)?;
@@ -131,6 +150,15 @@ fn orientation_probe(data: &Value) -> Result<&'static str, AppError> {
 
 fn detect_probe(data: &Value) -> Result<UploadFormat, AppError> {
     let (width, height) = display_dimensions(data)?;
+    let duration = duration_seconds(data)?;
+    Ok(if width <= height && duration <= 180.0 {
+        UploadFormat::Shorts
+    } else {
+        UploadFormat::Standard
+    })
+}
+
+fn duration_seconds(data: &Value) -> Result<f64, AppError> {
     let duration: f64 = data["format"]["duration"]
         .as_str()
         .and_then(|s| s.parse().ok())
@@ -138,11 +166,7 @@ fn detect_probe(data: &Value) -> Result<UploadFormat, AppError> {
     if !duration.is_finite() || duration <= 0.0 {
         return Err(invalid());
     }
-    Ok(if width <= height && duration <= 180.0 {
-        UploadFormat::Shorts
-    } else {
-        UploadFormat::Standard
-    })
+    Ok(duration)
 }
 
 fn validate_probe(format: UploadFormat, data: &Value) -> Result<(), AppError> {
@@ -162,6 +186,29 @@ fn validate_probe(format: UploadFormat, data: &Value) -> Result<(), AppError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn square_source_accepts_landscape_but_never_relaxes_direct_shorts_upload() {
+        let mut source = json!({"streams":[{"codec_type":"video","width":1920,"height":1080}],"format":{"duration":"180"}});
+        assert!(validate_square_source_probe(&source).is_ok());
+        assert_eq!(
+            validate_probe(UploadFormat::Shorts, &source)
+                .unwrap_err()
+                .code,
+            "UPLOAD_SHORTS_FORMAT_REQUIRED"
+        );
+        source["format"]["duration"] = json!("180.01");
+        assert_eq!(
+            validate_square_source_probe(&source).unwrap_err().code,
+            "UPLOAD_SHORTS_DURATION_REQUIRED"
+        );
+        for duration in ["0", "-1", "NaN", "bad"] {
+            source["format"]["duration"] = json!(duration);
+            assert_eq!(
+                validate_square_source_probe(&source).unwrap_err().code,
+                "UPLOAD_FORMAT_PROBE_FAILED"
+            );
+        }
+    }
     #[test]
     fn checks_duration_and_both_upload_modes() {
         for (w, h, d, short) in [

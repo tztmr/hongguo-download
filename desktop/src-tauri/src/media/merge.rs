@@ -890,7 +890,10 @@ fn run_merge_inner(
     if request.inputs.is_empty() {
         return Err(AppError::new("MERGE_INPUT_INVALID", "合并输入不得为空"));
     }
-    if let Some(mode) = request.mode {
+    if let Some(mode) = request.mode.or(request
+        .square_canvas
+        .then_some(super::model::MergeMode::Transcode))
+    {
         return smart::run(tools, &request, mode, cancellation, progress);
     }
     let destination = ValidatedDestination::open(&request.series_root, &request.output_file_name)?;
@@ -1630,6 +1633,7 @@ mod tests {
             output_file_name: "全集.mp4".into(),
             inputs,
             transcode_h264: false,
+            square_canvas: false,
             mode: None,
             quality: super::super::model::MergeQuality::High,
             conflict_policy: MergeConflictPolicy::FailIfExists,
