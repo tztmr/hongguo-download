@@ -80,7 +80,7 @@ describe("YouTubeBatchUploadDialog", () => {
       jobId: expect.any(String), filePath: "/Downloads/都市全集.mp4", coverPath: null,
       subtitle: { path: null, language: "zh-Hans" },
       title: "都市全集", description: "第一部简介", tags: ["都市", "逆袭", "都市归来"],
-      categoryId: "24", privacyStatus: "private", selfDeclaredMadeForKids: false, containsSyntheticMedia: true, hasPaidProductPlacement: false,
+      categoryId: "24", privacyStatus: "unlisted", selfDeclaredMadeForKids: false, containsSyntheticMedia: true, hasPaidProductPlacement: false,
       audienceConfirmed: true, syntheticMediaConfirmed: true, publishConfirmed: true,
       dedup: { channelId: "channel-a", bookId: "book-1", dramaTitle: "都市归来", allowDuplicate: false },
     });

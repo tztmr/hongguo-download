@@ -10,7 +10,8 @@ it("opens YouTube Studio to set the Shorts related video after both uploads fini
     ...job(1), status: "completed", mainVideoUrl: "https://www.youtube.com/watch?v=main-123",
     shortVideoUrl: "https://www.youtube.com/shorts/short-456",
   }]));
-  expect(view.getByRole("link", { name: "相关视频 / Related video ↗" })).toHaveAttribute("href", "https://studio.youtube.com/video/short-456/edit");
+  fireEvent.click(view.getByRole("button", { name: /已结束/ }));
+  expect(view.getByRole("link", { name: "相关视频 / Related video ↗" }).getAttribute("href")).toBe("https://studio.youtube.com/video/short-456/edit");
 });
 it("lets every unfinished drama be skipped by stable ID including active uploads", () => {
   const onAction = vi.fn();
