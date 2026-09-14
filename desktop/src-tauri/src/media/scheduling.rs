@@ -11,6 +11,10 @@ use sysinfo::System;
 
 pub const MAX_AI_JOBS: usize = 5;
 pub(crate) const GIB: u64 = 1024 * 1024 * 1024;
+// NVENC and CUDA inference can share the card while there is VRAM headroom.
+// Treat utilization as saturated only near the driver's hard limit; the old
+// 85% cutoff moved otherwise runnable auto jobs to the CPU too eagerly.
+const GPU_SATURATED_USAGE_PERCENT: f32 = 95.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ExecutionBudget {
@@ -251,7 +255,9 @@ fn configured_for_platform(
         && parallel_kind_for_platform(job.kind, true)
         && job.ai_request.as_ref().is_some_and(|r| r.device == "auto");
     let gpu_busy = resources.gpu.is_some_and(|gpu| {
-        !gpu.shared_memory && (gpu.usage >= 85.0 || gpu.free_memory < gpu_reservation(job) + GIB)
+        !gpu.shared_memory
+            && (gpu.usage >= GPU_SATURATED_USAGE_PERCENT
+                || gpu.free_memory < gpu_reservation(job) + GIB)
     });
     if auto && (gpu_busy || (resources.gpu.is_none() && !active.is_empty())) {
         let mut cpu_job = job.clone();
@@ -613,6 +619,31 @@ mod tests {
         assert!(configured_for_platform(&job("cuda", "htdemucs"), &[gpu], busy, 0, true).is_err());
         assert!(configured_for_platform(&request, &[gpu], busy, 0, false).is_err());
     }
+
+    #[test]
+    fn windows_auto_keeps_gpu_when_merge_is_busy_but_vram_has_headroom() {
+        let request = job("auto", "htdemucs");
+        let resources = Resources {
+            gpu: Some(GpuResources {
+                free_memory: 7 * GIB,
+                usage: 90.0,
+                shared_memory: false,
+            }),
+            ..idle()
+        };
+        let running_merge = ExecutionBudget {
+            cpu_threads: 2,
+            force_cpu: false,
+            merge: true,
+            memory: GIB,
+            gpu_memory: GIB,
+        };
+        let next = configured_for_platform(&request, &[running_merge], resources, 5, true)
+            .expect("sufficient VRAM must keep automatic work on the GPU");
+        assert!(!next.force_cpu);
+        assert!(next.gpu_memory > 0);
+    }
+
     fn job(device: &str, model: &str) -> MediaJob {
         serde_json::from_value(serde_json::json!({
             "id":"test", "dedupeKey":"test", "kind":"separateBackgroundMusic", "status":"queued",
