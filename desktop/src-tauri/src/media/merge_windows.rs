@@ -71,6 +71,13 @@ struct RawStream {
     time_base: Option<String>,
     sample_rate: Option<String>,
     channels: Option<u16>,
+    duration: Option<String>,
+    disposition: Option<RawDisposition>,
+}
+
+#[derive(Deserialize)]
+struct RawDisposition {
+    attached_pic: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -134,7 +141,13 @@ fn probe_details(tools: &MediaTools, path: &Path) -> Result<ProbeDetails, AppErr
     let streams = raw["streams"].as_array().ok_or_else(invalid_probe)?;
     let video = streams
         .iter()
-        .find(|s| s["codec_type"] == "video")
+        .find(|s| {
+            s["codec_type"] == "video"
+                && s["disposition"]["attached_pic"]
+                    .as_u64()
+                    .unwrap_or_default()
+                    != 1
+        })
         .ok_or_else(invalid_probe)?;
     let number = |value: &serde_json::Value, fallback: f64| {
         value
@@ -461,14 +474,22 @@ fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
     let videos = raw
         .streams
         .iter()
-        .filter(|stream| stream.codec_type.as_deref() == Some("video"))
+        .filter(|stream| {
+            stream.codec_type.as_deref() == Some("video")
+                && stream
+                    .disposition
+                    .as_ref()
+                    .and_then(|value| value.attached_pic)
+                    .unwrap_or_default()
+                    != 1
+        })
         .collect::<Vec<_>>();
     let audios = raw
         .streams
         .iter()
         .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
         .collect::<Vec<_>>();
-    if videos.len() != 1 || audios.len() > 1 {
+    if videos.len() != 1 {
         return Err(invalid_probe());
     }
     let video = videos[0];
@@ -476,12 +497,15 @@ fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
         .format
         .duration
         .as_deref()
-        .ok_or_else(invalid_probe)?
-        .parse::<f64>()
-        .map_err(|_| invalid_probe())?;
-    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
-        return Err(invalid_probe());
-    }
+        .and_then(parse_duration)
+        .or_else(|| video.duration.as_deref().and_then(parse_duration))
+        .or_else(|| {
+            audios
+                .first()
+                .and_then(|stream| stream.duration.as_deref())
+                .and_then(parse_duration)
+        })
+        .ok_or_else(invalid_probe)?;
     Ok(MediaProbe {
         video: StreamSignature {
             codec_name: video.codec_name.clone().ok_or_else(invalid_probe)?,
@@ -513,6 +537,11 @@ fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
             .transpose()?,
         duration_seconds,
     })
+}
+
+fn parse_duration(value: &str) -> Option<f64> {
+    let duration = value.parse::<f64>().ok()?;
+    (duration.is_finite() && duration > 0.0).then_some(duration)
 }
 
 fn validate_inputs(root: &Path, inputs: &[MergeInput]) -> Result<(), AppError> {

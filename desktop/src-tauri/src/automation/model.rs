@@ -69,6 +69,7 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         "scope",
         "orientation",
         "keywords",
+        "categoryIds",
         "exclude",
         "completeOnly",
         "maxEpisodes",
@@ -158,6 +159,31 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
             }
         }
         clean.insert("coverModels".into(), serde_json::json!(models));
+    }
+    if let Some(raw) = value.get("categoryIds") {
+        let values = raw
+            .as_array()
+            .ok_or_else(|| AppError::new("AUTOMATION_SETTINGS_INVALID", "分类标签必须为列表"))?;
+        if values.len() > 200
+            || values.iter().any(|v| {
+                v.as_str().is_none_or(|label| {
+                    let label = label.trim();
+                    label.is_empty() || label.len() > 200
+                })
+            })
+        {
+            return Err(AppError::new(
+                "AUTOMATION_SETTINGS_INVALID",
+                "分类标签数量或内容无效",
+            ));
+        }
+        let mut ids = Vec::new();
+        for id in values.iter().map(|v| v.as_str().unwrap().trim()) {
+            if !ids.iter().any(|saved| saved == &id) {
+                ids.push(id);
+            }
+        }
+        clean.insert("categoryIds".into(), serde_json::json!(ids));
     }
     let mut c = Value::Object(clean);
     for key in [
@@ -452,7 +478,8 @@ impl Task {
         self.retry_ready = false;
         self.attempts = 0;
         self.media_state = None;
-        self.message = "已手动跳过，不再自动处理或上传；跳过后删除本地任务文件夹，保留记录与去重标记".into();
+        self.message =
+            "已手动跳过，不再自动处理或上传；跳过后删除本地任务文件夹，保留记录与去重标记".into();
     }
     // In-flight stages may finish after a skip. Keep their file receipts and
     // side-effect handles, but never let their stale status undo the skip.

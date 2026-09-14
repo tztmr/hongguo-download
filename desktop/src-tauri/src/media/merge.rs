@@ -64,6 +64,13 @@ struct RawStream {
     time_base: Option<String>,
     sample_rate: Option<String>,
     channels: Option<u16>,
+    duration: Option<String>,
+    disposition: Option<RawDisposition>,
+}
+
+#[derive(Deserialize)]
+struct RawDisposition {
+    attached_pic: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -75,10 +82,15 @@ fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
     let raw: RawProbe = serde_json::from_slice(bytes).map_err(|error| {
         AppError::with_cause("FFPROBE_INVALID", "媒体检测结果无效", error.to_string())
     })?;
-    let mut videos = raw
-        .streams
-        .iter()
-        .filter(|stream| stream.codec_type.as_deref() == Some("video"));
+    let mut videos = raw.streams.iter().filter(|stream| {
+        stream.codec_type.as_deref() == Some("video")
+            && stream
+                .disposition
+                .as_ref()
+                .and_then(|value| value.attached_pic)
+                .unwrap_or_default()
+                != 1
+    });
     let video = videos.next().ok_or_else(invalid_probe)?;
     if videos.next().is_some() {
         return Err(invalid_probe());
@@ -88,19 +100,23 @@ fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
         .iter()
         .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
         .collect::<Vec<_>>();
-    if audios.len() > 1 {
-        return Err(invalid_probe());
-    }
+    // Some downloaded fragmented MP4 files report format.duration as N/A while
+    // the selected stream still has a valid duration. Use that value instead
+    // of rejecting a file that ffprobe can otherwise read safely. If multiple
+    // audio tracks are present, the first (the source default) is retained.
     let duration_seconds = raw
         .format
         .duration
         .as_deref()
-        .ok_or_else(invalid_probe)?
-        .parse::<f64>()
-        .map_err(|_| invalid_probe())?;
-    if !duration_seconds.is_finite() || duration_seconds < 0.0 {
-        return Err(invalid_probe());
-    }
+        .and_then(parse_duration)
+        .or_else(|| video.duration.as_deref().and_then(parse_duration))
+        .or_else(|| {
+            audios
+                .first()
+                .and_then(|stream| stream.duration.as_deref())
+                .and_then(parse_duration)
+        })
+        .ok_or_else(invalid_probe)?;
     Ok(MediaProbe {
         video: video_signature(video)?,
         audio: audios
@@ -109,6 +125,11 @@ fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
             .transpose()?,
         duration_seconds,
     })
+}
+
+fn parse_duration(value: &str) -> Option<f64> {
+    let duration = value.parse::<f64>().ok()?;
+    (duration.is_finite() && duration > 0.0).then_some(duration)
 }
 
 fn video_signature(stream: &RawStream) -> Result<StreamSignature, AppError> {
@@ -1850,6 +1871,28 @@ printf 'out_time_us=1000000\nprogress=end\n'
                 "FFPROBE_INVALID"
             );
         }
+    }
+
+    #[test]
+    fn ffprobe_json_uses_stream_duration_and_ignores_attached_cover_or_extra_audio() {
+        let parsed = parse_probe_json(
+            json!({
+                "streams": [
+                    {"codec_type":"video","codec_name":"mjpeg","disposition":{"attached_pic":1}},
+                    {"codec_type":"video","codec_name":"h264","width":1920,"height":1080,
+                     "r_frame_rate":"30/1","time_base":"1/15360","duration":"2.5"},
+                    {"codec_type":"audio","codec_name":"aac","sample_rate":"48000","channels":2},
+                    {"codec_type":"audio","codec_name":"aac","sample_rate":"44100","channels":2}
+                ],
+                "format": {"duration":"N/A"}
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(parsed.video.codec_name, "h264");
+        assert_eq!(parsed.duration_seconds, 2.5);
+        assert_eq!(parsed.audio.unwrap().sample_rate, Some(48000));
     }
 
     #[test]

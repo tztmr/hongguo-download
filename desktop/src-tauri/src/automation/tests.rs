@@ -124,6 +124,17 @@ fn episode_limit_defaults_and_validates_without_truncating_a_series() {
 }
 
 #[test]
+fn category_ids_are_preserved_and_deduplicated() {
+    let mut c = config();
+    c["categoryIds"] = json!(["drama:cate_1047", "manju:cate_758", "drama:cate_1047"]);
+    let saved = validate_config(c).unwrap();
+    assert_eq!(
+        saved["categoryIds"],
+        json!(["drama:cate_1047", "manju:cate_758"])
+    );
+}
+
+#[test]
 fn upgrade_requeues_only_completed_jobs_that_need_folder_cleanup() {
     let path = temporary();
     let mut job = task();

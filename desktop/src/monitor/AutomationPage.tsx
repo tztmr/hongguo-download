@@ -10,6 +10,8 @@ import { UploadFormatPicker } from "../youtube/UploadFormatPicker";
 import type { YouTubeUploadFormat } from "../youtube/types";
 import { orderedCoverModels } from "./coverModels";
 import { AIStudio, studioDefaults, type AIStudioSettings } from "./AIStudio";
+import { fetchCategoryGroups } from "../api";
+import type { CategoryGroup, ContentType } from "../types";
 
 const STORAGE_KEY = "hongguo.automation.settings-draft.v1";
 const defaults = {
@@ -19,7 +21,7 @@ const defaults = {
   interval: "5", types: ["漫剧", "AI剧"], scope: "today", orientation: "all",
   collectRecommend: true, collectNew: true, collectRank: true, collectSearch: true,
   collectPages: "10", recommendDevices: "3",
-  keywords: "", exclude: "", completeOnly: true, maxEpisodes: "300", definition: "auto", concurrency: "1",
+  keywords: "", categoryIds: [] as string[], exclude: "", completeOnly: true, maxEpisodes: "300", definition: "auto", concurrency: "1",
   separate: true, subtitles: true, subtitleSource: "original", subtitleFormat: "srt", retries: "3",
   channel: "", privacy: "private", title: "{剧名}", description: "{简介}", tags: "{分类标签}, {剧名}",
   aiMetadataApplied: false, nonAiTitle: "{剧名}", nonAiDescription: "{简介}", nonAiTags: "{分类标签}, {剧名}",
@@ -31,6 +33,7 @@ const defaults = {
   resume: true, notify: true,
 };
 type Draft = typeof defaults;
+type AutomationCategory = { id: string; apiId: string; name: string; group: string; contentType: ContentType };
 type ToggleKey = { [K in keyof Draft]: Draft[K] extends boolean ? K : never }[keyof Draft];
 const tabs = ["监听与下载", "媒体处理", "YouTube 上传", "AI 文案与封面", "清理与运行"];
 const scopes: Record<string, string> = { all: "不限制", today: "仅今天上线", new: "最新收录与推荐" };
@@ -52,6 +55,8 @@ function normalizeDraft(value: unknown): Draft {
       const saved = (value as Record<string, unknown>)[key];
       if (key === "types") {
         if (Array.isArray(saved)) result.types = defaults.types.filter((item) => saved.includes(item));
+      } else if (key === "categoryIds") {
+        if (Array.isArray(saved)) result.categoryIds = saved.filter((item): item is string => typeof item === "string").slice(0, 200);
       } else if (key === "coverModels") {
         if (Array.isArray(saved)) result.coverModels = orderedCoverModels(saved, "");
       } else if (typeof saved === typeof defaults[key]) {
@@ -104,6 +109,26 @@ function metadataExample(template: string, limit: number) {
   return template.replace(/\{(?:剧名|集数|简介|分类标签)\}/g, (key) => variables[key]).slice(0, limit);
 }
 
+function splitCategoryText(value: string) {
+  return value.split(/[·,，、/|]+/).map((item) => item.trim()).filter(Boolean);
+}
+
+function mergeAutomationCategories(groupsByType: Array<{ contentType: ContentType; groups: CategoryGroup[] }>) {
+  const result: AutomationCategory[] = [];
+  const seen = new Set<string>();
+  for (const { contentType, groups } of groupsByType) {
+    for (const group of groups) {
+      for (const item of group.items) {
+        const key = `${contentType}:${item.id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({ id: key, apiId: item.id, name: item.name, group: group.name, contentType });
+      }
+    }
+  }
+  return result;
+}
+
 export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcurrency, onAIConcurrencyChange, runtimeEnabled = isTauri() }: {
   aiConcurrency?: number; onAIConcurrencyChange?: (value: number) => Promise<void>;
   saveDir: string; channels?: YouTubeChannel[]; onOpenSettings?: () => void; runtimeEnabled?: boolean;
@@ -120,6 +145,11 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
   const [pollError, setPollError] = useState("");
   const [confirmStart, setConfirmStart] = useState(false);
   const [secrets, setSecrets] = useState<AutomationSecrets>({});
+  const [categoryOptions, setCategoryOptions] = useState<AutomationCategory[]>([]);
+  const [categoryLoading, setCategoryLoading] = useState(false);
+  const [categoryError, setCategoryError] = useState("");
+  const [categoryOpen, setCategoryOpen] = useState(false);
+  const [categoryDraftIds, setCategoryDraftIds] = useState<string[]>([]);
   const busy = useRef(false);
   const revision = useRef(0);
   const mounted = useRef(true);
@@ -151,6 +181,31 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
     const timer = window.setInterval(() => void refresh(), 2000);
     return () => { active = false; mounted.current = false; window.clearInterval(timer); };
   }, [runtimeEnabled]);
+  useEffect(() => {
+    if (!runtimeEnabled) return;
+    let active = true;
+    setCategoryLoading(true);
+    setCategoryError("");
+    Promise.all(([
+      ["drama", "真人剧"],
+      ["manju", "漫剧"],
+    ] as const).map(async ([contentType]) => ({ contentType, groups: await fetchCategoryGroups(contentType) })))
+      .then((groups) => {
+        if (!active) return;
+        setCategoryOptions(mergeAutomationCategories(groups));
+      })
+      .catch(() => {
+        if (active) setCategoryError("分类接口暂时不可用，可继续填写自定义分类");
+      })
+      .finally(() => { if (active) setCategoryLoading(false); });
+    return () => { active = false; };
+  }, [runtimeEnabled]);
+  useEffect(() => {
+    if (!categoryOptions.length || draft.categoryIds.length || !draft.keywords.trim()) return;
+    const wanted = new Set(splitCategoryText(draft.keywords));
+    const ids = categoryOptions.filter((item) => wanted.has(item.name)).map((item) => item.id);
+    if (ids.length) setDraft((current) => current.categoryIds.length ? current : { ...current, categoryIds: ids });
+  }, [categoryOptions, draft.categoryIds.length, draft.keywords]);
   function markDirty() { editRevision.current += 1; dirtyRef.current = true; setDirty(true); setConfirmStart(false); setMessage(""); }
   function update<K extends keyof Draft>(key: K, value: Draft[K]) {
     // A newly typed key belongs to the provider/base URL shown when it was entered.
@@ -168,6 +223,27 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
     if (key === "coverModels") {
       if (Array.isArray(value)) update("coverModels", value);
     } else if (typeof value === "string") update(key, value);
+  }
+  function categoryLabels(ids: string[]) {
+    const labels: string[] = [];
+    for (const id of ids) {
+      const option = categoryOptions.find((item) => item.id === id);
+      if (option && !labels.includes(option.name)) labels.push(option.name);
+    }
+    return labels;
+  }
+  function openCategoryPicker() {
+    setCategoryDraftIds(draft.categoryIds);
+    setCategoryOpen(true);
+  }
+  function confirmCategories() {
+    const labels = categoryLabels(categoryDraftIds);
+    setDraft((current) => ({ ...current, categoryIds: categoryDraftIds, keywords: labels.join("，") }));
+    markDirty();
+    setCategoryOpen(false);
+  }
+  function toggleCategory(id: string) {
+    setCategoryDraftIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   }
   async function perform(label: string, command: () => Promise<AutomationSnapshot>) {
     if (busy.current) return false;
@@ -252,7 +328,29 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
         ["collectRecommend", "推荐轮询"], ["collectNew", "新剧采集"], ["collectRank", "榜单采集"], ["collectSearch", "关键词搜索"],
       ] as const).map(([key, label]) => <button type="button" key={key} aria-pressed={draft[key]} className={draft[key] ? "selected" : ""} onClick={() => update(key, !draft[key])}><CheckIcon size={14} />{label}</button>)}</div><small>推荐、新剧、8 个榜单与关键词搜索轮流采集，统一筛选与查重。关键词搜索使用“包含关键词”，留空时不搜索。</small></div>
       <div className="auto-grid"><Field label="推荐设备轮次" hint="默认 3 轮。使用设备池轮换；每轮在同一设备连续翻页，换设备重新取首屏，不额外批量注册设备。"><input type="number" min="1" max="10" step="1" value={draft.recommendDevices} onChange={e => update("recommendDevices", e.target.value)} disabled={!draft.collectRecommend} /></Field><Field label="每个来源最多翻页" hint="默认 10 页。推荐按每台设备计算；重复页自动结束。各来源轮流请求，轮次结束后按检查频率重新采集。"><input type="number" min="1" max="30" step="1" value={draft.collectPages} onChange={e => update("collectPages", e.target.value)} /></Field></div>
-      <div className="auto-grid"><Field label="检查频率"><select value={draft.interval} onChange={(e) => update("interval", e.target.value)}>{[1, 3, 5, 10, 15, 30].map((n) => <option key={n} value={n}>每 {n} 分钟</option>)}</select></Field><Field label="剧目范围" hint="仅今天上线按北京时间核对日期；其他选项不限制上线日期。推荐内容仍需通过类型、集数、方向和分类筛选。"><select value={draft.scope} onChange={(e) => update("scope", e.target.value)}>{Object.entries(scopes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="视频方向"><select value={draft.orientation} onChange={(e) => update("orientation", e.target.value)}><option value="all">全部方向</option><option value="vertical">仅竖屏</option><option value="horizontal">仅横屏</option></select></Field><Field label="下载画质"><select value={draft.definition} onChange={(e) => update("definition", e.target.value)}><option value="auto">自动最高画质</option><option value="1080p">优先 1080p</option><option value="720p">优先 720p</option></select></Field><Field label="最多集数" hint="默认 300 集；填写 0 表示不限集数。超过上限跳过整部剧，不截取前几集；已开始的任务沿用原设置。"><input type="number" min="0" max="10000" step="1" value={draft.maxEpisodes} onChange={(e) => update("maxEpisodes", e.target.value)} /></Field><Field label="分类筛选" hint="逗号分隔，留空表示不限；只匹配源分类和分类标签，不匹配剧名或简介。"><input value={draft.keywords} placeholder="如：权谋，重生，古代" onChange={(e) => update("keywords", e.target.value)} /></Field><Field label="排除分类"><input value={draft.exclude} placeholder="如：预告, 花絮" onChange={(e) => update("exclude", e.target.value)} /></Field></div>
+      <div className="auto-grid"><Field label="检查频率"><select value={draft.interval} onChange={(e) => update("interval", e.target.value)}>{[1, 3, 5, 10, 15, 30].map((n) => <option key={n} value={n}>每 {n} 分钟</option>)}</select></Field><Field label="剧目范围" hint="仅今天上线按北京时间核对日期；其他选项不限制上线日期。推荐内容仍需通过类型、集数、方向和分类筛选。"><select value={draft.scope} onChange={(e) => update("scope", e.target.value)}>{Object.entries(scopes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><Field label="视频方向"><select value={draft.orientation} onChange={(e) => update("orientation", e.target.value)}><option value="all">全部方向</option><option value="vertical">仅竖屏</option><option value="horizontal">仅横屏</option></select></Field><Field label="下载画质"><select value={draft.definition} onChange={(e) => update("definition", e.target.value)}><option value="auto">自动最高画质</option><option value="1080p">优先 1080p</option><option value="720p">优先 720p</option></select></Field><Field label="最多集数" hint="默认 300 集；填写 0 表示不限集数。超过上限跳过整部剧，不截取前几集；已开始的任务沿用原设置。"><input type="number" min="0" max="10000" step="1" value={draft.maxEpisodes} onChange={(e) => update("maxEpisodes", e.target.value)} /></Field><Field label="排除分类"><input value={draft.exclude} placeholder="如：预告, 花絮" onChange={(e) => update("exclude", e.target.value)} /></Field></div>
+      <div className="auto-category-field">
+        <span>API 分类筛选</span>
+        <button type="button" className="auto-category-trigger" aria-haspopup="dialog" aria-expanded={categoryOpen} onClick={openCategoryPicker} disabled={categoryLoading && !categoryOptions.length}>
+          {categoryLoading ? "正在读取 API 分类…" : draft.categoryIds.length ? `已选 ${draft.categoryIds.length} 个：${categoryLabels(draft.categoryIds).join("、")}` : "点击选择分类标签"}
+        </button>
+        {categoryOpen && <div className="auto-category-menu" role="dialog" aria-label="选择 API 分类标签">
+          <div className="auto-category-menu-heading"><strong>选择分类标签</strong><small>按 API 返回的真人剧 / 漫剧分类多选</small></div>
+          {!categoryOptions.length && <p className="auto-category-empty">{categoryError || "暂无分类数据"}</p>}
+          {(["drama", "manju"] as const).map((contentType) => {
+            const label = contentType === "drama" ? "真人剧" : "漫剧";
+            const groups = categoryOptions.filter((item) => item.contentType === contentType).reduce<Record<string, AutomationCategory[]>>((all, item) => {
+              (all[item.group] ||= []).push(item);
+              return all;
+            }, {});
+            return <section key={contentType} className="auto-category-source"><h4>{label}</h4>{Object.entries(groups).map(([group, items]) => <div key={group} className="auto-category-group"><strong>{group}</strong><div>{items.map((item) => <label key={item.id}><input type="checkbox" checked={categoryDraftIds.includes(item.id)} onChange={() => toggleCategory(item.id)} />{item.name}</label>)}</div></div>)}</section>;
+          })}
+          <div className="auto-category-menu-actions"><button type="button" onClick={() => setCategoryOpen(false)}>取消</button><button type="button" className="primary-button" onClick={confirmCategories}>确定标签</button></div>
+        </div>}
+        <small>分类来自 API；多选后按“确定标签”保存。已选标签会同步到筛选条件，多个分类按任意一个匹配。</small>
+        {categoryError && <small className="auto-runtime-error">{categoryError}</small>}
+      </div>
+      <Field label="分类筛选（可补充）" hint="可补充 API 未返回的标签；只匹配源分类和分类标签，不匹配剧名或简介。"><input value={draft.keywords} placeholder="如：权谋，重生，古代" onChange={(e) => update("keywords", e.target.value)} /></Field>
       {toggle("completeOnly", "仅处理已完结剧目", "未完结的剧目继续观察，完结后再下载全集。")}
       <div className="auto-fixed"><CheckIcon size={16} /><div><strong>监听后先查重 · 确认重复才跳过</strong><small>按频道、源 ID、季数和正片 / Shorts 类型核对。不同季分别处理；仅剧名相似或旧记录信息不足时待核对。保留原始剧名，AI 改标题不改变去重身份。</small></div><span>必选步骤</span></div>
       <div className="auto-path"><span>本地保留规则</span><strong>剧名 + 唯一 ID</strong><code>示例短剧__demo_123456/</code><small>下载目录保留可读剧名和源 ID；独立记录原始剧名、源 ID、下载状态、目标频道与上传结果。清理视频时保留记录，未完成任务可继续。</small></div>

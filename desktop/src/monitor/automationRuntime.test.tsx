@@ -244,6 +244,29 @@ describe("native automation boundaries", () => {
     expect(button(view, "启动 24 小时自动任务").disabled).toBe(true);
     expect((view.getByPlaceholderText("如：权谋，重生，古代") as HTMLInputElement).value).toBe("保留草稿");
   });
+  it("loads API categories into a multi-select and saves the API key with compatible wording", async () => {
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "api_get") {
+        const path = String((args as { path?: string })?.path || "");
+        return {
+          groups: [{ id: "全部主题", name: "全部主题", items: path.includes("drama")
+            ? [{ id: "cate_1047", name: "权谋" }, { id: "cate_758", name: "古代" }]
+            : [{ id: "cate_758", name: "古代" }] }],
+        } as never;
+      }
+      const payload = args as Record<string, unknown> | undefined;
+      if (command === "save_automation_settings") state = { ...state, config: payload?.config as Record<string, unknown> };
+      return state as never;
+    });
+    const view = page(); await loaded(view);
+    await waitFor(() => expect(view.getByRole("button", { name: "点击选择分类标签" })).toBeTruthy());
+    fireEvent.click(view.getByRole("button", { name: "点击选择分类标签" }));
+    fireEvent.click(view.getByRole("checkbox", { name: "权谋" }));
+    fireEvent.click(view.getByRole("button", { name: "确定标签" }));
+    save(view);
+    await waitFor(() => expect(state.config?.categoryIds).toEqual(["drama:cate_1047"]));
+    expect(state.config?.keywords).toBe("权谋");
+  });
   it("polls native progress without overwriting edits, and unmounting never stops the backend", async () => {
     vi.useFakeTimers();
     const view = page(); await act(async () => {});
@@ -253,7 +276,7 @@ describe("native automation boundaries", () => {
     expect((view.getByPlaceholderText("如：权谋，重生，古代") as HTMLInputElement).value).toBe("未保存");
     view.unmount();
     await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
-    expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
+    expect(vi.mocked(invoke).mock.calls.filter(([name]) => name === "get_automation_snapshot")).toHaveLength(2);
   });
   it("does not call the native runtime in browser preview", async () => {
     const view = render(<AutomationPage saveDir="/fixture" runtimeEnabled={false} />);

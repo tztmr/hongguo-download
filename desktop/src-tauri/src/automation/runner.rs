@@ -500,7 +500,7 @@ async fn inspect(app: &AppHandle, task: &mut Task) -> Result<(), AppError> {
     task.episodes = source::parse_catalogue(&catalogue, task.source.episode_count)?;
     task.episode_total = task.episodes.len();
     let limit = number(&task.config, "maxEpisodes", 300);
-    if task.episode_total as u64 > limit {
+    if limit > 0 && task.episode_total as u64 > limit {
         task.status = Status::Skipped;
         task.message = format!(
             "目录确认共 {} 集，超过最多 {limit} 集设置，跳过整部剧",
@@ -616,21 +616,57 @@ async fn download(
     let task_id = task.id.clone();
     let path = crate::run_blocking(move || {
         ensure_task_running(&owner, &task_id)?;
+        let verify_download = |path: &Path| -> Result<(), AppError> {
+            let probe = tools()?.probe_media(path).map_err(|error| {
+                AppError::with_cause(
+                    "AUTOMATION_MEDIA_PROBE_FAILED",
+                    "下载文件媒体检测失败，已清理文件并自动重试",
+                    error.message.clone(),
+                )
+            })?;
+            if probe.duration_seconds <= 0.0 {
+                return Err(AppError::new(
+                    "AUTOMATION_MEDIA_PROBE_FAILED",
+                    "下载文件时长无效，已清理文件并自动重试",
+                ));
+            }
+            Ok(())
+        };
         if let Some(path) = existing {
             safe_root(&path)?;
-            let record: OwnedFile = serde_json::from_slice(&fs::read(&receipt).map_err(|_| {
-                AppError::new(
-                    "AUTOMATION_LOCAL_REVIEW",
-                    "发现无完成凭据的同名文件，请先移走该文件再继续；不会上传或清理它",
-                )
-            })?)
-            .map_err(|_| invalid_file())?;
-            let actual = identity(&path)?;
-            if record.path != path || record.hash != actual.hash || record.size != actual.size {
-                return Err(invalid_file());
+            // Older versions could leave a finished media file without the
+            // sidecar receipt (or the file may have been moved and restored).
+            // Re-probe the file and adopt it when it is a valid episode. This
+            // keeps recovery automatic and avoids asking the user to move a
+            // stale file by hand.
+            match verify_download(&path) {
+                Ok(()) => {
+                    let actual = identity(&path)?;
+                    let matches_receipt = fs::read(&receipt)
+                        .ok()
+                        .and_then(|bytes| serde_json::from_slice::<OwnedFile>(&bytes).ok())
+                        .is_some_and(|record| {
+                            record.path == path
+                                && record.hash == actual.hash
+                                && record.size == actual.size
+                        });
+                    if !matches_receipt {
+                        crate::atomic_write(
+                            &receipt,
+                            &serde_json::to_vec(&actual).map_err(|_| invalid_file())?,
+                            "补写下载完成凭据",
+                        )?;
+                    }
+                    return Ok(path);
+                }
+                Err(error) if error.code == "AUTOMATION_MEDIA_PROBE_FAILED" => {
+                    // It is inside this task's protected root and has failed
+                    // media validation, so it is safe to remove before retry.
+                    let _ = fs::remove_file(&path);
+                    let _ = fs::remove_file(&receipt);
+                }
+                Err(error) => return Err(error),
             }
-            tools()?.probe_media(&path)?;
-            return Ok(path);
         }
         let state = a.state::<AppState>();
         crate::ensure_api_ready(&state.client, &state.api_base, &state.api_ready)?;
@@ -664,9 +700,13 @@ async fn download(
             state.prepared_series_assets.clone(),
         )?;
         let path = PathBuf::from(result.path);
-        let probe = tools()?.probe_media(&path)?;
-        if probe.duration_seconds <= 0.0 {
-            return Err(invalid_file());
+        match verify_download(&path) {
+            Ok(()) => {}
+            Err(error) if error.code == "AUTOMATION_MEDIA_PROBE_FAILED" => {
+                let _ = fs::remove_file(&path);
+                return Err(error);
+            }
+            Err(error) => return Err(error),
         }
         let record = identity(&path)?;
         crate::atomic_write(
@@ -1417,11 +1457,21 @@ pub fn cancel_owned(app: &AppHandle, task: &Task) {
         .lock()
         .ok()
         .map(|settings| settings.save_dir.clone());
-    let Some(save_dir) = save_dir else { return; };
-    if safe_root(&task.root).is_err() { return; }
-    let Ok(root) = fs::canonicalize(&task.root) else { return; };
-    let Ok(parent) = fs::canonicalize(root.parent().unwrap_or_else(|| Path::new("."))) else { return; };
-    let Ok(save_root) = fs::canonicalize(save_dir) else { return; };
+    let Some(save_dir) = save_dir else {
+        return;
+    };
+    if safe_root(&task.root).is_err() {
+        return;
+    }
+    let Ok(root) = fs::canonicalize(&task.root) else {
+        return;
+    };
+    let Ok(parent) = fs::canonicalize(root.parent().unwrap_or_else(|| Path::new("."))) else {
+        return;
+    };
+    let Ok(save_root) = fs::canonicalize(save_dir) else {
+        return;
+    };
     // Require the canonical task directory to be below the configured save
     // directory and retain at least the 自动追剧 parent component.
     let owned = root.starts_with(&save_root)
