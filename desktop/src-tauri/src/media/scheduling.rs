@@ -341,9 +341,9 @@ fn admit_merge(
             && (r.mode == Some(super::model::MergeMode::Copy)
                 || r.mode.is_none() && !r.transcode_h264)
     });
-    let gpu_ready = resources
-        .gpu
-        .is_some_and(|g| !g.shared_memory && g.usage < 85.0 && g.free_memory >= 2 * GIB);
+    let gpu_ready = resources.gpu.is_some_and(|g| {
+        !g.shared_memory && g.usage < GPU_SATURATED_USAGE_PERCENT && g.free_memory >= 2 * GIB
+    });
     let force_cpu = copy_only || !gpu_ready && (!active.is_empty() || resources.gpu.is_some());
     let cpu_threads = if copy_only {
         1
@@ -722,6 +722,19 @@ mod tests {
             configured_for_platform(&job("auto", "htdemucs"), &[budget], busy_gpu, 1, true)
                 .unwrap();
         assert!(cpu_ai.force_cpu);
+
+        let shared_gpu = Resources {
+            gpu: Some(GpuResources {
+                free_memory: 6 * GIB,
+                usage: 90.0,
+                shared_memory: false,
+            }),
+            ..resources
+        };
+        let gpu_merge = configured_for_platform(&merge, &[ai], shared_gpu, 1, true)
+            .expect("merge should keep NVENC while VRAM has headroom");
+        assert!(!gpu_merge.force_cpu);
+        assert!(gpu_merge.gpu_memory > 0);
     }
 
     #[test]
