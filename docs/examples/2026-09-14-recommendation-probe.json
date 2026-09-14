@@ -1,0 +1,1894 @@
+{
+  "scope": "Recommendation tab and cell refresh; one downstream catalog and playback-model sample. No video file download.",
+  "source_document": "番茄小说推荐接口整理.md",
+  "method": {
+    "signing": "Existing PureSignedClient.signed_get/signed_post and _with_device_identity; aid=8662 for recommendation, aid=1967 for catalog.",
+    "device": "One device in an isolated temporary copy of the device pool; paired device_id and iid injected before signing.",
+    "requests": 11,
+    "automatic_failover_tested": false,
+    "route_checks": "Discovery route functions invoked in-process with a pinned real signed network adapter. No HTTP-listener/desktop/package validation.",
+    "redacted": "No device identifiers, install identifiers, keys, signatures, session tokens, cookies or CDN URLs included."
+  },
+  "network_results": [
+    {
+      "label": "doc_tab16_android",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlineb.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/tab/v:version/",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 64504,
+      "elapsed_seconds": 1.336,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "code",
+        "message",
+        "data",
+        "log_id"
+      ],
+      "data_keys": [
+        "tab_index",
+        "tab_item",
+        "order_data",
+        "cold_start_info"
+      ],
+      "series_count": 6,
+      "tabs": [
+        {
+          "tab_type": 8,
+          "title": "找剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "cell_data",
+            "bottom_unlimited",
+            "bookstore_id",
+            "session_id",
+            "next_offset",
+            "has_more",
+            "client_template",
+            "extra",
+            "version_tag",
+            "tab_version",
+            "nps_insert_rank"
+          ]
+        },
+        {
+          "tab_type": 38,
+          "title": "真人剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 32,
+          "title": "漫剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 14,
+          "title": "电影",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 5,
+          "title": "听书",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 2,
+          "title": "小说",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 9,
+          "title": "漫画",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 19,
+          "title": "大视听",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 11,
+          "title": "经典",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 12,
+          "title": "知识",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        }
+      ],
+      "cells": [
+        {
+          "path": "$.data.tab_item[0].cell_data[0]",
+          "cell_id": "6952850996422770718",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_id_str",
+            "cell_data",
+            "category_tag_ids",
+            "style",
+            "cell_selector",
+            "next_offset",
+            "cell_item_source_info",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.tab_item[0].cell_data[0].cell_data[1].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.tab_item[0].cell_data[0].cell_data[2].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932",
+        "tab_version": "double_col",
+        "client_template": "12",
+        "bottom_tab_type_list": "7,0,1,5,2,4",
+        "tab_type": "16",
+        "book_id": "0",
+        "landing_bottom_tab_type": "7",
+        "bottom_tab_type": "0",
+        "client_req_type": "1",
+        "offset": "0",
+        "device_level": "3",
+        "need_personal_recommend": "1"
+      }
+    },
+    {
+      "label": "doc_tab16_ios",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlineb.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/tab/v:version/",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 74023,
+      "elapsed_seconds": 1.304,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "code",
+        "message",
+        "data",
+        "log_id"
+      ],
+      "data_keys": [
+        "tab_index",
+        "tab_item",
+        "order_data",
+        "cold_start_info"
+      ],
+      "series_count": 8,
+      "tabs": [
+        {
+          "tab_type": 8,
+          "title": "找剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "cell_data",
+            "bottom_unlimited",
+            "bookstore_id",
+            "session_id",
+            "next_offset",
+            "has_more",
+            "client_template",
+            "extra",
+            "version_tag",
+            "tab_version",
+            "nps_insert_rank"
+          ]
+        },
+        {
+          "tab_type": 38,
+          "title": "真人剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 32,
+          "title": "漫剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 14,
+          "title": "电影",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 5,
+          "title": "听书",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 2,
+          "title": "小说",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 9,
+          "title": "漫画",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 19,
+          "title": "大视听",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 11,
+          "title": "经典",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 12,
+          "title": "知识",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        }
+      ],
+      "cells": [
+        {
+          "path": "$.data.tab_item[0].cell_data[0]",
+          "cell_id": "6952850996422770718",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_id_str",
+            "cell_data",
+            "category_tag_ids",
+            "style",
+            "cell_selector",
+            "next_offset",
+            "cell_item_source_info",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.tab_item[0].cell_data[0].cell_data[1].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "show_play_cnt",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.tab_item[0].cell_data[0].cell_data[2].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "show_play_cnt",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_name": "7.3.2.32",
+        "version_code": "732",
+        "update_version_code": "73232",
+        "device_platform": "iphone",
+        "tab_version": "double_col",
+        "client_template": "12",
+        "bottom_tab_type_list": "7,0,1,5,2,4",
+        "tab_type": "16",
+        "book_id": "0",
+        "landing_bottom_tab_type": "7",
+        "bottom_tab_type": "0",
+        "client_req_type": "1",
+        "offset": "0",
+        "device_level": "3",
+        "need_personal_recommend": "1"
+      }
+    },
+    {
+      "label": "control_tab38_android",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlinec.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/tab/v",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 69097,
+      "elapsed_seconds": 1.282,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "code",
+        "message",
+        "data",
+        "log_id"
+      ],
+      "data_keys": [
+        "tab_index",
+        "tab_item",
+        "order_data",
+        "cold_start_info"
+      ],
+      "series_count": 6,
+      "tabs": [
+        {
+          "tab_type": 8,
+          "title": "找剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template",
+            "extra",
+            "tab_version"
+          ]
+        },
+        {
+          "tab_type": 38,
+          "title": "真人剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "cell_data",
+            "bottom_unlimited",
+            "bookstore_id",
+            "session_id",
+            "has_more",
+            "client_template",
+            "version_tag",
+            "nps_insert_rank"
+          ]
+        },
+        {
+          "tab_type": 32,
+          "title": "漫剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 14,
+          "title": "电影",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 5,
+          "title": "听书",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 2,
+          "title": "小说",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 9,
+          "title": "漫画",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 19,
+          "title": "大视听",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 11,
+          "title": "经典",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 12,
+          "title": "知识",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        }
+      ],
+      "cells": [
+        {
+          "path": "$.data.tab_item[1].cell_data[0]",
+          "cell_id": "7641597426175836222",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_abstract",
+            "cell_id_str",
+            "cell_data",
+            "category_tag_ids",
+            "style",
+            "cell_selector",
+            "next_offset",
+            "cell_item_source_info",
+            "selector_display_type",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.tab_item[1].cell_data[0].cell_data[0].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.tab_item[1].cell_data[0].cell_data[1].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932",
+        "tab_version": "double_col",
+        "client_template": "12",
+        "bottom_tab_type_list": "7,0,1,5,2,4",
+        "tab_type": "38",
+        "book_id": "0",
+        "landing_bottom_tab_type": "7",
+        "bottom_tab_type": "0",
+        "client_req_type": "1",
+        "offset": "0",
+        "device_level": "3"
+      }
+    },
+    {
+      "label": "doc_fixed_cell16",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlineb.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/cell/change/v:version/",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 1312635,
+      "elapsed_seconds": 1.486,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "message",
+        "data",
+        "log_id",
+        "code"
+      ],
+      "data_keys": [
+        "cell_view",
+        "has_more",
+        "next_offset",
+        "session_id",
+        "rank_version"
+      ],
+      "series_count": 6,
+      "tabs": [],
+      "cells": [
+        {
+          "path": "$.data.cell_view",
+          "cell_id": "7597343008509411390",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_abstract",
+            "cell_id_str",
+            "cell_data",
+            "more_button_position",
+            "category_tag_ids",
+            "is_empty_preference_data",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "series_id",
+            "recommend_info",
+            "recommend_group_id",
+            "disable_play",
+            "video_detail",
+            "create_time",
+            "highlight",
+            "rec_tags",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0].video_detail.video_list[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "digged_count",
+            "user_digg",
+            "episode",
+            "vertical",
+            "content_type",
+            "copyright",
+            "episode_cnt",
+            "video_platform",
+            "vid_index",
+            "disable_play",
+            "horiz_cover",
+            "pay_info",
+            "support_listen",
+            "comment_count",
+            "video_bg_color_hex"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932",
+        "tab_version": "double_col",
+        "client_template": "12",
+        "change_type": "0",
+        "client_req_type": "2",
+        "device_level": "3",
+        "offset": "0",
+        "need_personal_recommend": "1",
+        "tab_type": "16",
+        "cell_id": "7597343008509411390",
+        "plan_id": "7597343072904560702"
+      }
+    },
+    {
+      "label": "doc_live_cell8",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlineb.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/cell/change/v:version/",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 50613,
+      "elapsed_seconds": 0.966,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "code",
+        "message",
+        "data",
+        "log_id"
+      ],
+      "data_keys": [
+        "cell_view",
+        "has_more",
+        "next_offset",
+        "session_id",
+        "rank_version"
+      ],
+      "series_count": 6,
+      "tabs": [],
+      "cells": [
+        {
+          "path": "$.data.cell_view",
+          "cell_id": "6952850996422770718",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_id_str",
+            "cell_data",
+            "category_tag_ids",
+            "style",
+            "cell_selector",
+            "cell_item_source_info",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "show_play_cnt",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.cell_view.cell_data[1].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "show_play_cnt",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932",
+        "tab_version": "double_col",
+        "client_template": "12",
+        "change_type": "0",
+        "client_req_type": "2",
+        "device_level": "3",
+        "offset": "6",
+        "need_personal_recommend": "1",
+        "tab_type": "8",
+        "cell_id": "6952850996422770718",
+        "plan_id": "7231099321918160954"
+      },
+      "exposure_count": 6,
+      "nonempty_exposure_item_count": 6
+    },
+    {
+      "label": "route_upstream_1",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlinec.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/tab/v",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 66340,
+      "elapsed_seconds": 1.907,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "code",
+        "message",
+        "data",
+        "log_id"
+      ],
+      "data_keys": [
+        "tab_index",
+        "tab_item",
+        "order_data",
+        "cold_start_info"
+      ],
+      "series_count": 6,
+      "tabs": [
+        {
+          "tab_type": 8,
+          "title": "找剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template",
+            "extra",
+            "tab_version"
+          ]
+        },
+        {
+          "tab_type": 38,
+          "title": "真人剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "cell_data",
+            "bottom_unlimited",
+            "bookstore_id",
+            "session_id",
+            "has_more",
+            "client_template",
+            "version_tag",
+            "nps_insert_rank"
+          ]
+        },
+        {
+          "tab_type": 32,
+          "title": "漫剧",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 14,
+          "title": "电影",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 5,
+          "title": "听书",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 2,
+          "title": "小说",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 9,
+          "title": "漫画",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 19,
+          "title": "大视听",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 11,
+          "title": "经典",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        },
+        {
+          "tab_type": 12,
+          "title": "知识",
+          "keys": [
+            "tab_type",
+            "client_tab_type",
+            "title",
+            "client_template"
+          ]
+        }
+      ],
+      "cells": [
+        {
+          "path": "$.data.tab_item[1].cell_data[0]",
+          "cell_id": "7641597426175836222",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_abstract",
+            "cell_id_str",
+            "cell_data",
+            "category_tag_ids",
+            "style",
+            "cell_selector",
+            "next_offset",
+            "cell_item_source_info",
+            "selector_display_type",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.tab_item[1].cell_data[0].cell_data[0].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.tab_item[1].cell_data[0].cell_data[1].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "tab_version": "double_col",
+        "client_template": "12",
+        "bottom_tab_type_list": "7,0,1,5,2,4",
+        "tab_type": "38",
+        "book_id": "0",
+        "landing_bottom_tab_type": "7",
+        "bottom_tab_type": "0",
+        "client_req_type": "1",
+        "offset": "0",
+        "device_level": "3",
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932"
+      }
+    },
+    {
+      "label": "route_upstream_2",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlinec.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/cell/change/v",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 67169,
+      "elapsed_seconds": 0.922,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "code",
+        "message",
+        "data",
+        "log_id"
+      ],
+      "data_keys": [
+        "cell_view",
+        "has_more",
+        "next_offset",
+        "session_id",
+        "rank_version"
+      ],
+      "series_count": 6,
+      "tabs": [],
+      "cells": [
+        {
+          "path": "$.data.cell_view",
+          "cell_id": "7641597426175836222",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_abstract",
+            "cell_id_str",
+            "cell_data",
+            "category_tag_ids",
+            "style",
+            "cell_selector",
+            "cell_item_source_info",
+            "selector_display_type",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.cell_view.cell_data[1].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "episode",
+            "vertical",
+            "content_type",
+            "recommend_info",
+            "recommend_group_id",
+            "play_cnt",
+            "book_exist",
+            "copyright",
+            "show_rec_text",
+            "rec_text",
+            "score",
+            "use_video_model",
+            "episode_cnt",
+            "video_platform",
+            "disable_play",
+            "category_schema",
+            "color_dominate",
+            "horiz_cover",
+            "pay_info",
+            "tag_info",
+            "rec_tags",
+            "rec_text_icon_type",
+            "show_sub_tile",
+            "support_listen",
+            "recommend_reason_list"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "tab_version": "double_col",
+        "client_template": "12",
+        "change_type": "0",
+        "cell_id": "7641597426175836222",
+        "offset": "6",
+        "limit": "0",
+        "tab_type": "38",
+        "client_req_type": "2",
+        "unlimited_selector_change_type": "1",
+        "page": "0",
+        "page_entry_time": "0",
+        "cold_start_session": "0",
+        "ecom_impression_start_time": "0",
+        "last_dynamic_cover_offset": "0",
+        "ecom_sort_by": "0",
+        "source_tab_type": "0",
+        "search_tab_type": "0",
+        "pad_column_detail": "0",
+        "author_id": "0",
+        "book_comment_id": "0",
+        "category_id": "0",
+        "genre": "0",
+        "genre_type": "0",
+        "sub_genre": "0",
+        "tag_id": "0",
+        "inner_category_id": "0",
+        "rank_sub_info_id": "0",
+        "item_id": "0",
+        "total_chapter_num": "0",
+        "current_chapter_num": "0",
+        "cell_sub_id": "0",
+        "sub_tag_id": "0",
+        "idol_tag_id": "0",
+        "ecom_category_id": "0",
+        "video_tab_cold_start": "0",
+        "version_tag": "",
+        "device_level": "3",
+        "plan_id": "7641597620900610110",
+        "screen_width_px": "1271",
+        "last_impression_rec_tags": "",
+        "selected_items": "",
+        "recent_impr_gid": "",
+        "ClickedContent": "",
+        "app_launch_times": "0",
+        "web_page_version_code": "0",
+        "support_gender_list": "false",
+        "disable_digg_stat": "false",
+        "ecom_refresh_type": "0",
+        "pad_column_cover": "0",
+        "ug_task_params": "{\"operation_type\":2}",
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932"
+      }
+    },
+    {
+      "label": "doc_fixed_cell16_next",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlineb.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/cell/change/v:version/",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 843586,
+      "elapsed_seconds": 1.364,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "code",
+        "message",
+        "data",
+        "log_id"
+      ],
+      "data_keys": [
+        "cell_view",
+        "has_more",
+        "next_offset",
+        "session_id",
+        "rank_version"
+      ],
+      "series_count": 6,
+      "tabs": [],
+      "cells": [
+        {
+          "path": "$.data.cell_view",
+          "cell_id": "7597343008509411390",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_abstract",
+            "cell_id_str",
+            "cell_data",
+            "more_button_position",
+            "category_tag_ids",
+            "is_empty_preference_data",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "series_id",
+            "recommend_info",
+            "recommend_group_id",
+            "disable_play",
+            "video_detail",
+            "create_time",
+            "highlight",
+            "rec_tags",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0].video_detail.video_list[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "digged_count",
+            "user_digg",
+            "episode",
+            "vertical",
+            "content_type",
+            "copyright",
+            "episode_cnt",
+            "video_platform",
+            "vid_index",
+            "disable_play",
+            "horiz_cover",
+            "pay_info",
+            "support_listen",
+            "comment_count",
+            "video_bg_color_hex"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932",
+        "tab_version": "double_col",
+        "client_template": "12",
+        "change_type": "0",
+        "client_req_type": "2",
+        "device_level": "3",
+        "offset": "6",
+        "need_personal_recommend": "1",
+        "tab_type": "16",
+        "cell_id": "7597343008509411390",
+        "plan_id": "7597343072904560702"
+      },
+      "exposure_count": 6,
+      "nonempty_exposure_item_count": 0,
+      "qualification": "Exploratory: outer vid values were empty; not used to establish valid exposure filtering. Rechecked as doc_fixed_cell16_valid_exposure."
+    },
+    {
+      "label": "doc_fixed_cell16_valid_exposure",
+      "method": "GET",
+      "host": "https://api5-normal-sinfonlineb.fqnovel.com",
+      "path": "/reading/bookapi/bookmall/cell/change/v:version/",
+      "device_label": "A",
+      "http_status": 200,
+      "body_bytes": 823524,
+      "elapsed_seconds": 1.45,
+      "upstream_code": 0,
+      "upstream_message": "SUCCESS",
+      "top_keys": [
+        "log_id",
+        "code",
+        "message",
+        "data"
+      ],
+      "data_keys": [
+        "cell_view",
+        "has_more",
+        "next_offset",
+        "session_id",
+        "rank_version"
+      ],
+      "series_count": 6,
+      "tabs": [],
+      "cells": [
+        {
+          "path": "$.data.cell_view",
+          "cell_id": "7597343008509411390",
+          "keys": [
+            "cell_id",
+            "show_type",
+            "cell_name",
+            "cell_operation_type",
+            "use_recommend",
+            "cell_abstract",
+            "cell_id_str",
+            "cell_data",
+            "more_button_position",
+            "category_tag_ids",
+            "is_empty_preference_data",
+            "ai_search_placeholder",
+            "push_start_info",
+            "book_hot_content_data"
+          ]
+        }
+      ],
+      "video_paths": [
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "series_id",
+            "recommend_info",
+            "recommend_group_id",
+            "disable_play",
+            "video_detail",
+            "create_time",
+            "highlight",
+            "rec_tags",
+            "recommend_reason_list"
+          ]
+        },
+        {
+          "path": "$.data.cell_view.cell_data[0].video_data[0].video_detail.video_list[0]",
+          "keys": [
+            "vid",
+            "cover",
+            "duration",
+            "title",
+            "video_desc",
+            "series_id",
+            "digged_count",
+            "user_digg",
+            "episode",
+            "vertical",
+            "content_type",
+            "copyright",
+            "episode_cnt",
+            "video_platform",
+            "vid_index",
+            "disable_play",
+            "horiz_cover",
+            "pay_info",
+            "support_listen",
+            "comment_count",
+            "video_bg_color_hex"
+          ]
+        }
+      ],
+      "request_business_params": {
+        "aid": "8662",
+        "app_name": "novelread",
+        "version_code": "72932",
+        "version_name": "7.2.9.32",
+        "device_platform": "android",
+        "os": "android",
+        "device_type": "PLQ110",
+        "device_brand": "OnePlus",
+        "os_api": "36",
+        "os_version": "16",
+        "update_version_code": "72932",
+        "manifest_version_code": "72932",
+        "tab_version": "double_col",
+        "client_template": "12",
+        "change_type": "0",
+        "client_req_type": "2",
+        "device_level": "3",
+        "offset": "6",
+        "need_personal_recommend": "1",
+        "tab_type": "16",
+        "cell_id": "7597343008509411390",
+        "plan_id": "7597343072904560702"
+      },
+      "exposure_count": 6,
+      "nonempty_exposure_item_count": 6
+    }
+  ],
+  "parsed_checks": [
+    {
+      "label": "doc_live_cell8_overlap",
+      "before_unique": 6,
+      "after_unique": 6,
+      "overlap": 0,
+      "new_unique": 6,
+      "parsed_items": 6,
+      "next_offset": 12,
+      "has_more": true,
+      "session_present": true
+    },
+    {
+      "label": "route_discovery",
+      "status": 200,
+      "code": 0,
+      "count": 6,
+      "tab_type": "38",
+      "cell_id": "7641597426175836222",
+      "next_offset": 6,
+      "session_present": true,
+      "plan_present": true
+    },
+    {
+      "label": "route_discovery_more",
+      "status": 200,
+      "code": 0,
+      "count": 6,
+      "next_offset": 12,
+      "has_more": true,
+      "overlap": 0,
+      "new_unique": 6
+    },
+    {
+      "label": "doc_fixed_cell16_parsed",
+      "time": "2026-09-14T16:31:58.780611+08:00",
+      "parsed_items": 6,
+      "unique_series": 6,
+      "next_offset": 6,
+      "has_more": true,
+      "sample": {
+        "series_id": "7664807332483697726",
+        "book_id": "7664807332483697726",
+        "title": "一年升一境凡人修仙之外门杂役",
+        "first_vid": "7664808905486126104",
+        "episode_count": 125,
+        "content_type": 1004
+      },
+      "video_keys": [
+        "vid",
+        "cover",
+        "duration",
+        "series_id",
+        "recommend_info",
+        "recommend_group_id",
+        "disable_play",
+        "video_detail",
+        "create_time",
+        "highlight",
+        "rec_tags",
+        "recommend_reason_list"
+      ],
+      "video_detail_keys": [
+        "series_id",
+        "followed",
+        "series_play_cnt",
+        "episode_right_text",
+        "series_title",
+        "series_intro",
+        "video_list",
+        "episode",
+        "episode_cnt",
+        "series_status",
+        "series_cover",
+        "video_platform",
+        "followed_cnt",
+        "series_color_hex",
+        "status",
+        "category_schema",
+        "content_type",
+        "duration",
+        "series_id_str",
+        "series_cover_uri",
+        "disable_insert_ad",
+        "pay_info",
+        "role",
+        "share_info",
+        "secondary_infos",
+        "record_info",
+        "first_vid",
+        "tag_info",
+        "ugc_user_info",
+        "enable_vision_product",
+        "bottom_bar",
+        "support_listen",
+        "ai_usage_type"
+      ]
+    },
+    {
+      "label": "doc_fixed_cell16_next_parsed",
+      "parsed_items": 6,
+      "unique_series": 6,
+      "next_offset": 12,
+      "has_more": true,
+      "overlap": 0,
+      "new_unique": 6
+    },
+    {
+      "label": "join_catalog",
+      "status": 200,
+      "code": 0,
+      "series_id": "7664807332483697726",
+      "items_count": 125,
+      "unique_item_ids": 125,
+      "elapsed_seconds": 0.232
+    },
+    {
+      "label": "join_content",
+      "status": 200,
+      "code": 0,
+      "sources_count": 5,
+      "usable_sources_count": 5,
+      "definitions": [
+        "360p",
+        "480p",
+        "540p",
+        "720p",
+        "1080p"
+      ],
+      "elapsed_seconds": 0.269,
+      "download_tested": false
+    },
+    {
+      "label": "doc_fixed_cell16_valid_exposure_parsed",
+      "parsed_items": 6,
+      "next_offset": 12,
+      "has_more": true,
+      "overlap": 0,
+      "new_unique": 6,
+      "nonempty_exposure_items": 6
+    }
+  ],
+  "limitations": [
+    "tab_type=16 tab request returned populated tab_type=8 instead of 16 in both tested profiles.",
+    "No complete captured query/headers were supplied; parameters were supplemented from current project profiles.",
+    "A successful next page with zero overlap does not isolate which exposure parameter caused deduplication.",
+    "recommend_extra, session_uuid, alternative change_type values, and long-running exhaustive pagination not tested."
+  ],
+  "generated_at": "2026-09-14T16:37:22.164905+08:00",
+  "test_started_at": "2026-09-14T16:29:57.431201+08:00",
+  "test_completed_at": "2026-09-14T16:32:39.129127+08:00"
+}
