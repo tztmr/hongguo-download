@@ -59,6 +59,15 @@ impl Service {
                 continue;
             }
             if job.status == Status::Completed
+                && job.main_done
+                && job.shorts_required()
+                && !job.short_done
+            {
+                job.stage = "short".into();
+                job.status = Status::Pending;
+                job.retry_at = 0;
+                job.message = "检测到首集 Shorts 尚未完成，恢复 Shorts 处理后再清理文件".into();
+            } else if job.status == Status::Completed
                 && job.cleanup_version == 0
                 && flag(&job.config, "deleteEpisodes")
                 && flag(&job.config, "deleteFinal")

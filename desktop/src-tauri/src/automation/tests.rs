@@ -170,6 +170,29 @@ fn upgrade_requeues_only_completed_jobs_that_need_folder_cleanup() {
 }
 
 #[test]
+fn upgrade_resumes_completed_main_when_recorded_shorts_are_pending() {
+    let path = temporary();
+    let mut job = task();
+    job.status = Status::Completed;
+    job.stage = "done".into();
+    job.main_done = true;
+    job.short_merge_job = Some("short-merge-in-flight".into());
+    job.config["deleteEpisodes"] = json!(true);
+    job.config["deleteFinal"] = json!(true);
+    let snapshot = Snapshot {
+        jobs: vec![job],
+        ..Snapshot::default()
+    };
+    storage::save(&path, &snapshot).unwrap();
+    let loaded = Service::load(path.clone()).unwrap().snapshot();
+    assert_eq!(loaded.jobs[0].stage, "short");
+    assert_eq!(loaded.jobs[0].status, Status::Pending);
+    assert!(!loaded.jobs[0].short_done);
+    assert!(loaded.jobs[0].message.contains("Shorts"));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn one_group_pipelines_download_merge_ai_and_upload_without_starvation() {
     let mut jobs = vec![];
     for (id, stage) in [
