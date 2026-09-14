@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$FfmpegArchiveSha256,
     [string]$Python = "python",
     [string]$AIBaseWorker = "",
-    [string]$AIPython = "python"
+    [string]$AIPython = "python",
+    [string]$TargetTriple = "x86_64-pc-windows-msvc"
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,9 +17,9 @@ if ($AIBaseWorker) {
     $AIConfig = @('--config', 'src-tauri/tauri.ai-worker.conf.json')
 }
 
-& (Join-Path $PSScriptRoot "build-api-sidecar-windows.ps1") -Python $Python
+& (Join-Path $PSScriptRoot "build-api-sidecar-windows.ps1") -Python $Python -TargetTriple $TargetTriple
 & (Join-Path $PSScriptRoot "stage-media-tools-windows.ps1") `
-    -Archive $FfmpegArchive -ArchiveSha256 $FfmpegArchiveSha256
+    -Archive $FfmpegArchive -ArchiveSha256 $FfmpegArchiveSha256 -TargetTriple $TargetTriple
 npm ci --prefix (Join-Path $ProjectRoot "desktop")
 & (Join-Path $PSScriptRoot "verify-playback-windows.ps1") -Python $Python
 & $Python -m unittest discover -s (Join-Path $ProjectRoot "ai_worker/tests") -v

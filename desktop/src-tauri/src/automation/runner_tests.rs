@@ -318,6 +318,7 @@ fn resumed_cleanup_is_idempotent_and_preserves_stage_handles_and_identity() {
     f.task.separate_job = Some("separate-fixture-id".into());
     f.task.subtitle_job = Some("subtitle-fixture-id".into());
     f.task.short_merge_job = Some("short-merge-fixture-id".into());
+    f.task.short_done = true;
     f.task.main_video_url = "https://www.youtube.com/watch?v=fixture".into();
     // Simulate process exit after deleting one file but before checkpointing.
     fs::remove_file(&episode).unwrap();
@@ -482,13 +483,11 @@ fn duration_cache_rechecks_replaced_media_and_preserves_missing_media_recovery()
         48518.0
     );
     fs::remove_file(&file).unwrap();
-    assert!(
-        duration::inspect(&file, None, |_| panic!(
-            "missing file belongs to existing recovery flow"
-        ))
-        .unwrap()
-        .is_none()
-    );
+    assert!(duration::inspect(&file, None, |_| panic!(
+        "missing file belongs to existing recovery flow"
+    ))
+    .unwrap()
+    .is_none());
 }
 
 #[test]

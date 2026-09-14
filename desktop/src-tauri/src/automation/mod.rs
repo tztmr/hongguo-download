@@ -16,8 +16,8 @@ use std::{
     collections::HashSet,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
     },
 };
 use tauri::{AppHandle, Manager, State};

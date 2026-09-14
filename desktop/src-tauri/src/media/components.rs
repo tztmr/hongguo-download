@@ -783,7 +783,7 @@ fn emit(progress: &mut dyn FnMut(ComponentProgress), id: &str, stage: &str, perc
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
