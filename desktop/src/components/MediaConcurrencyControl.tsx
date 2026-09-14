@@ -14,11 +14,11 @@ export function MediaConcurrencyControl({ value = 0, onChange, disabled = false,
         catch { setError("并发设置保存失败，请重试"); }
         finally { setBusy(false); }
       }}>
-        <option value={0}>自动（最多 5 个）</option>
+        <option value={0}>自动（最多 {max} 个）</option>
         {Array.from({ length: max }, (_, i) => i + 1).map(n => <option value={n} key={n}>{n} 个任务</option>)}
       </select>
     </label>
-    <small>分离与字幕共用名额，完成一个自动补入一个。设置会保留；降低上限不打断正在处理的任务。内存或显存不足时等待。</small>
+    <small>仅分离背景音乐与提取字幕共用名额；下载、合并和 YouTube 上传走独立队列。完成一个自动补入一个；降低上限不打断正在处理的任务，内存或显存不足时等待。</small>
     {error ? <p role="alert">{error}</p> : null}
   </div>;
 }
