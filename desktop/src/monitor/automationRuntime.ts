@@ -7,6 +7,7 @@ export type AutomationJob = {
   mediaState?: "queued" | "running" | "paused";
   message: string; episodeDone: number; episodeTotal: number; progress: number;
   mainVideoUrl?: string; shortVideoUrl?: string; updatedAt: number;
+  config?: { channel?: string };
   attempts?: number; retryAt?: number;
 };
 export type AutomationSnapshot = {

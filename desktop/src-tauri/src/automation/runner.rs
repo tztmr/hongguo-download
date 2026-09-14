@@ -109,9 +109,10 @@ fn admit_group(
     if !super::pipeline::can_scan(snapshot) {
         return 0;
     }
+    let capacity = super::pipeline::free_slots(snapshot);
     let mut count = 0;
     for candidate in candidates {
-        if count == super::pipeline::GROUP_SIZE {
+        if count == capacity {
             break;
         }
         let task = Task::new(candidate, config.clone(), save_dir.to_path_buf());
@@ -206,7 +207,11 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         if count > 0 {
             s.cursor.clear();
             s.cursor_type = (selected + 1) % types.len();
-            s.next_scan = now() + number(&config, "interval", 5) * 60;
+            s.next_scan = if super::pipeline::free_slots(s) > 0 {
+                now() + 2
+            } else {
+                now() + number(&config, "interval", 5) * 60
+            };
         } else if more {
             s.cursor = next;
             s.cursor_type = selected;
@@ -223,7 +228,7 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         if count > 0 {
             s.log(
                 None,
-                format!("本轮接收 {count} 部组成任务组，其余结果不保留；本组全部结束后再监听"),
+                format!("本轮补入 {count} 部，最多同时处理 10 部；完成或跳过后自动监听补位"),
             );
         }
         Ok(())
@@ -236,6 +241,30 @@ pub async fn advance(
     task: &mut Task,
 ) -> Result<(), AppError> {
     ensure_running(service)?;
+    // Also check merged files created by older versions before resuming AI or
+    // upload. Cache only while the exact path/size/modification time still match.
+    if !task.main_done
+        && matches!(
+            task.stage.as_str(),
+            "separate" | "subtitles" | "metadata" | "upload" | "short"
+        )
+    {
+        if let Some(path) = task.merged.clone() {
+            let cached = task.duration_check.clone();
+            task.duration_check = crate::run_blocking(move || {
+                duration::inspect(&path, cached, |p| {
+                    Ok(tools()?.probe_media(p)?.duration_seconds)
+                })
+            })
+            .await?;
+            if let Some(seconds) = task.duration_check.as_ref().map(|check| check.seconds) {
+                if duration::skip(task, seconds) {
+                    pause_owned(app, task);
+                    return Ok(());
+                }
+            }
+        }
+    }
     match task.stage.as_str() {
         "inspect" => inspect(app, task).await?,
         "download" => download(app, service, task).await?,
@@ -668,6 +697,23 @@ async fn merge(
         job
     } else {
         ensure_running(service)?;
+        if !is_short {
+            task.message = "正在核对合并总时长，超过 12 小时将自动跳过".into();
+            service.checkpoint(task)?;
+            let paths = task.files.clone();
+            let owner = service.clone();
+            let over = crate::run_blocking(move || {
+                duration::inputs_over_limit(&paths, |p| {
+                    ensure_running(&owner)?;
+                    Ok(tools()?.probe_media(p)?.duration_seconds)
+                })
+            })
+            .await?;
+            if let Some(seconds) = over {
+                duration::skip(task, seconds);
+                return Ok(());
+            }
+        }
         let root = if is_short {
             task.root.join("Shorts")
         } else {
@@ -1211,6 +1257,9 @@ pub fn pause_owned(app: &AppHandle, task: &Task) {
 
 #[path = "cleanup.rs"]
 mod cleanup_files;
+
+#[path = "duration.rs"]
+mod duration;
 
 fn cleanup(task: &mut Task) -> Result<String, AppError> {
     if !task.main_done || (flag(&task.config, "firstEpisodeShorts") && !task.short_done) {

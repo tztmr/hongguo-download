@@ -387,7 +387,7 @@ fn missing_completed_media_output_is_not_reused_but_active_work_is_preserved() {
 }
 
 #[test]
-fn a_scan_of_150_creates_only_one_group_and_never_fills_partial_group() {
+fn a_scan_admits_only_free_slots_and_refills_each_completed_drama() {
     let f = Fixture::new();
     let config = json!({"channel":"fixture-channel", "concurrency":"3"});
     let candidates: Vec<_> = (0..150)
@@ -408,16 +408,95 @@ fn a_scan_of_150_creates_only_one_group_and_never_fills_partial_group() {
     );
     assert_eq!(snapshot.jobs.len(), 10);
     assert!(snapshot.waiting.is_empty());
-    for job in snapshot.jobs.iter_mut().take(9) {
+    for job in snapshot.jobs.iter_mut().take(1) {
         job.status = Status::Completed;
     }
     assert_eq!(
         admit_group(&mut snapshot, candidates.clone(), &config, &f.base),
-        0
+        1
     );
+    assert_eq!(snapshot.jobs.len(), 11);
+    assert_eq!(snapshot.jobs[10].book_id, "book-10");
     snapshot.jobs[9].status = Status::Completed;
-    assert_eq!(admit_group(&mut snapshot, candidates, &config, &f.base), 10);
-    assert_eq!(snapshot.jobs.len(), 20);
+    assert_eq!(admit_group(&mut snapshot, candidates, &config, &f.base), 1);
+    assert_eq!(snapshot.jobs.len(), 12);
     assert_eq!(snapshot.jobs[10].book_id, "book-10");
     assert!(snapshot.waiting.is_empty());
+}
+
+#[test]
+fn duration_limit_preserves_exactly_twelve_hours_and_skips_only_longer_unfinished_work() {
+    let mut f = Fixture::new();
+    f.task.main_done = false;
+    f.task.stage = "separate".into();
+    f.task.attempts = 19;
+    f.task.retry_at = now() + 900;
+    let file = f.owned("合并视频/超长.mp4");
+    f.task.merged = Some(file.clone());
+    assert!(!duration::skip(&mut f.task, 43200.0));
+    assert!(duration::skip(&mut f.task, 43200.01));
+    assert_eq!(f.task.status, Status::Skipped);
+    assert_eq!(f.task.retry_at, 0);
+    assert_eq!(f.task.attempts, 0);
+    assert!(file.exists());
+    assert_eq!(f.task.merged.as_ref(), Some(&file));
+    f.task.main_done = true;
+    f.task.status = Status::Pending;
+    assert!(!duration::skip(&mut f.task, 48518.0));
+    assert_eq!(f.task.status, Status::Pending);
+}
+
+#[test]
+fn duration_cache_rechecks_replaced_media_and_preserves_missing_media_recovery() {
+    let f = Fixture::new();
+    let file = f.file("合并视频/全集.mp4", b"video");
+    let cache = duration::inspect(&file, None, |_| Ok(31933.3)).unwrap();
+    assert_eq!(
+        duration::inspect(&file, cache.clone(), |_| panic!(
+            "unchanged file must use cache"
+        ))
+        .unwrap()
+        .unwrap()
+        .seconds,
+        31933.3
+    );
+    fs::write(&file, b"replacement-video").unwrap();
+    assert_eq!(
+        duration::inspect(&file, cache, |_| Ok(48518.0))
+            .unwrap()
+            .unwrap()
+            .seconds,
+        48518.0
+    );
+    fs::remove_file(&file).unwrap();
+    assert!(duration::inspect(&file, None, |_| panic!(
+        "missing file belongs to existing recovery flow"
+    ))
+    .unwrap()
+    .is_none());
+}
+
+#[test]
+fn merge_duration_preflight_stops_early_and_does_not_skip_unknown_durations() {
+    let f = Fixture::new();
+    let paths = vec![
+        f.file("1.mp4", b"1"),
+        f.file("2.mp4", b"2"),
+        f.file("3.mp4", b"3"),
+    ];
+    let mut calls = 0;
+    let total = duration::inputs_over_limit(&paths, |_| {
+        calls += 1;
+        Ok(25000.0)
+    })
+    .unwrap();
+    assert_eq!(total, Some(50000.0));
+    assert_eq!(calls, 2);
+    assert_eq!(
+        duration::inputs_over_limit(&paths, |_| Ok(14400.0)).unwrap(),
+        None
+    );
+    for unknown in [f64::NAN, f64::INFINITY, 0.0, -1.0] {
+        assert!(duration::inputs_over_limit(&paths, |_| Ok(unknown)).is_err());
+    }
 }

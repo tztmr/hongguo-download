@@ -54,13 +54,13 @@ describe("native automation boundaries", () => {
     save(view);
     await waitFor(() => expect(state.config?.types).toEqual(["漫剧", "AI剧"]));
   });
-  it("waits for the whole group and exposes no rolling backlog or group multiplier", async () => {
+  it("allows scanning to refill a free slot while the other nine keep running", async () => {
     state.mode = "running";
     state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `job-${i}`, bookId: `book-${i}`, title: `剧目${i}`, stage: "merge", status: i === 0 ? "completed" as const : "pending" as const, message: "等待处理", episodeDone: 2, episodeTotal: 2, progress: 0, updatedAt: 1 }));
     const view = page(); await loaded(view);
-    expect(view.getByText(/每轮 1 组.*每组最多 10 部/)).toBeTruthy();
-    expect(view.getByText(/本组未完成 9 部/)).toBeTruthy();
-    expect(view.getByRole("button", { name: "立即扫描" })).toHaveProperty("disabled", true);
+    expect(view.getByText(/1 组.*最多 10 部.*自动补位/)).toBeTruthy();
+    expect(view.getByText(/正在处理 9 部.*空位 1 部/)).toBeTruthy();
+    expect(view.getByRole("button", { name: "立即扫描" })).toHaveProperty("disabled", false);
     expect(view.queryByText(/待入队 140/)).toBeNull();
     fireEvent.click(view.getByRole("button", { name: /清理与运行/ }));
     expect(view.queryByRole("combobox", { name: "并发处理组数" })).toBeNull();
@@ -169,7 +169,7 @@ describe("native automation boundaries", () => {
     await waitFor(() => expect(button(view, "继续运行").disabled).toBe(false));
     fireEvent.click(button(view, "继续运行"));
     await waitFor(() => expect(button(view, "暂停").disabled).toBe(false));
-    expect(button(view, "立即扫描").disabled).toBe(true);
+    expect(button(view, "立即扫描").disabled).toBe(false);
     fireEvent.click(button(view, "确认继续处理")); await loaded(view);
     fireEvent.click(button(view, "跳过此任务")); await loaded(view);
     fireEvent.click(button(view, "重试此任务")); await loaded(view);

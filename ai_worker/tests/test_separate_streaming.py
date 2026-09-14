@@ -7,7 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from ai_worker.separate import _demucs_separator
+from ai_worker.protocol import WorkerError, WorkerRequest
+from ai_worker.separate import _demucs_separator, _wav_duration, separate_audio
 
 
 @unittest.skipUnless(importlib.util.find_spec("demucs"), "requires AI dependencies")
@@ -82,6 +83,56 @@ class StreamingSeparationTests(unittest.TestCase):
             sources=["drums", "bass", "other", "vocals"],
             cpu=lambda: None, eval=lambda: None,
         )
+
+    def test_rf64_input_and_output_keep_their_real_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "长音轨.wav"
+            self.sf.write(source, self.np.zeros(8000), 8000, format="RF64", subtype="PCM_16")
+            self.assertEqual(source.read_bytes()[:4], b"RF64")
+            self.assertEqual(_wav_duration(source), 1.0)
+            request = WorkerRequest(1, "rf64", "separate", source, root, {"device": "cpu"})
+            def stems(_source, output, *_args):
+                paths = output / "vocals.wav", output / "background_music.wav"
+                for path in paths:
+                    self.sf.write(path, self.np.zeros(8000), 8000, format="RF64", subtype="PCM_16")
+                return paths
+            result = separate_audio(request, separator=stems)
+            self.assertEqual(_wav_duration(Path(result["vocalsPath"])), 1.0)
+            # Supporting RF64 must not disable the duration consistency check.
+            self.sf.write(source, self.np.zeros(16000), 8000, format="RF64", subtype="PCM_16")
+            with self.assertRaisesRegex(WorkerError, "AI_SEPARATION_DURATION_MISMATCH"):
+                separate_audio(request, separator=stems)
+
+    def test_output_crossing_wave_size_limit_switches_format_before_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.wav"
+            self.sf.write(source, self.np.zeros(8000), 8000, subtype="PCM_16")
+            with (
+                # Exercise the real writer and validator without allocating 4 GiB.
+                patch("ai_worker.separate.WAV_MAX_BYTES", 1024, create=True),
+                patch("demucs.pretrained.get_model", return_value=self.model),
+                patch("demucs.apply.apply_model", side_effect=AssertionError("silence needs no inference")),
+            ):
+                paths = _demucs_separator(source, root, "htdemucs", "cpu")
+            for path in paths:
+                with path.open("rb") as audio:
+                    self.assertEqual(audio.read(4), b"RF64")
+                self.assertEqual(_wav_duration(path), 1.0)
+                self.assertEqual(self.sf.info(path).frames, 8000)
+
+    def test_short_output_remains_standard_wave(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "input.wav"
+            self.sf.write(source, self.np.zeros(8000), 8000, subtype="PCM_16")
+            with patch("demucs.pretrained.get_model", return_value=self.model):
+                paths = _demucs_separator(source, root, "htdemucs", "cpu")
+            for path in paths:
+                with path.open("rb") as audio:
+                    self.assertEqual(audio.read(4), b"RIFF")
+                self.assertEqual(_wav_duration(path), 1.0)
 
     def test_long_track_has_bounded_inference_and_sample_exact_seams(self):
         # Whole-season tensors, missing/duplicated overlap samples, or repeated

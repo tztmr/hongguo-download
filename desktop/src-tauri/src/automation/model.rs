@@ -252,7 +252,17 @@ pub struct OwnedFile {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DurationCheck {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified_unix_nanos: u128,
+    pub seconds: f64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Task {
+    #[serde(default)]
+    pub duration_check: Option<DurationCheck>,
     /// Persist admission before the first download, including failed attempts.
     #[serde(default)]
     pub download_admitted: bool,
@@ -323,6 +333,7 @@ impl Task {
             &id[..8]
         ));
         Self {
+            duration_check: None,
             download_admitted: false,
             cleanup_version: 0,
             id,

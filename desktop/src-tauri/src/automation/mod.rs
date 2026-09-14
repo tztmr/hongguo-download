@@ -102,7 +102,12 @@ impl Service {
     ) -> Result<T, AppError> {
         let mut guard = self.state.lock().map_err(|_| unavailable())?;
         let mut next = guard.clone();
+        let free_before = pipeline::free_slots(&next);
         let result = f(&mut next)?;
+        if next.mode == Mode::Running && pipeline::free_slots(&next) > free_before {
+            next.next_scan = 0;
+            next.cursor.clear();
+        }
         pipeline::normalize_group(&mut next);
         if let Err(error) = storage::save(&self.path, &next) {
             guard.mode = Mode::Paused;
@@ -225,7 +230,7 @@ impl Service {
                     if !pipeline::can_scan(s) {
                         return Err(AppError::new(
                             "AUTOMATION_GROUP_ACTIVE",
-                            "本组尚未全部结束，完成或跳过后再监听下一组",
+                            "当前 10 个名额已满，完成或跳过一部后自动监听补位",
                         ));
                     }
                     s.next_scan = 0;

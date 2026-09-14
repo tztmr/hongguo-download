@@ -451,7 +451,7 @@ fn validates_ordered_cover_models_and_preserves_legacy_model() {
 }
 
 #[test]
-fn strict_group_discards_unstarted_backlog_and_waits_for_every_member() {
+fn group_discards_unstarted_backlog_and_scans_as_soon_as_a_slot_is_free() {
     let mut s = Snapshot {
         config: Some(config()),
         mode: Mode::Running,
@@ -476,9 +476,9 @@ fn strict_group_discards_unstarted_backlog_and_waits_for_every_member() {
     }
     pipeline::normalize_group(&mut s);
     assert_eq!(s.jobs.len(), 10);
-    assert!(!pipeline::can_scan(&s));
+    assert!(pipeline::can_scan(&s));
     s.jobs[9].status = Status::Review;
-    assert!(!pipeline::can_scan(&s));
+    assert!(pipeline::can_scan(&s));
     s.jobs[9].status = Status::Skipped;
     assert!(pipeline::can_scan(&s));
     s.mode = Mode::Paused;
@@ -521,6 +521,48 @@ fn live_action_is_rejected_in_new_automation_settings() {
     let mut c = config();
     c["types"] = json!(["真人剧", "漫剧"]);
     assert!(validate_config(c).is_err());
+}
+
+#[test]
+fn completion_and_manual_skip_wake_scanner_without_waiting_for_interval() {
+    let path = temporary();
+    let mut state = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for n in 0..10 {
+        let mut job = task();
+        job.id = format!("job-{n}");
+        job.stage = "separate".into();
+        state.jobs.push(job);
+    }
+    storage::save(&path, &state).unwrap();
+    let service = Service::load(path.clone()).unwrap();
+    service
+        .transaction(|s| {
+            s.next_scan = now() + 3600;
+            Ok(())
+        })
+        .unwrap();
+    let mut finished = service.snapshot().jobs[0].clone();
+    finished.status = Status::Completed;
+    service.checkpoint(&finished).unwrap();
+    assert_eq!(service.snapshot().next_scan, 0);
+    assert_eq!(pipeline::free_slots(&service.snapshot()), 1);
+    service
+        .transaction(|s| {
+            s.next_scan = now() + 3600;
+            s.jobs[1].status = Status::Review;
+            Ok(())
+        })
+        .unwrap();
+    service.review("job-1", "skip").unwrap();
+    assert_eq!(service.snapshot().next_scan, 0);
+    assert_eq!(pipeline::free_slots(&service.snapshot()), 2);
+    service.control("pause").unwrap();
+    assert!(!pipeline::can_scan(&service.snapshot()));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 
 #[test]

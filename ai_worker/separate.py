@@ -17,6 +17,7 @@ from ai_worker.protocol import WorkerError, WorkerRequest, progress
 SUPPORTED_MODELS = {"htdemucs", "htdemucs_ft"}
 CHUNK_SECONDS = 120
 CONTEXT_SECONDS = 1
+WAV_MAX_BYTES = (1 << 32) - 1
 
 
 class SeparationInference:
@@ -72,13 +73,22 @@ def _wav_duration(path: Path) -> float:
         info = path.lstat()
         if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size <= 44:
             raise ValueError("not a regular wave")
-        with wave.open(str(path), "rb") as audio:
-            rate = audio.getframerate()
-            frames = audio.getnframes()
+        with path.open("rb") as header:
+            rf64 = header.read(4) == b"RF64"
+        if rf64:
+            # FFmpeg already produces RF64 for very long preprocessed inputs.
+            # Python's wave module only understands the 32-bit RIFF variant.
+            import soundfile as sf
+            with sf.SoundFile(str(path)) as audio:
+                rate, frames = audio.samplerate, len(audio)
+        else:
+            with wave.open(str(path), "rb") as audio:
+                rate = audio.getframerate()
+                frames = audio.getnframes()
         if rate <= 0 or frames <= 0:
             raise ValueError("empty wave")
         return frames / rate
-    except (OSError, EOFError, wave.Error, ValueError) as error:
+    except (OSError, EOFError, wave.Error, ValueError, RuntimeError) as error:
         raise WorkerError("AI_SEPARATION_OUTPUT_INVALID", "音源分离输出无效") from error
 
 
@@ -122,10 +132,16 @@ def _demucs_separator(
             step = CHUNK_SECONDS * input_rate
             context = CONTEXT_SECONDS * input_rate
             count = (total + step - 1) // step
-            # Standard PCM WAV remains compatible with wave.open validation.
+            # 44.1 kHz stereo PCM reaches RIFF's 4 GiB limit after ~6.8 hours.
+            # Choose the 64-bit header before writing; retries cannot repair an
+            # overflowed 32-bit header. Keep ordinary WAV for shorter exports.
+            output_frames = (total * rate + input_rate - 1) // input_rate
+            output_format = "RF64" if (
+                output_frames * network.audio_channels * 2 + 4096 > WAV_MAX_BYTES
+            ) else "WAV"
             writers = [stack.enter_context(sf.SoundFile(
                 path, "w", samplerate=rate, channels=network.audio_channels,
-                subtype="PCM_16", format="WAV",
+                subtype="PCM_16", format=output_format,
             )) for path in (vocals, background)]
             pending = None
             for index in range(count):
@@ -234,7 +250,9 @@ def separate_audio(
     durations = [_wav_duration(path) for path in resolved_paths]
     tolerance = max(0.25, source_duration * 0.02)
     if any(abs(duration - source_duration) > tolerance for duration in durations):
-        raise WorkerError("AI_SEPARATION_DURATION_MISMATCH", "分离音轨时长与原音频不一致")
+        raise WorkerError("AI_SEPARATION_DURATION_MISMATCH",
+                          f"分离音轨时长与原音频不一致（源 {source_duration:.2f} 秒，"
+                          f"人声 {durations[0]:.2f} 秒，背景音乐 {durations[1]:.2f} 秒）")
     emit(progress("completed", 100))
     return {
         "vocalsPath": str(resolved_paths[0]),

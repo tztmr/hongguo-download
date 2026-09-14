@@ -3,17 +3,27 @@ use std::collections::HashSet;
 
 pub(super) const GROUP_SIZE: usize = 10;
 
-pub(super) fn can_scan(snapshot: &Snapshot) -> bool {
-    snapshot.mode == Mode::Running
-        && snapshot.config.as_ref().is_some_and(|config| {
-            !snapshot.jobs.iter().any(|j| {
-                text(&j.config, "channel") == text(config, "channel")
-                    && !matches!(j.status, Status::Completed | Status::Skipped)
+pub(super) fn free_slots(snapshot: &Snapshot) -> usize {
+    let Some(config) = snapshot.config.as_ref() else {
+        return 0;
+    };
+    GROUP_SIZE.saturating_sub(
+        snapshot
+            .jobs
+            .iter()
+            .filter(|job| {
+                text(&job.config, "channel") == text(config, "channel")
+                    && !matches!(job.status, Status::Completed | Status::Skipped)
             })
-        })
+            .count(),
+    )
 }
 
-// Upgrade the rolling queue to a fixed group. Discard only unstarted records;
+pub(super) fn can_scan(snapshot: &Snapshot) -> bool {
+    snapshot.mode == Mode::Running && free_slots(snapshot) > 0
+}
+
+// Keep at most ten admitted dramas. Discard only excess unstarted records;
 // downloaded files and existing media/upload work must always finish safely.
 pub(super) fn normalize_group(snapshot: &mut Snapshot) {
     let Some(config) = snapshot.config.as_ref() else {
@@ -86,8 +96,7 @@ pub(super) fn select(snapshot: &Snapshot, busy: &HashSet<String>, timestamp: u64
             occupied[lane(job)] += 1;
         }
     }
-    // Members advance independently inside this fixed group. The scanner waits
-    // for every member to finish before admitting any member of the next group.
+    // Members advance independently. The scanner fills only vacant slots.
     let in_window = |j: &Task| {
         !matches!(j.status, Status::Completed | Status::Skipped)
             && (j.download_admitted
