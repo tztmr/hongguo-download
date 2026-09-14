@@ -986,12 +986,28 @@ async def _fetch_video_model(request: Request, item_id: str) -> dict:
     return data
 
 
-def _pick_source(sources: list[dict], definition: str, prefer_h264: bool = False) -> dict:
+_DOWNLOAD_CODECS = frozenset({
+    'h264', 'avc', 'avc1', 'avc3', 'h265', 'hevc', 'hvc1', 'hev1', 'bytevc1',
+    'av1', 'av01', 'vp9', 'vp09',
+})
+
+
+def _pick_source(sources: list[dict], definition: str, prefer_h264: bool = False,
+                 compatible_only: bool = False) -> dict:
     """按目标档位挑选播放源: 命中优先, 否则先降档再升档。"""
     tiers = ['1080p', '720p', '540p', '480p', '360p']
     usable = [item for item in sources if item['urls'] and item['spade_a']]
     if not usable:
         raise RuntimeError('没有同时具备播放地址和 spade_a 的视频源')
+    if compatible_only:
+        # ByteVC2 (bvc2) MP4s can have valid dimensions/duration and still have
+        # no decoder in our FFmpeg. Filter before quality fallback or download,
+        # rather than retrying identical, structurally complete media forever.
+        usable = [item for item in usable
+                  if str(item.get('codec_type', '')).strip().lower().replace('.', '')
+                  in _DOWNLOAD_CODECS | {''}]
+        if not usable:
+            raise RuntimeError('当前剧集没有可下载合并的兼容编码视频源；等待源站提供 H.264 / HEVC 等版本后重试')
     if prefer_h264:
         # Keep requested quality; prefer AVC only among sources at the same tier.
         usable.sort(key=lambda item: str(item.get('codec_type', '')).lower() not in ('h264', 'avc', 'avc1', 'avc3'))
@@ -1105,7 +1121,7 @@ async def _duanju_download_once(request, item_id, definition, playback_compat, p
         model = _fetch_video_model(request, item_id)
         data = await while_connected(model, request.is_disconnected) if playback_compat else await model
         model_done = time.perf_counter()
-        source = _pick_source(data['sources'], definition, prefer_h264=playback_compat)
+        source = _pick_source(data['sources'], definition, prefer_h264=playback_compat, compatible_only=True)
         request.state.download_stage = '播放密钥解析'
         key_hex = derive_key_from_spade_a(source['spade_a'])
         request.state.download_stage = '视频 CDN 下载'

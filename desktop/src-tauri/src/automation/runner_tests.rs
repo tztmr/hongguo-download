@@ -38,6 +38,49 @@ fn recovered_download_writes_receipt_and_preserves_file_on_probe_tool_failure() 
 }
 
 #[test]
+fn unsupported_download_is_preserved_and_replaced_by_a_validated_compatible_episode() {
+    let f = Fixture::new();
+    let path = f.file("0003_7678806141064711230_720p.mp4", &mp4_envelope());
+    let previous = f.file(
+        "0003_7678806141064711230_720p.mp4.unsupported-0",
+        b"keep previous file",
+    );
+    let receipt = f.task.root.join("下载完成-3.json");
+    let result = recover_download_file(&f.task.root, &path, &receipt, |_| {
+        Err(AppError::new("MEDIA_CODEC_UNSUPPORTED", "ByteVC2 不支持"))
+    })
+    .unwrap();
+    assert!(result.is_none());
+    assert!(!path.exists());
+    assert!(!receipt.exists());
+    assert_eq!(fs::read(previous).unwrap(), b"keep previous file");
+    let retained = path.with_extension("mp4.unsupported-1");
+    assert_eq!(fs::read(retained).unwrap(), mp4_envelope());
+
+    let compatible = f.file("0003_7678806141064711230_1080p.mp4", &mp4_envelope());
+    let record = recover_download_file(&f.task.root, &compatible, &receipt, |_| Ok(()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(record.path, fs::canonicalize(compatible).unwrap());
+    let saved: OwnedFile = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+    assert_eq!(saved.hash, record.hash);
+}
+
+#[test]
+fn unknown_probe_output_is_not_mistaken_for_a_known_unsupported_codec() {
+    let f = Fixture::new();
+    let path = f.file("0003_episode_720p.mp4", &mp4_envelope());
+    let receipt = f.task.root.join("下载完成-3.json");
+    let error = recover_download_file(&f.task.root, &path, &receipt, |_| {
+        Err(AppError::new("FFPROBE_INVALID", "检测工具返回无效 JSON"))
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "FFPROBE_INVALID");
+    assert!(path.exists());
+    assert!(!receipt.exists());
+}
+
+#[test]
 fn truncated_unreceipted_download_is_preserved_without_adoption_or_cleanup() {
     let mut f = Fixture::new();
     let path = f.file("0001_episode_1080p.mp4", b"partial MP4");

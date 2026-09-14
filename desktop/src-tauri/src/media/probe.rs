@@ -92,7 +92,28 @@ pub(super) fn parse_value(raw: &Value) -> Result<MediaProbe, AppError> {
             .as_str()
             .filter(|v| !v.is_empty() && *v != "unknown")
             .map(str::to_owned)
-            .ok_or_else(|| invalid("无法识别音视频编码"))
+            .ok_or_else(|| {
+                let kind = if stream["codec_type"] == "video" {
+                    "视频"
+                } else {
+                    "音频"
+                };
+                let tag = stream["codec_tag_string"].as_str().unwrap_or("");
+                if matches!(tag.to_ascii_lowercase().as_str(), "bvc2" | "bytevc2") {
+                    AppError::new(
+                        "MEDIA_CODEC_UNSUPPORTED",
+                        "视频采用 ByteVC2（bvc2）编码，当前媒体工具不支持，需重新选择兼容视频源下载",
+                    )
+                } else {
+                    let tag: String = tag.chars().filter(|c| !c.is_control()).take(24).collect();
+                    let detail = if tag.is_empty() {
+                        String::new()
+                    } else {
+                        format!("（编码标记：{tag}）")
+                    };
+                    invalid(&format!("无法识别{kind}编码{detail}"))
+                }
+            })
     };
     let dimension = |key: &str| {
         video[key]
@@ -148,6 +169,25 @@ pub(super) fn parse_value(raw: &Value) -> Result<MediaProbe, AppError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn bytevc2_is_an_unsupported_codec_not_a_truncated_or_zero_size_video() {
+        let raw = json!({"streams":[
+            {"codec_type":"video","codec_tag_string":"bvc2","width":1256,"height":720,"duration":"109.600000"},
+            {"codec_type":"audio","codec_name":"aac","codec_tag_string":"mp4a","sample_rate":"44100","channels":2}
+        ],"format":{"duration":"109.600000","size":"5972218"}});
+        let error = parse_value(&raw).unwrap_err();
+        assert_eq!(error.code, "MEDIA_CODEC_UNSUPPORTED");
+        assert!(error.message.contains("ByteVC2"));
+        let mut repaired = raw.clone();
+        repaired["streams"][0]["codec_name"] = json!("hevc");
+        repaired["streams"][0]["codec_tag_string"] = json!("hvc1");
+        assert_eq!(parse_value(&repaired).unwrap().video.codec_name, "hevc");
+        repaired["streams"][0]["codec_name"] = json!("unknown");
+        let unknown = parse_value(&repaired).unwrap_err();
+        assert_eq!(unknown.code, "FFPROBE_INVALID");
+        assert!(unknown.message.contains("hvc1"));
+    }
 
     #[test]
     fn handles_optional_metadata_and_real_average_rate_without_guessing_duration() {

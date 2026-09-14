@@ -748,18 +748,20 @@ fn recover_download_file(
         }
         // Preserve unknown/truncated files under a non-video suffix. They cannot
         // be uploaded, adopted again, or deleted by owned-file cleanup.
-        for sequence in 0..1000 {
-            let target = path.with_extension(format!("mp4.incomplete-{sequence}"));
-            match atomicwrites::move_atomic(&path, &target) {
-                Ok(()) => return Ok(None),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(_) => return Err(invalid_file()),
-            }
-        }
-        return Err(invalid_file());
+        preserve_unusable_download(&path, "incomplete")?;
+        return Ok(None);
     }
     // A missing/broken ffprobe is a tool error, not evidence to delete a video.
-    probe(&path)?;
+    if let Err(error) = probe(&path) {
+        if error.code != "MEDIA_CODEC_UNSUPPORTED" {
+            return Err(error);
+        }
+        // A supported MP4 envelope does not imply a supported video codec.
+        // Preserve the old ByteVC2 download and let this episode select a
+        // compatible source; never adopt it or skip the episode's validation.
+        preserve_unusable_download(&path, "unsupported")?;
+        return Ok(None);
+    }
     let actual = identity(&path)?;
     let matches = fs::read(receipt)
         .ok()
@@ -775,6 +777,18 @@ fn recover_download_file(
         )?;
     }
     Ok(Some(actual))
+}
+
+fn preserve_unusable_download(path: &Path, reason: &str) -> Result<(), AppError> {
+    for sequence in 0..1000 {
+        let target = path.with_extension(format!("mp4.{reason}-{sequence}"));
+        match atomicwrites::move_atomic(path, &target) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(invalid_file()),
+        }
+    }
+    Err(invalid_file())
 }
 
 fn reusable_media(job: &MediaJob) -> bool {

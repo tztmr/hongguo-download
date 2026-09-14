@@ -24,6 +24,48 @@ class PlaybackRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_pick_source([avc, high], '1080p', True), high)
         self.assertEqual(_pick_source([avc, high], 'auto', True), high)
 
+    def test_download_skips_bytevc2_before_quality_fallback(self):
+        bytevc2 = [self.source('bytevc2', q) for q in ['360p', '480p', '540p', '720p']]
+        hevc = self.source('bytevc1', '1080p')
+        # Exact shape of episode 7678806141064711230: all lower tiers are bvc2.
+        self.assertEqual(_pick_source([*bytevc2, hevc], '720p', compatible_only=True), hevc)
+        self.assertEqual(_pick_source([*bytevc2, hevc], 'auto', compatible_only=True), hevc)
+        avc = self.source('h264', '720p')
+        self.assertEqual(_pick_source([*bytevc2, hevc, avc], '720p', compatible_only=True), avc)
+        # External key clients still get the requested original codec.
+        self.assertEqual(_pick_source([*bytevc2, hevc], '720p'), bytevc2[-1])
+        with self.assertRaisesRegex(RuntimeError, '兼容编码视频源'):
+            _pick_source(bytevc2, '720p', compatible_only=True)
+
+    async def test_download_selects_compatible_bytes_and_reports_actual_quality(self):
+        app = FastAPI(); app.include_router(router, prefix='/api')
+        source = self.source('bytevc1', '1080p')
+        source['urls'] = ['https://invalid.test/compatible']
+        download = AsyncMock(return_value=b'encrypted')
+        with patch('endpoints.duanju._fetch_video_model', AsyncMock(return_value={'sources': [self.source('bytevc2'), source]})), \
+             patch('endpoints.duanju.derive_key_from_spade_a', return_value='key'), \
+             patch('endpoints.duanju._download_encrypted', download), \
+             patch('endpoints.duanju.decrypt_mp4', return_value=b'compatible-original-mp4'):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.get('/api/duanju/download?item_id=7678806141064711230&definition=720p')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b'compatible-original-mp4')
+        self.assertEqual(response.headers['x-duanju-definition'], '1080p')
+        self.assertEqual(response.headers['content-length'], str(len(response.content)))
+        download.assert_awaited_once_with(source['urls'], None)
+
+    async def test_unsupported_only_sources_never_return_an_unusable_download(self):
+        app = FastAPI(); app.include_router(router, prefix='/api')
+        download = AsyncMock()
+        with patch('endpoints.duanju._fetch_video_model', AsyncMock(return_value={'sources': [self.source('bytevc2')]})), \
+             patch('endpoints.duanju._download_encrypted', download), \
+             patch('endpoints.duanju.asyncio.sleep', AsyncMock()):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.get('/api/duanju/download?item_id=episode&definition=720p')
+        self.assertEqual(response.status_code, 502)
+        self.assertIn('兼容编码视频源', response.json()['msg'])
+        download.assert_not_awaited()
+
     async def test_only_playback_converts_and_regular_download_keeps_original_bytes(self):
         app = FastAPI(); app.include_router(router, prefix='/api')
         converter = AsyncMock(return_value=b'compatible-mp4')

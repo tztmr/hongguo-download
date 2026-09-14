@@ -1,0 +1,103 @@
+{
+  "item_id": "7678806141064711230",
+  "requested_definition": "720p",
+  "reported_file_bytes": 5972218,
+  "available_sources": [
+    {
+      "definition": "360p",
+      "codec_type": "bytevc2",
+      "size": 2849223,
+      "width": 628,
+      "height": 360,
+      "duration": 109.6
+    },
+    {
+      "definition": "480p",
+      "codec_type": "bytevc2",
+      "size": 4087588,
+      "width": 836,
+      "height": 480,
+      "duration": 109.6
+    },
+    {
+      "definition": "540p",
+      "codec_type": "bytevc2",
+      "size": 4282265,
+      "width": 1004,
+      "height": 576,
+      "duration": 109.6
+    },
+    {
+      "definition": "720p",
+      "codec_type": "bytevc2",
+      "size": 5972218,
+      "width": 1256,
+      "height": 720,
+      "duration": 109.6
+    },
+    {
+      "definition": "1080p",
+      "codec_type": "bytevc1",
+      "size": 17788218,
+      "width": 1882,
+      "height": 1080,
+      "duration": 109.6
+    }
+  ],
+  "before": {
+    "bytes": 5972218,
+    "sha256": "4dde5d86fcecdc7bcdd64b9907cea60849f3d37c2abde1510efcd7a03a994ea0",
+    "probe_exit": 0,
+    "streams": [
+      {
+        "index": 0,
+        "codec_type": "video",
+        "codec_name": null,
+        "codec_tag_string": "bvc2",
+        "width": 1256,
+        "height": 720,
+        "duration": "109.600000",
+        "sample_rate": null
+      },
+      {
+        "index": 1,
+        "codec_type": "audio",
+        "codec_name": "aac",
+        "codec_tag_string": "mp4a",
+        "width": null,
+        "height": null,
+        "duration": "109.575011",
+        "sample_rate": "44100"
+      }
+    ]
+  },
+  "after": {
+    "status": 200,
+    "requested_definition": "720p",
+    "actual_definition": "1080p",
+    "bytes": 17788218,
+    "content_length": "17788218",
+    "sha256": "25af41b9680eae4d78fbea87698f2a3703057fb83aa5426c442273bd6c833ded",
+    "probe_exit": 0,
+    "streams": [
+      {
+        "codec_type": "video",
+        "codec_name": "hevc",
+        "codec_tag_string": "hvc1",
+        "width": 1882,
+        "height": 1080,
+        "duration": "109.600000"
+      },
+      {
+        "codec_type": "audio",
+        "codec_name": "aac",
+        "codec_tag_string": "mp4a",
+        "width": null,
+        "height": null,
+        "duration": "109.575011"
+      }
+    ],
+    "full_decode_exit": 0
+  },
+  "boundary": "Real upstream download/decryption and full software decode on macOS; no Windows installer or runtime verification."
+}
