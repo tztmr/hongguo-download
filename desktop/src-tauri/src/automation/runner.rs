@@ -135,6 +135,26 @@ fn admit_group(
     count
 }
 
+fn buffer_candidates(
+    snapshot: &mut Snapshot,
+    candidates: Vec<source::Candidate>,
+    config: &Value,
+    root: &Path,
+) -> usize {
+    let count = admit_group(snapshot, candidates.clone(), config, root);
+    let mut seen = std::collections::HashSet::new();
+    snapshot.discovery_pending = candidates
+        .into_iter()
+        .filter(|c| {
+            let id = Task::new(c.clone(), config.clone(), root.to_path_buf()).id;
+            !snapshot.jobs.iter().any(|j| j.id == id) && seen.insert(id)
+        })
+        .take(100)
+        .collect();
+    snapshot.scan_summary.buffered = snapshot.discovery_pending.len();
+    count
+}
+
 pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppError> {
     let snapshot = service.snapshot();
     if !super::pipeline::can_scan(&snapshot) {
@@ -142,30 +162,8 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
     }
     let config = snapshot
         .config
+        .clone()
         .ok_or_else(|| AppError::new("AUTOMATION_NOT_CONFIGURED", "请先保存设置"))?;
-    let types: Vec<&str> = config["types"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|v| match v.as_str() {
-            Some("漫剧") => Some("comic_series_rank"),
-            Some("AI剧") => Some("ai_playlet"),
-            _ => None,
-        })
-        .collect();
-    if types.is_empty() {
-        return Err(AppError::new(
-            "AUTOMATION_SETTINGS_INVALID",
-            "请选择漫剧或 AI剧后保存设置",
-        ));
-    }
-    let selected = snapshot.cursor_type % types.len();
-    let page = api(
-        app,
-        source::feed_path(types[selected], text(&config, "scope"), &snapshot.cursor),
-    )
-    .await?;
-    ensure_running(service)?;
     let save_dir = app
         .state::<AppState>()
         .settings
@@ -175,16 +173,96 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         .clone();
     fs::create_dir_all(&save_dir).map_err(|_| invalid_file())?;
     let save_dir = fs::canonicalize(save_dir).map_err(|_| invalid_file())?;
+    if !snapshot.discovery_pending.is_empty() {
+        return service.transaction(|s| {
+            if !super::pipeline::can_scan(s) || s.config.as_ref() != Some(&config) {
+                return Ok(());
+            }
+            let pending = std::mem::take(&mut s.discovery_pending);
+            let count = buffer_candidates(s, pending, &config, &save_dir);
+            s.scan_summary.added += count;
+            s.scan_summary.note = format!("已发现候选补入 {count} 部，保留其余候选等待空位");
+            s.scan_summary.more = !s.discovery_pending.is_empty() || s.discovery.more();
+            s.next_scan = now() + 3;
+            if count > 0 {
+                s.log(
+                    None,
+                    format!("已发现候选补入 {count} 部；继续复用采集分页进度"),
+                );
+            }
+            Ok(())
+        });
+    }
+    let mut discovery = snapshot.discovery.clone();
+    let fresh_cycle = discovery.prepare(&config);
+    let Some(selected) = discovery.select(now()) else {
+        return service.transaction(|s| {
+            if s.config.as_ref() == Some(&config) {
+                s.next_scan = discovery.next_at(now(), &config);
+                s.discovery = discovery;
+            }
+            Ok(())
+        });
+    };
+    let stream = discovery.streams[selected].clone();
+    let result = api(app, stream.path()).await;
+    ensure_running(service)?;
+    let page = match result {
+        Ok(page) if page["items"].is_array() => page,
+        result => {
+            let message = result
+                .err()
+                .map(|e| e.message)
+                .unwrap_or_else(|| "列表响应不完整".into());
+            discovery.streams[selected].failed(now(), &config);
+            return service.transaction(|s| {
+                if s.config.as_ref() != Some(&config) {
+                    return Ok(());
+                }
+                if fresh_cycle {
+                    s.scan_summary = ScanSummary::default();
+                }
+                s.scan_summary.source = stream.label.clone();
+                s.scan_summary.page = stream.page + 1;
+                s.scan_summary.device_round = if stream.kind == "recommend" {
+                    stream.round + 1
+                } else {
+                    0
+                };
+                s.scan_summary.note = format!(
+                    "{}暂不可用，其他来源继续；该来源稍后自动恢复：{message}",
+                    stream.label
+                );
+                s.scan_summary.more = discovery.more();
+                s.scan_summary.at = now();
+                s.warning = s.scan_summary.note.clone();
+                s.log(None, s.warning.clone());
+                s.last_scan = now();
+                s.next_scan = discovery.next_at(now(), &config);
+                s.discovery = discovery;
+                Ok(())
+            });
+        }
+    };
     let mut candidates = vec![];
-    let checked = page["items"].as_array().map_or(0, Vec::len);
-    for value in page["items"]
-        .as_array()
-        .ok_or_else(|| AppError::new("AUTOMATION_FEED_INVALID", "新剧列表响应不完整"))?
-    {
+    let values = page["items"].as_array().unwrap();
+    let checked = values.len();
+    let mut metrics_failed = 0;
+    for value in values {
+        ensure_running(service)?;
         if let Some(mut c) = source::parse_candidate(value) {
-            c.release_type = types[selected].into();
+            // Mixed recommendations must retain their real type. Never relabel
+            // a live-action recommendation as animation to pass the filter.
+            if c.release_type.is_empty() && !stream.release_type.is_empty() {
+                c.release_type = stream.release_type.clone();
+            }
+            let mut date_free = config.clone();
+            date_free["scope"] = json!("all");
+            if !source::eligible(&c, &date_free, now() as i64) {
+                continue;
+            }
             if text(&config, "scope") == "today" && c.online_time.is_none() {
-                let metrics = api(
+                match api(
                     app,
                     format!(
                         "/api/duanju/series-metrics?series_id={}&content_type={}",
@@ -192,25 +270,28 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
                         c.content_type
                     ),
                 )
-                .await?;
-                c.online_time = metrics["online_time"].as_i64();
+                .await
+                {
+                    Ok(metrics) => c.online_time = metrics["online_time"].as_i64(),
+                    Err(_) => {
+                        metrics_failed += 1;
+                        continue;
+                    }
+                }
             }
             if source::eligible(&c, &config, now() as i64) {
                 candidates.push(c);
             }
         }
     }
-    let more = page["has_more"].as_bool().unwrap_or(false);
-    let next = text(&page, "next_cursor").to_owned();
-    if more && (next.is_empty() || next == snapshot.cursor) {
-        return Err(AppError::new(
-            "AUTOMATION_FEED_STALLED",
-            "扫描分页未前进，等待下次重试",
-        ));
-    }
+    ensure_running(service)?;
+    let note = discovery.streams[selected].accept(&page, &config);
     service.transaction(|s| {
         if !super::pipeline::can_scan(s) || s.config.as_ref() != Some(&config) {
             return Ok(());
+        }
+        if fresh_cycle {
+            s.scan_summary = ScanSummary::default();
         }
         let filtered = checked.saturating_sub(candidates.len());
         let known = candidates
@@ -220,31 +301,33 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
                 s.jobs.iter().any(|j| j.id == id)
             })
             .count();
-        let count = admit_group(s, candidates, &config, &save_dir);
-        if snapshot.cursor.is_empty() && snapshot.cursor_type == 0 {
-            s.scan_summary = ScanSummary::default();
-        }
+        let count = buffer_candidates(s, candidates, &config, &save_dir);
         s.scan_summary.checked += checked;
         s.scan_summary.filtered += filtered;
         s.scan_summary.known += known;
         s.scan_summary.added += count;
-        s.scan_summary.more = more || selected + 1 < types.len();
+        s.scan_summary.more = discovery.more() || !s.discovery_pending.is_empty();
+        s.scan_summary.source = stream.label;
+        s.scan_summary.page = stream.page + 1;
+        s.scan_summary.device_round = if stream.kind == "recommend" {
+            stream.round + 1
+        } else {
+            0
+        };
+        s.scan_summary.note = if metrics_failed > 0 {
+            format!("{metrics_failed} 部上线日期查询失败，留待下轮核对。{note}")
+        } else {
+            note
+        };
         s.scan_summary.at = now();
         s.warning.clear();
         s.last_scan = now();
-        if more {
-            s.cursor = next;
-            s.cursor_type = selected;
-            s.next_scan = now() + 2;
-        } else if selected + 1 < types.len() {
-            s.cursor.clear();
-            s.cursor_type = selected + 1;
-            s.next_scan = now() + 2;
+        s.next_scan = if !s.discovery_pending.is_empty() {
+            now() + 3
         } else {
-            s.cursor.clear();
-            s.cursor_type = 0;
-            s.next_scan = now() + number(&config, "interval", 5) * 60;
-        }
+            discovery.next_at(now(), &config)
+        };
+        s.discovery = discovery;
         if count > 0 {
             s.log(
                 None,
@@ -1326,6 +1409,29 @@ pub fn cancel_owned(app: &AppHandle, task: &Task) {
     for short in [false, true] {
         let _ = state.youtube.cancel_upload(&task.upload_id(short));
     }
+    // Manual skip has a different retention rule from an upload failure:
+    // remove this task's complete local folder, while the task record remains
+    // in automation/state.json as the deduplication marker.
+    let save_dir = state
+        .settings
+        .lock()
+        .ok()
+        .map(|settings| settings.save_dir.clone());
+    let Some(save_dir) = save_dir else { return; };
+    if safe_root(&task.root).is_err() { return; }
+    let Ok(root) = fs::canonicalize(&task.root) else { return; };
+    let Ok(parent) = fs::canonicalize(root.parent().unwrap_or_else(|| Path::new("."))) else { return; };
+    let Ok(save_root) = fs::canonicalize(save_dir) else { return; };
+    // Require the canonical task directory to be below the configured save
+    // directory and retain at least the 自动追剧 parent component.
+    let owned = root.starts_with(&save_root)
+        && parent.starts_with(&save_root)
+        && parent.file_name().is_some_and(|name| name == "自动追剧")
+        && root != save_root;
+    if !owned || root.is_symlink() {
+        return;
+    }
+    let _ = fs::remove_dir_all(root);
 }
 
 #[path = "cleanup.rs"]

@@ -18,7 +18,7 @@ export type AutomationSnapshot = {
   logs: { at: number; jobId?: string; message: string }[];
   lastScan: number; nextScan: number; warning: string;
   keyStatus: { text: boolean; image: boolean };
-  scanSummary?: { checked: number; filtered: number; known: number; added: number; more: boolean; at: number };
+  scanSummary?: { checked: number; filtered: number; known: number; added: number; more: boolean; at: number; source?: string; page?: number; deviceRound?: number; buffered?: number; note?: string };
 };
 export const usesMediaSlot = (job: AutomationJob) => job.status !== "completed" && job.status !== "skipped" && !["upload", "short", "cleanup", "done"].includes(job.stage);
 export const automationRuntime = {

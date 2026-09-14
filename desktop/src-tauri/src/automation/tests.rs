@@ -610,6 +610,55 @@ fn live_action_is_rejected_in_new_automation_settings() {
 }
 
 #[test]
+fn download_recovery_is_staggered_and_never_waits_fifteen_minutes() {
+    let mut j = task();
+    j.stage = "download".into();
+    j.config["retries"] = json!("0");
+    for n in [1, 2, 10, 100] {
+        j.attempts = n;
+        let start = now();
+        j.defer_retry();
+        assert!(j.retry_at >= start + 30 && j.retry_at <= start + 316);
+        assert_eq!(j.status, Status::Pending);
+        assert!(j.retry_ready);
+    }
+}
+
+#[test]
+fn manual_skip_message_keeps_deduplication_record_and_requests_folder_cleanup() {
+    let mut j = task();
+    j.skip_manually();
+    assert!(j.manual_skip);
+    assert!(j.message.contains("删除本地任务文件夹"));
+    assert!(j.message.contains("去重标记"));
+}
+
+#[test]
+fn collection_settings_migrate_and_reject_unbounded_or_empty_collection() {
+    let c = validate_config(config()).unwrap();
+    assert_eq!(c["recommendDevices"], "3");
+    assert_eq!(c["collectPages"], "10");
+    assert_eq!(c["collectRecommend"], true);
+    let mut invalid = c.clone();
+    invalid["collectPages"] = json!("10000");
+    assert!(validate_config(invalid).is_err());
+    let mut invalid = c;
+    for key in [
+        "collectRecommend",
+        "collectRank",
+        "collectNew",
+        "collectSearch",
+    ] {
+        invalid[key] = json!(false);
+    }
+    assert!(validate_config(invalid.clone()).is_err());
+    invalid["collectSearch"] = json!(true);
+    assert!(validate_config(invalid.clone()).is_err());
+    invalid["keywords"] = json!("重生");
+    assert!(validate_config(invalid).is_ok());
+}
+
+#[test]
 fn completion_and_manual_skip_wake_scanner_without_waiting_for_interval() {
     let path = temporary();
     let mut state = Snapshot {

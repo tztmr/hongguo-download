@@ -72,6 +72,12 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         "exclude",
         "completeOnly",
         "maxEpisodes",
+        "collectRecommend",
+        "collectNew",
+        "collectRank",
+        "collectSearch",
+        "collectPages",
+        "recommendDevices",
         "definition",
         "concurrency",
         "separate",
@@ -154,6 +160,53 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         clean.insert("coverModels".into(), serde_json::json!(models));
     }
     let mut c = Value::Object(clean);
+    for key in [
+        "collectRecommend",
+        "collectNew",
+        "collectRank",
+        "collectSearch",
+    ] {
+        if c.get(key).is_none() {
+            c[key] = json!(true);
+        }
+        if !c[key].is_boolean() {
+            return Err(AppError::new(
+                "AUTOMATION_SETTINGS_INVALID",
+                "采集来源设置无效",
+            ));
+        }
+    }
+    if ![
+        "collectRecommend",
+        "collectNew",
+        "collectRank",
+        "collectSearch",
+    ]
+    .iter()
+    .any(|k| flag(&c, k))
+    {
+        return Err(AppError::new(
+            "AUTOMATION_SETTINGS_INVALID",
+            "请至少选择一种采集来源",
+        ));
+    }
+    if !["collectRecommend", "collectNew", "collectRank"]
+        .iter()
+        .any(|k| flag(&c, k))
+        && text(&c, "keywords")
+            .trim_matches([',', '，', ' '])
+            .is_empty()
+    {
+        return Err(AppError::new(
+            "AUTOMATION_SETTINGS_INVALID",
+            "仅使用关键词搜索时，请填写包含关键词",
+        ));
+    }
+    for (key, value) in [("collectPages", "10"), ("recommendDevices", "3")] {
+        if c.get(key).is_none() {
+            c[key] = json!(value);
+        }
+    }
     if value.get("maxEpisodes").is_none() {
         c["maxEpisodes"] = json!("300");
     }
@@ -195,6 +248,8 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         ("retries", 0, 5),
         ("minDisk", 1, 1000),
         ("maxEpisodes", 1, 10000),
+        ("collectPages", 1, 30),
+        ("recommendDevices", 1, 10),
     ] {
         let n = number(&c, key, u64::MAX);
         if n < min || n > max {
@@ -397,7 +452,7 @@ impl Task {
         self.retry_ready = false;
         self.attempts = 0;
         self.media_state = None;
-        self.message = "已手动跳过，不再自动处理或上传；保留本地文件和已有上传结果".into();
+        self.message = "已手动跳过，不再自动处理或上传；跳过后删除本地任务文件夹，保留记录与去重标记".into();
     }
     // In-flight stages may finish after a skip. Keep their file receipts and
     // side-effect handles, but never let their stale status undo the skip.
@@ -409,6 +464,14 @@ impl Task {
         }
     }
     pub fn defer_retry(&mut self) {
+        if self.stage == "download" {
+            self.status = Status::Pending;
+            let stagger = self.id.bytes().next().unwrap_or(0) as u64 % 16;
+            self.retry_at =
+                now() + (30 * (1u64 << self.attempts.saturating_sub(1).min(4))).min(300) + stagger;
+            self.retry_ready = true;
+            return;
+        }
         // The configured count controls quick retries, not whether unattended
         // work is abandoned. After that, leave the job eligible after cooldown.
         if self.attempts <= number(&self.config, "retries", 3) {
@@ -462,6 +525,10 @@ pub struct Snapshot {
     pub cursor: String,
     #[serde(default)]
     pub scan_summary: ScanSummary,
+    #[serde(default)]
+    pub discovery: super::discovery::Discovery,
+    #[serde(default)]
+    pub discovery_pending: Vec<Candidate>,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -472,6 +539,16 @@ pub struct ScanSummary {
     pub added: usize,
     pub more: bool,
     pub at: u64,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub page: u64,
+    #[serde(default)]
+    pub device_round: u64,
+    #[serde(default)]
+    pub buffered: usize,
+    #[serde(default)]
+    pub note: String,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KeyStatus {

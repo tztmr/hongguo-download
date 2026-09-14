@@ -35,7 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.http_client import PureSignedClient
 from core.video_download import create_video_client
 from core.scheduler import scheduler
-from endpoints import device, duanju, pseries, web_catalog, ai_studio
+from endpoints import device, duanju, pseries, web_catalog, ai_studio, collection
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -80,6 +80,7 @@ app.add_middleware(
 app.include_router(ai_studio.router, prefix="/api", tags=["AI 创作台"])
 app.include_router(device.router, prefix="/api", tags=["设备管理"])
 app.include_router(duanju.router, prefix="/api", tags=["短剧(签名 + 解密)"])
+app.include_router(collection.router, prefix="/api", tags=["自动追剧采集"])
 app.include_router(pseries.router, prefix="/api", tags=["短剧(PSeries 无签名)"])
 app.include_router(web_catalog.router, prefix="/api", tags=["官网分类"])
 
@@ -108,6 +109,7 @@ async def root():
             "duanju_web_categories": "/api/duanju/web-categories",
             "duanju_web_category": "/api/duanju/web-category?background=..&topic=..&setting=..&gender=2&time=0&sort_type=0&page=1",
             "duanju_discovery_more": "/api/duanju/discovery/more?cell_id=..&offset=..&session_id=..&plan_id=..&filter_ids=..",
+            "duanju_collection_recommendation": "/api/duanju/collection/recommendation?tab=32|8&cursor=..",
             "duanju_rank": "/api/duanju/rank?board=ranklist_hot_sc&type=playlet|comic_series_rank|ai_playlet|all&limit=20",
             "duanju_new_releases": "/api/duanju/new-releases?type=playlet&limit=20",
             "--- PSeries 无签名短剧 ---": "",

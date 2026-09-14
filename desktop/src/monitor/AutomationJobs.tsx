@@ -44,7 +44,7 @@ export function AutomationJobs({ jobs, loaded, pending, onAction }: { jobs: Auto
         {!!job.retryAt && job.retryAt > Date.now() / 1000 && (job.status === "pending" || job.status === "observing") && <p className="auto-task-retry">{job.attempts ? `第 ${job.attempts} 次重试` : "自动复查"} · 预计 {time(job.retryAt)} · 等待自动恢复，复用已完成文件</p>}
         <footer className="auto-task-footer"><details><summary>任务详情</summary><p>ID：{job.bookId} · 更新：{time(job.updatedAt)}</p><p>{job.message}</p></details><div className="auto-runtime-actions">
           {job.status === "review" && <button type="button" disabled={pending} onClick={() => onAction(job.id, "continue")}>确认继续处理</button>}
-          {!finished(job) && <button type="button" disabled={!loaded || pending} title="停止后续处理和上传，保留文件；后续监听不再自动加入此剧" onClick={() => onAction(job.id, "skip")}>跳过此任务</button>}
+          {!finished(job) && <button type="button" disabled={!loaded || pending} title="停止后续处理和上传，删除本地任务文件夹；保留记录，后续监听不再自动加入此剧" onClick={() => onAction(job.id, "skip")}>跳过此任务</button>}
           {job.status === "failed" && <button type="button" disabled={pending} onClick={() => onAction(job.id, "retry")}>重试此任务</button>}
           {job.mainVideoUrl && <a href={job.mainVideoUrl} target="_blank" rel="noreferrer">查看正片 ↗</a>}{job.shortVideoUrl && <a href={job.shortVideoUrl} target="_blank" rel="noreferrer">查看首集 Shorts ↗</a>}
         </div></footer>

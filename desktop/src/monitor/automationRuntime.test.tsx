@@ -31,10 +31,28 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it("migrates collection sources and saves device rotation and page bounds", async () => {
+    const view = page(); await loaded(view);
+    expect(view.getByRole("button", { name: "推荐轮询" }).getAttribute("aria-pressed")).toBe("true");
+    expect(view.getByRole("spinbutton", { name: /^推荐设备轮次/ })).toHaveProperty("value", "3");
+    fireEvent.change(view.getByRole("spinbutton", { name: /^每个来源最多翻页/ }), { target: { value: "6" } });
+    fireEvent.click(view.getByRole("button", { name: "榜单采集" }));
+    save(view);
+    await waitFor(() => expect(state.config?.collectPages).toBe("6"));
+    expect(state.config?.collectRecommend).toBe(true);
+    expect(state.config?.collectRank).toBe(false);
+  });
+  it("shows current source, device round and retained candidates", async () => {
+    state.scanSummary = { checked: 12, filtered: 1, known: 0, added: 10, more: true, at: 100,
+      source: "漫剧推荐", deviceRound: 2, page: 4, buffered: 1, note: "换设备继续" };
+    const view = page(); await loaded(view);
+    expect(view.getByText(/漫剧推荐.*设备轮次 2.*第 4 页/)).toBeTruthy();
+    expect(view.getByText(/已发现 1 部候选等待空位/)).toBeTruthy();
+  });
   it("explains vacant slots using actual scan counts", async () => {
     state.scanSummary = { checked: 99, filtered: 89, known: 10, added: 0, more: false, at: 100 };
     const view = page(); await loaded(view);
-    expect(view.getByText(/本轮已检查 99 部.*筛选排除 89 部.*已有记录 10 部.*新加入 0 部/)).toBeTruthy();
+    expect(view.getByText(/本轮已检查 99 条.*筛选排除 89 部.*已有记录 10 部.*新加入 0 部/)).toBeTruthy();
     expect(view.getByText(/当前筛选下暂无可补入的新剧/)).toBeTruthy();
   });
   it("defaults to a 300 episode ceiling and persists an edited whole-drama filter", async () => {

@@ -37,6 +37,7 @@ from core.new_releases import (
     normalize_metrics,
 )
 from core.response import error, success
+from core.download_diagnostics import record_failure
 
 logger = logging.getLogger('fanqie.duanju')
 router = APIRouter()
@@ -1056,6 +1057,45 @@ async def duanju_download(
     playback_compat: bool = Query(False, description='仅在线观看: 转为 H.264/AAC 兼容 MP4'),
     playback_stream: bool = Query(False, description='仅兼容播放: 边转换边播放'),
 ):
+    # A ten-series media group must not allocate ten encrypted/decrypted MP4s
+    # simultaneously. Waiting requests use no video buffers or AI/GPU slots.
+    if not hasattr(request.app.state, 'download_slots'):
+        request.app.state.download_slots = asyncio.Semaphore(3)
+    slots = request.app.state.download_slots
+    try:
+        await asyncio.wait_for(slots.acquire(), timeout=20)
+    except asyncio.TimeoutError:
+        response = error('下载服务繁忙，等待可用内存与下载名额后自动重试', code=-11, status_code=503)
+        response.headers['Retry-After'] = '30'
+        return response
+    try:
+        started = time.monotonic()
+        for attempt in range(2):
+            request.state.download_stage = '播放地址解析'
+            try:
+                response = await _duanju_download_once(request, item_id, definition, playback_compat, playback_stream)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                stage = request.state.download_stage
+                reference = record_failure(item_id, stage, exc)
+                if isinstance(exc, MemoryError):
+                    return error(f'下载内存不足，等待资源释放后自动恢复（记录 {reference}）', code=-11, status_code=503)
+                response = error(f'{stage}异常：{type(exc).__name__}；将自动恢复（记录 {reference}）', code=-12, status_code=502)
+            if response.status_code < 500 or playback_compat:
+                return response
+            # Retry an early transient error once with fresh playback URLs. Do
+            # not cache failures, change quality, or restart completed episodes.
+            _duanju_video_cache.delete(make_cache_key('duanju_content', item_id=item_id))
+            if attempt or time.monotonic() - started >= 30:
+                return response
+            await asyncio.sleep(1)
+        return response
+    finally:
+        slots.release()
+
+
+async def _duanju_download_once(request, item_id, definition, playback_compat, playback_stream):
     """下载并解密剧集,直接返回可播放 MP4。
 
     流程: multi_video_model → spade_a 派生 AES key → 下载加密 MP4 → CENC AES-CTR 解密 → 返回明文 MP4。
@@ -1066,7 +1106,9 @@ async def duanju_download(
         data = await while_connected(model, request.is_disconnected) if playback_compat else await model
         model_done = time.perf_counter()
         source = _pick_source(data['sources'], definition, prefer_h264=playback_compat)
+        request.state.download_stage = '播放密钥解析'
         key_hex = derive_key_from_spade_a(source['spade_a'])
+        request.state.download_stage = '视频 CDN 下载'
         download = _download_encrypted(source['urls'], getattr(request.app.state, 'video_client', None))
         encrypted = await while_connected(download, request.is_disconnected) if playback_compat else await download
         download_done = time.perf_counter()
@@ -1075,6 +1117,7 @@ async def duanju_download(
         return error(str(exc), code=-8, status_code=502)
 
     try:
+        request.state.download_stage = '视频解密'
         decrypted = await asyncio.to_thread(decrypt_mp4, encrypted, key_hex)
     except ValueError as exc:
         logger.error('短剧解密失败: %s', exc)
@@ -1082,6 +1125,7 @@ async def duanju_download(
 
     logger.info('视频准备耗时: %s %s, 地址 %.3fs, CDN %.3fs, 解密 %.3fs', item_id, source['definition'], model_done-started, download_done-model_done, time.perf_counter()-download_done)
     if playback_compat:
+        request.state.download_stage = '播放兼容转换'
         try:
             if playback_stream:
                 stream, metadata = await prepare_streaming_video(decrypted, request.is_disconnected)
@@ -1143,6 +1187,52 @@ async def duanju_categories(
     return success(data)
 
 
+def _discovery_url(device_id, tab_type, filter_ids, selected_items) -> str:
+    base = (
+        f'tab_version=double_col&client_template=12'
+        f'&bottom_tab_type_list=7%2C0%2C1%2C5%2C2%2C4'
+        f'&tab_type={tab_type}&book_id=0&landing_bottom_tab_type=7&bottom_tab_type=0'
+        f'&client_req_type=1&offset=0&device_level=3'
+    )
+    if filter_ids:
+        base += f'&filter_ids={quote(filter_ids, safe=",")}'
+    if selected_items:
+        base += f'&selected_items={quote(selected_items, safe=",")}'
+    return f'{BOOKMALL_API}/reading/bookapi/bookmall/tab/v?{base}&{_bookmall_params(device_id)}'
+
+def _discovery_more_url(device_id, tab_type, cell_id, offset, session_id, plan_id, filter_ids, selected_items) -> str:
+    gid_list = [sid for sid in filter_ids.split(',') if sid][:6]
+    refresh_info = json.dumps({
+        'first_screen_impression_gids': gid_list,
+        'has_active_refresh': True,
+        'latest_impression_gids': ','.join(gid_list),
+        'refresh_type': 1,
+    }, separators=(',', ':'))
+    ug_task = json.dumps({'operation_type': 2}, separators=(',', ':'))
+    query = (
+        f'tab_version=double_col&client_template=12&change_type=0&cell_id={quote(cell_id, safe="")}'
+        f'&offset={offset}&limit=0&tab_type={tab_type}&client_req_type=2'
+        f'&unlimited_selector_change_type=1&page=0&page_entry_time=0&cold_start_session=0'
+        f'&ecom_impression_start_time=0&last_dynamic_cover_offset=0&ecom_sort_by=0'
+        f'&source_tab_type=0&search_tab_type=0&pad_column_detail=0&author_id=0'
+        f'&book_comment_id=0&category_id=0&genre=0&genre_type=0&sub_genre=0&tag_id=0'
+        f'&inner_category_id=0&rank_sub_info_id=0&item_id=0&total_chapter_num=0'
+        f'&current_chapter_num=0&cell_sub_id=0&sub_tag_id=0&idol_tag_id=0'
+        f'&ecom_category_id=0&video_tab_cold_start=0&version_tag=&device_level=3'
+        f'&plan_id={quote(plan_id, safe="")}&session_id={quote(session_id, safe="")}'
+        f'&screen_width_px=1271&last_impression_rec_tags=&selected_items={quote(selected_items, safe=",")}'
+        f'&recent_impr_gid=&ClickedContent=&app_launch_times=0'
+        f'&web_page_version_code=0&support_gender_list=false'
+        f'&disable_digg_stat=false&ecom_refresh_type=0&pad_column_cover=0'
+        f'&ug_task_params={quote(ug_task, safe="")}'
+    )
+    if gid_list:
+        query += f'&first_screen_impression_gids={quote(",".join(gid_list), safe=",")}'
+        query += f'&refresh_action_info={quote(refresh_info, safe="")}'
+    if filter_ids:
+        query += f'&filter_ids={quote(filter_ids, safe=",")}'
+    return f'{BOOKMALL_API}/reading/bookapi/bookmall/cell/change/v?{query}&{_bookmall_params(device_id)}'
+
 @router.get('/duanju/discovery')
 async def duanju_discovery(
     request: Request,
@@ -1162,17 +1252,7 @@ async def duanju_discovery(
         return success(cached)
 
     def build_url(device_id: str) -> str:
-        base = (
-            f'tab_version=double_col&client_template=12'
-            f'&bottom_tab_type_list=7%2C0%2C1%2C5%2C2%2C4'
-            f'&tab_type={tab_type}&book_id=0&landing_bottom_tab_type=7&bottom_tab_type=0'
-            f'&client_req_type=1&offset=0&device_level=3'
-        )
-        if filter_ids:
-            base += f'&filter_ids={quote(filter_ids, safe=",")}'
-        if selected_items:
-            base += f'&selected_items={quote(selected_items, safe=",")}'
-        return f'{BOOKMALL_API}/reading/bookapi/bookmall/tab/v?{base}&{_bookmall_params(device_id)}'
+        return _discovery_url(device_id, tab_type, filter_ids, selected_items)
 
     result = await request.app.state.client.call_with_device(build_url, aid=8662, max_device_retries=3)
     if not result['ok']:
@@ -1227,36 +1307,7 @@ async def duanju_discovery_more(
     gid_list = [sid for sid in filter_ids.split(',') if sid][:6]
 
     def build_url(device_id: str) -> str:
-        refresh_info = json.dumps({
-            'first_screen_impression_gids': gid_list,
-            'has_active_refresh': True,
-            'latest_impression_gids': ','.join(gid_list),
-            'refresh_type': 1,
-        }, separators=(',', ':'))
-        ug_task = json.dumps({'operation_type': 2}, separators=(',', ':'))
-        query = (
-            f'tab_version=double_col&client_template=12&change_type=0&cell_id={quote(cell_id, safe="")}'
-            f'&offset={offset}&limit=0&tab_type={tab_type}&client_req_type=2'
-            f'&unlimited_selector_change_type=1&page=0&page_entry_time=0&cold_start_session=0'
-            f'&ecom_impression_start_time=0&last_dynamic_cover_offset=0&ecom_sort_by=0'
-            f'&source_tab_type=0&search_tab_type=0&pad_column_detail=0&author_id=0'
-            f'&book_comment_id=0&category_id=0&genre=0&genre_type=0&sub_genre=0&tag_id=0'
-            f'&inner_category_id=0&rank_sub_info_id=0&item_id=0&total_chapter_num=0'
-            f'&current_chapter_num=0&cell_sub_id=0&sub_tag_id=0&idol_tag_id=0'
-            f'&ecom_category_id=0&video_tab_cold_start=0&version_tag=&device_level=3'
-            f'&plan_id={quote(plan_id, safe="")}&session_id={quote(session_id, safe="")}'
-            f'&screen_width_px=1271&last_impression_rec_tags=&selected_items={quote(selected_items, safe=",")}'
-            f'&recent_impr_gid=&ClickedContent=&app_launch_times=0'
-            f'&web_page_version_code=0&support_gender_list=false'
-            f'&disable_digg_stat=false&ecom_refresh_type=0&pad_column_cover=0'
-            f'&ug_task_params={quote(ug_task, safe="")}'
-        )
-        if gid_list:
-            query += f'&first_screen_impression_gids={quote(",".join(gid_list), safe=",")}'
-            query += f'&refresh_action_info={quote(refresh_info, safe="")}'
-        if filter_ids:
-            query += f'&filter_ids={quote(filter_ids, safe=",")}'
-        return f'{BOOKMALL_API}/reading/bookapi/bookmall/cell/change/v?{query}&{_bookmall_params(device_id)}'
+        return _discovery_more_url(device_id, tab_type, cell_id, offset, session_id, plan_id, filter_ids, selected_items)
 
     result = await request.app.state.client.call_with_device(build_url, aid=8662, max_device_retries=3)
     if not result['ok']:

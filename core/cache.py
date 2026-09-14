@@ -42,6 +42,10 @@ class TTLCache:
         with self._lock:
             self._store.clear()
 
+    def delete(self, key: str):
+        with self._lock:
+            self._store.pop(key, None)
+
 def make_cache_key(prefix: str, **kwargs) -> str:
 
     parts = [prefix]

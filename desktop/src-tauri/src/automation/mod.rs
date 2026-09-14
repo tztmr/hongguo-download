@@ -1,4 +1,5 @@
 mod credentials;
+mod discovery;
 mod metadata;
 pub mod model;
 mod pipeline;
@@ -157,6 +158,8 @@ impl Service {
         let status = credentials::update(&config, secrets)?;
         self.transaction(|s| {
             s.config = Some(config);
+            s.discovery = discovery::Discovery::default();
+            s.discovery_pending.clear();
             s.key_status = status;
             s.log(None, "设置已保存；点击启动才开始自动处理");
             Ok(())
