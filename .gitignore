@@ -27,6 +27,7 @@ dist/
 desktop/node_modules/
 desktop/dist/
 desktop/src-tauri/target/
+desktop/src-tauri/target-package-*/
 desktop/src-tauri/gen/schemas/
 desktop/*.local
 desktop/src-tauri/resources/ai-worker-modern-v034/

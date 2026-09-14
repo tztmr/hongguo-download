@@ -331,7 +331,7 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         if count > 0 {
             s.log(
                 None,
-                format!("本轮补入 {count} 部；媒体处理最多 10 部，转入上传或跳过后自动补位"),
+                format!("本轮补入 {count} 部；每组最多 10 部，完成正片、Shorts 与清理收尾或跳过后自动补位"),
             );
         }
         Ok(())

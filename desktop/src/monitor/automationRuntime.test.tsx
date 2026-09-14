@@ -73,13 +73,13 @@ describe("native automation boundaries", () => {
     expect(state.config?.keywords).toBe("权谋，重生，古代，甜宠，校园，青春");
     expect(view.getByText("不限集数", { exact: true })).toBeTruthy();
   });
-  it("keeps uploading dramas outside the ten media slots", async () => {
+  it("keeps uploads, Shorts, and cleanup inside the ten group slots", async () => {
     state.mode = "running";
-    state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `upload-${i}`, bookId: `book-${i}`, title: `上传剧${i}`, stage: "upload", status: "pending", message: "上传中", episodeDone: 2, episodeTotal: 2, progress: 50, updatedAt: 1 }));
+    state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `upload-${i}`, bookId: `book-${i}`, title: `上传剧${i}`, stage: ["upload", "short", "cleanup"][i % 3], status: "pending", message: "上传中", episodeDone: 2, episodeTotal: 2, progress: 50, updatedAt: 1 }));
     const view = page(); await loaded(view);
-    expect(view.getByText(/媒体处理 0 部.*空位 10 部/)).toBeTruthy();
-    expect(view.getByText(/上传与收尾 10 部/)).toBeTruthy();
-    expect(button(view, "立即扫描").disabled).toBe(false);
+    expect(view.getByText(/组内任务 10 部.*空位 0 部/)).toBeTruthy();
+    expect(view.getByText(/正片上传、首集 Shorts 和删除收尾都占用组名额/)).toBeTruthy();
+    expect(button(view, "立即扫描").disabled).toBe(true);
   });
   it("keeps completed tasks behind the finished filter and searches by title", async () => {
     state.jobs = [
@@ -109,7 +109,7 @@ describe("native automation boundaries", () => {
     state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `job-${i}`, bookId: `book-${i}`, title: `剧目${i}`, stage: "merge", status: i === 0 ? "completed" as const : "pending" as const, message: "等待处理", episodeDone: 2, episodeTotal: 2, progress: 0, updatedAt: 1 }));
     const view = page(); await loaded(view);
     expect(view.getByText(/1 组.*最多 10 部.*自动补位/)).toBeTruthy();
-    expect(view.getByText(/媒体处理 9 部.*空位 1 部/)).toBeTruthy();
+    expect(view.getByText(/组内任务 9 部.*空位 1 部/)).toBeTruthy();
     expect(view.getByRole("button", { name: "立即扫描" })).toHaveProperty("disabled", false);
     expect(view.queryByText(/待入队 140/)).toBeNull();
     fireEvent.click(view.getByRole("button", { name: /清理与运行/ }));

@@ -66,7 +66,7 @@ fn manual_skip_while_busy_survives_a_late_checkpoint_and_restart() {
 }
 
 #[test]
-fn uploads_release_media_admission_without_waiting_for_network_completion() {
+fn upload_lifecycle_reserves_group_slots_until_done() {
     let mut s = Snapshot {
         config: Some(config()),
         mode: Mode::Running,
@@ -78,7 +78,8 @@ fn uploads_release_media_admission_without_waiting_for_network_completion() {
         j.stage = "upload".into();
         s.jobs.push(j);
     }
-    assert_eq!(pipeline::free_slots(&s), 10);
+    assert_eq!(pipeline::free_slots(&s), 0);
+    assert!(!pipeline::can_scan(&s));
     for n in 0..10 {
         let mut j = task();
         j.id = format!("media-{n}");
@@ -86,10 +87,42 @@ fn uploads_release_media_admission_without_waiting_for_network_completion() {
         s.jobs.push(j);
     }
     pipeline::normalize_group(&mut s);
-    assert_eq!(s.jobs.len(), 20);
+    assert_eq!(s.jobs.len(), 10);
     assert_eq!(pipeline::free_slots(&s), 0);
-    let ready = pipeline::select(&s, &HashSet::new(), now());
-    assert!(ready.contains(&"media-9".to_string()));
+    assert!(!s.jobs.iter().any(|job| job.id == "media-9"));
+    s.jobs[0].status = Status::Completed;
+    assert_eq!(pipeline::free_slots(&s), 1);
+    assert!(pipeline::can_scan(&s));
+}
+
+#[test]
+fn group_slot_stays_reserved_through_upload_shorts_and_cleanup() {
+    let mut s = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for (n, stage) in ["upload", "short", "cleanup"]
+        .into_iter()
+        .cycle()
+        .take(10)
+        .enumerate()
+    {
+        let mut job = task();
+        job.id = format!("finishing-{n}");
+        job.stage = stage.into();
+        s.jobs.push(job);
+    }
+    let mut incoming = task();
+    incoming.id = "incoming".into();
+    s.waiting.push(incoming);
+
+    assert_eq!(pipeline::free_slots(&s), 0);
+    assert!(!pipeline::can_scan(&s));
+
+    s.jobs[0].status = Status::Completed;
+    assert_eq!(pipeline::free_slots(&s), 1);
+    assert!(pipeline::can_scan(&s));
 }
 
 #[test]
@@ -773,7 +806,7 @@ fn completion_and_manual_skip_wake_scanner_without_waiting_for_interval() {
 }
 
 #[test]
-fn entering_upload_wakes_scanner_and_preserves_the_remaining_media_group() {
+fn entering_upload_keeps_the_group_full_until_cleanup_finishes() {
     let path = temporary();
     let service = Service::load(path.clone()).unwrap();
     service
@@ -793,8 +826,8 @@ fn entering_upload_wakes_scanner_and_preserves_the_remaining_media_group() {
     let mut uploaded = service.snapshot().jobs[0].clone();
     uploaded.next("upload", "媒体已准备完毕");
     service.checkpoint(&uploaded).unwrap();
-    assert_eq!(service.snapshot().next_scan, 0);
-    assert_eq!(pipeline::free_slots(&service.snapshot()), 1);
+    assert!(service.snapshot().next_scan >= now() + 3599);
+    assert_eq!(pipeline::free_slots(&service.snapshot()), 0);
     assert_eq!(service.snapshot().jobs.len(), 10);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }

@@ -10,8 +10,11 @@ fn queue_order(left: &Task, right: &Task) -> std::cmp::Ordering {
 }
 
 pub(super) fn uses_media_slot(job: &Task) -> bool {
+    // A group slot belongs to the whole drama lifecycle. Upload, optional
+    // Shorts, and local cleanup must all finish before the next drama enters
+    // the ten-item group; releasing it at upload admission lets the scanner
+    // overfill the group and interleave unrelated lifecycles.
     !matches!(job.status, Status::Completed | Status::Skipped)
-        && !matches!(job.stage.as_str(), "upload" | "short" | "cleanup" | "done")
 }
 
 pub(super) fn free_slots(snapshot: &Snapshot) -> usize {

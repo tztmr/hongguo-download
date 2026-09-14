@@ -21,7 +21,9 @@ export type AutomationSnapshot = {
   keyStatus: { text: boolean; image: boolean };
   scanSummary?: { checked: number; filtered: number; known: number; added: number; more: boolean; at: number; source?: string; page?: number; deviceRound?: number; buffered?: number; note?: string };
 };
-export const usesMediaSlot = (job: AutomationJob) => job.status !== "completed" && job.status !== "skipped" && !["upload", "short", "cleanup", "done"].includes(job.stage);
+// A group slot remains occupied until the complete drama lifecycle finishes:
+// main video upload, optional Shorts, and local cleanup are all included.
+export const usesMediaSlot = (job: AutomationJob) => job.status !== "completed" && job.status !== "skipped";
 export const automationRuntime = {
   snapshot: () => invoke<AutomationSnapshot>("get_automation_snapshot"),
   save: (config: Record<string, unknown>, secrets: AutomationSecrets = {}) => invoke<AutomationSnapshot>("save_automation_settings", {
