@@ -162,5 +162,5 @@ it("migrates saved Flash and restores custom non-AI templates when credentials a
   expect((view.getByLabelText("YouTube 标题") as HTMLInputElement).value).toBe("我的频道 {剧名}");
   expect((view.getByLabelText("YouTube 视频描述") as HTMLTextAreaElement).value).toBe("原简介 {简介}");
   expect((view.getByLabelText("视频标签", {exact:false}) as HTMLInputElement).value).toBe("原标签");
-  expect((view.getByLabelText("上传可见性") as HTMLSelectElement).value).toBe("unlisted");
+  expect((view.getByLabelText("上传可见性", { exact: false }) as HTMLSelectElement).value).toBe("unlisted");
 });
