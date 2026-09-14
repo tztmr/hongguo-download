@@ -5,7 +5,6 @@ use super::{
     tools::MediaTools,
 };
 use crate::AppError;
-use serde::Deserialize;
 use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
@@ -25,23 +24,7 @@ use std::os::windows::fs::MetadataExt;
 #[cfg(windows)]
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamSignature {
-    pub codec_name: String,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub frame_rate: Option<String>,
-    pub time_base: Option<String>,
-    pub sample_rate: Option<u32>,
-    pub channels: Option<u16>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct MediaProbe {
-    pub video: StreamSignature,
-    pub audio: Option<StreamSignature>,
-    pub duration_seconds: f64,
-}
+pub use super::probe::MediaProbe;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergeProgress {
@@ -53,36 +36,6 @@ pub struct MergeProgress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MergeResult {
     pub output_path: PathBuf,
-}
-
-#[derive(Deserialize)]
-struct RawProbe {
-    streams: Vec<RawStream>,
-    format: RawFormat,
-}
-
-#[derive(Deserialize)]
-struct RawStream {
-    codec_type: Option<String>,
-    codec_name: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
-    r_frame_rate: Option<String>,
-    time_base: Option<String>,
-    sample_rate: Option<String>,
-    channels: Option<u16>,
-    duration: Option<String>,
-    disposition: Option<RawDisposition>,
-}
-
-#[derive(Deserialize)]
-struct RawDisposition {
-    attached_pic: Option<u8>,
-}
-
-#[derive(Deserialize)]
-struct RawFormat {
-    duration: Option<String>,
 }
 
 pub fn can_stream_copy(probes: &[MediaProbe]) -> bool {
@@ -110,6 +63,19 @@ struct ProbeDetails {
 }
 
 fn probe_details(tools: &MediaTools, path: &Path) -> Result<ProbeDetails, AppError> {
+    probe_details_inner(tools, path).map_err(|error| probe_context(error, path))
+}
+
+fn probe_context(mut error: AppError, path: &Path) -> AppError {
+    let file = path.file_name().unwrap_or_default().to_string_lossy();
+    let size = fs::metadata(path)
+        .map(|m| format!("{} 字节", m.len()))
+        .unwrap_or_else(|_| "文件不可访问".into());
+    error.message = format!("{}（文件：{file}，{size}）", error.message);
+    error
+}
+
+fn probe_details_inner(tools: &MediaTools, path: &Path) -> Result<ProbeDetails, AppError> {
     let output = tools
         .ffprobe_command()
         .args([
@@ -133,29 +99,28 @@ fn probe_details(tools: &MediaTools, path: &Path) -> Result<ProbeDetails, AppErr
             )
         })?;
     if !output.status.success() {
-        return Err(AppError::new("FFPROBE_FAILED", "媒体文件无法读取"));
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        let reason = if stderr.contains("no such file") || stderr.contains("permission denied") {
+            "媒体文件无法访问，请检查文件路径与读取权限"
+        } else if stderr.contains("moov atom not found")
+            || stderr.contains("invalid data")
+            || stderr.contains("end of file")
+        {
+            "媒体文件不完整或格式无效"
+        } else {
+            "媒体文件无法读取"
+        };
+        return Err(AppError::with_cause("FFPROBE_FAILED", reason, stderr));
     }
-    let media = parse_probe_json(&output.stdout)?;
-    let raw: serde_json::Value =
-        serde_json::from_slice(&output.stdout).map_err(|_| invalid_probe())?;
+    let raw = super::probe::decode(&output.stdout)?;
+    let media = super::probe::parse_value(&raw)?;
     let streams = raw["streams"].as_array().ok_or_else(invalid_probe)?;
     let video = streams
         .iter()
-        .find(|s| {
-            s["codec_type"] == "video"
-                && s["disposition"]["attached_pic"]
-                    .as_u64()
-                    .unwrap_or_default()
-                    != 1
-        })
+        .find(|s| super::probe::is_video(s))
         .ok_or_else(invalid_probe)?;
-    let number = |value: &serde_json::Value, fallback: f64| {
-        value
-            .as_str()
-            .and_then(|s| s.parse::<f64>().ok())
-            .filter(|v| v.is_finite())
-            .unwrap_or(fallback)
-    };
+    let number =
+        |value: &serde_json::Value, fallback: f64| super::probe::number(value).unwrap_or(fallback);
     let audio = streams.iter().find(|s| s["codec_type"] == "audio");
     Ok(ProbeDetails {
         video_config: [
@@ -182,7 +147,7 @@ fn probe_details(tools: &MediaTools, path: &Path) -> Result<ProbeDetails, AppErr
             .as_str()
             .and_then(|value| value.parse().ok()),
         video_start: number(&video["start_time"], f64::NAN),
-        video_duration: number(&video["duration"], f64::NAN),
+        video_duration: super::probe::stream_duration(video).unwrap_or(f64::NAN),
         audio_start: audio.map(|a| number(&a["start_time"], 0.0)).unwrap_or(0.0),
         media,
     })
@@ -351,7 +316,8 @@ fn run_merge_inner(
         } else {
             VideoEncoder::Copy
         };
-        let mut spec = NormalizeSpec::new(&details, encoder, request.quality)?;
+        let mut spec = NormalizeSpec::new(&details, encoder, request.quality)
+            .map_err(|error| probe_context(error, &inputs[0].path))?;
         if request.square_canvas {
             spec.square_canvas = true;
             spec.width = super::framing::square_side(spec.width, spec.height);
@@ -469,81 +435,6 @@ fn run_merge_inner(
     Ok(MergeResult { output_path })
 }
 
-fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
-    let raw: RawProbe = serde_json::from_slice(bytes).map_err(|_| invalid_probe())?;
-    let videos = raw
-        .streams
-        .iter()
-        .filter(|stream| {
-            stream.codec_type.as_deref() == Some("video")
-                && stream
-                    .disposition
-                    .as_ref()
-                    .and_then(|value| value.attached_pic)
-                    .unwrap_or_default()
-                    != 1
-        })
-        .collect::<Vec<_>>();
-    let audios = raw
-        .streams
-        .iter()
-        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
-        .collect::<Vec<_>>();
-    if videos.len() != 1 {
-        return Err(invalid_probe());
-    }
-    let video = videos[0];
-    let duration_seconds = raw
-        .format
-        .duration
-        .as_deref()
-        .and_then(parse_duration)
-        .or_else(|| video.duration.as_deref().and_then(parse_duration))
-        .or_else(|| {
-            audios
-                .first()
-                .and_then(|stream| stream.duration.as_deref())
-                .and_then(parse_duration)
-        })
-        .ok_or_else(invalid_probe)?;
-    Ok(MediaProbe {
-        video: StreamSignature {
-            codec_name: video.codec_name.clone().ok_or_else(invalid_probe)?,
-            width: video.width,
-            height: video.height,
-            frame_rate: video.r_frame_rate.clone(),
-            time_base: video.time_base.clone(),
-            sample_rate: None,
-            channels: None,
-        },
-        audio: audios
-            .first()
-            .map(|audio| {
-                Ok(StreamSignature {
-                    codec_name: audio.codec_name.clone().ok_or_else(invalid_probe)?,
-                    width: None,
-                    height: None,
-                    frame_rate: None,
-                    time_base: audio.time_base.clone(),
-                    sample_rate: audio
-                        .sample_rate
-                        .as_deref()
-                        .map(str::parse)
-                        .transpose()
-                        .map_err(|_| invalid_probe())?,
-                    channels: audio.channels,
-                })
-            })
-            .transpose()?,
-        duration_seconds,
-    })
-}
-
-fn parse_duration(value: &str) -> Option<f64> {
-    let duration = value.parse::<f64>().ok()?;
-    (duration.is_finite() && duration > 0.0).then_some(duration)
-}
-
 fn validate_inputs(root: &Path, inputs: &[MergeInput]) -> Result<(), AppError> {
     let mut previous = None;
     for input in inputs {
@@ -620,14 +511,22 @@ fn write_concat_file(path: &Path, inputs: &[MergeInput]) -> Result<(), AppError>
     file.write_all(b"ffconcat version 1.0\n")
         .map_err(output_invalid)?;
     for input in inputs {
-        let value = input
-            .path
-            .to_string_lossy()
-            .replace('\\', "/")
-            .replace('\'', "'\\''");
-        writeln!(file, "file '{value}'").map_err(output_invalid)?;
+        writeln!(file, "{}", concat_entry(&input.path)?).map_err(output_invalid)?;
     }
     file.sync_all().map_err(output_invalid)
+}
+
+fn concat_entry(path: &Path) -> Result<String, AppError> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| input_changed("non-Unicode path"))?;
+    if value.chars().any(char::is_control) {
+        return Err(input_changed("control character in concat path"));
+    }
+    // Explicit file: avoids URL resolution against concat.txt. In particular,
+    // keep the native \\?\ prefix intact; //?/ is parsed as a URL query.
+    // Backslashes are literal inside FFmpeg's single quotes; escape only '.
+    Ok(format!("file 'file:{}'", value.replace('\'', "'\\''")))
 }
 
 struct NormalizeSpec {
@@ -649,13 +548,28 @@ impl NormalizeSpec {
         quality: MergeQuality,
     ) -> Result<Self, AppError> {
         let video = &probes[0].media.video;
-        let rate = video.frame_rate.clone().ok_or_else(invalid_probe)?;
-        let (a, b) = rate.split_once('/').ok_or_else(invalid_probe)?;
-        let fps = a.parse::<f64>().map_err(|_| invalid_probe())?
-            / b.parse::<f64>().map_err(|_| invalid_probe())?;
-        if !fps.is_finite() || !(1.0..=120.0).contains(&fps) {
-            return Err(invalid_probe());
-        }
+        let rate = video
+            .frame_rate
+            .clone()
+            .ok_or_else(|| AppError::new("FFPROBE_INVALID", "媒体检测失败：缺少可用视频帧率"))?;
+        let fps = super::probe::ratio(&rate)
+            .filter(|fps| (1.0..=120.0).contains(fps))
+            .ok_or_else(|| {
+                AppError::new(
+                    "FFPROBE_INVALID",
+                    format!("媒体检测失败：视频帧率 {rate} 超出可处理范围"),
+                )
+            })?;
+        let dimensions_error = || {
+            AppError::new(
+                "FFPROBE_INVALID",
+                format!(
+                    "媒体检测失败：视频分辨率 {}×{} 超出可处理范围",
+                    video.width.unwrap_or(0),
+                    video.height.unwrap_or(0)
+                ),
+            )
+        };
         Ok(Self {
             square_canvas: false,
             cpu_threads: 0,
@@ -665,12 +579,12 @@ impl NormalizeSpec {
             width: video
                 .width
                 .filter(|v| (2..=8192).contains(v))
-                .ok_or_else(invalid_probe)?
+                .ok_or_else(dimensions_error)?
                 & !1,
             height: video
                 .height
                 .filter(|v| (2..=8192).contains(v))
-                .ok_or_else(invalid_probe)?
+                .ok_or_else(dimensions_error)?
                 & !1,
             rate,
             fps,
@@ -746,7 +660,7 @@ fn normalize_inputs(
             if spec.audio && !audio {
                 command.args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
             }
-            command.args(["-map", "0:v:0"]);
+            command.args(["-map", "0:V:0"]);
             if spec.audio {
                 let start = if probe.video_start.is_finite() {
                     probe.video_start
@@ -853,7 +767,7 @@ fn run_ffmpeg(
     command.args(["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i"]);
     command
         .arg(concat)
-        .args(["-map", "0:v:0", "-map", "0:a:0?"]);
+        .args(["-map", "0:V:0", "-map", "0:a:0?"]);
     command.args(["-c", "copy"]);
     if audio_only {
         command.args(["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]);
@@ -1121,6 +1035,94 @@ mod performance_tests {
     use super::*;
 
     #[test]
+    fn concat_preserves_windows_extended_drive_and_unc_paths() {
+        for value in [
+            r"D:\中文 剧集\0001.mp4",
+            r"\\?\D:\中文 剧集\0001.mp4",
+            r"\\?\UNC\server\视频\0001.mp4",
+        ] {
+            assert_eq!(
+                concat_entry(Path::new(value)).unwrap(),
+                format!("file 'file:{value}'")
+            );
+        }
+        assert!(concat_entry(Path::new("D:/bad\nfile.mp4")).is_err());
+    }
+
+    #[test]
+    fn smart_merge_reads_unicode_long_paths_and_apostrophes() {
+        let Some(tools) = tools() else {
+            return;
+        };
+        let temp = TempDirectory::create(&std::env::temp_dir()).unwrap();
+        let mut root = fs::canonicalize(&temp.path).unwrap();
+        for _ in 0..5 {
+            root = root.join("中文 长路径 剧集目录 abcdefghijklmnopqrstuvwxyz");
+        }
+        fs::create_dir_all(&root).unwrap();
+        root = fs::canonicalize(root).unwrap();
+        let source = root.join("第 01 集 It's a story.mp4");
+        let result = tools
+            .ffmpeg_command()
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=128x192:rate=12",
+                "-t",
+                "1",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let source = fs::canonicalize(source).unwrap();
+        assert!(source.to_string_lossy().encode_utf16().count() > 260);
+        crate::media::download_validation::validate_mp4(&source).unwrap();
+        let result = run_merge(
+            &tools,
+            MergeRequest {
+                series_root: root,
+                output_file_name: "中文 合并.mp4".into(),
+                inputs: vec![snapshot(source.clone(), 1), snapshot(source.clone(), 2)],
+                transcode_h264: false,
+                square_canvas: false,
+                mode: Some(MergeMode::Auto),
+                quality: MergeQuality::High,
+                conflict_policy: MergeConflictPolicy::FailIfExists,
+            },
+            &CancellationToken::default(),
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            (probe_media(&tools, &result.output_path)
+                .unwrap()
+                .duration_seconds
+                - 2.0)
+                .abs()
+                < 0.03
+        );
+        assert_eq!(
+            frame_hashes(&tools, &result.output_path),
+            (0..2)
+                .flat_map(|_| frame_hashes(&tools, &source))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn decoder_failure_is_distinct_from_io_failure() {
         assert!(cuda_decode_failure(
             "Device setup failed for decoder: CUDA_ERROR_NOT_SUPPORTED"
@@ -1164,7 +1166,7 @@ mod performance_tests {
             .ffmpeg_command()
             .args(["-v", "error", "-i"])
             .arg(path)
-            .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+            .args(["-map", "0:V:0", "-f", "framemd5", "-"])
             .output()
             .unwrap();
         assert!(

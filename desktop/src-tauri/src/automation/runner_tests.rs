@@ -7,6 +7,74 @@ struct Fixture {
     task: Task,
 }
 
+fn mp4_envelope() -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&12u32.to_be_bytes());
+    bytes.extend_from_slice(b"moovtest");
+    bytes.extend_from_slice(&12u32.to_be_bytes());
+    bytes.extend_from_slice(b"mdattest");
+    bytes
+}
+
+#[test]
+fn recovered_download_writes_receipt_and_preserves_file_on_probe_tool_failure() {
+    let f = Fixture::new();
+    let path = f.file("0001_episode_1080p.mp4", &mp4_envelope());
+    let receipt = f.task.root.join("下载完成-1.json");
+    let error = recover_download_file(&f.task.root, &path, &receipt, |_| {
+        Err(AppError::new("MEDIA_TOOL_MISSING", "缺少检测工具"))
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "MEDIA_TOOL_MISSING");
+    assert!(path.exists());
+    assert!(!receipt.exists());
+    let record = recover_download_file(&f.task.root, &path, &receipt, |_| Ok(()))
+        .unwrap()
+        .unwrap();
+    let saved: OwnedFile = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    assert_eq!(record.hash, saved.hash);
+    assert_eq!(record.path, fs::canonicalize(&path).unwrap());
+    assert_eq!(record.size, 24);
+}
+
+#[test]
+fn truncated_unreceipted_download_is_preserved_without_adoption_or_cleanup() {
+    let mut f = Fixture::new();
+    let path = f.file("0001_episode_1080p.mp4", b"partial MP4");
+    let receipt = f.task.root.join("下载完成-1.json");
+    assert!(
+        recover_download_file(&f.task.root, &path, &receipt, |_| panic!(
+            "must reject truncation before probing"
+        ))
+        .unwrap()
+        .is_none()
+    );
+    assert!(!path.exists());
+    assert!(!receipt.exists());
+    let retained = path.with_extension("mp4.incomplete-0");
+    assert_eq!(fs::read(&retained).unwrap(), b"partial MP4");
+    f.file(
+        "自动追剧记录.json",
+        &serde_json::to_vec(&json!({"id":f.task.id,"bookId":f.task.book_id})).unwrap(),
+    );
+    cleanup(&mut f.task).unwrap();
+    assert!(retained.exists());
+}
+
+#[test]
+fn resumed_download_returns_to_first_missing_episode_and_keeps_later_files() {
+    let mut f = Fixture::new();
+    let first = f.file("0001_first_1080p.mp4", &mp4_envelope());
+    let missing = f.task.root.join("0002_second_1080p.mp4");
+    let third = f.file("0003_third_1080p.mp4", &mp4_envelope());
+    f.task.files = vec![first.clone(), missing, third.clone()];
+    f.task.episode_done = 3;
+    reconcile_download_files(&mut f.task).unwrap();
+    assert_eq!(f.task.files, vec![first]);
+    assert_eq!(f.task.episode_done, 1);
+    assert!(third.exists());
+}
+
 #[test]
 fn automated_privacy_is_public_only_after_ai_cover_succeeds() {
     let mut fixture = Fixture::new();

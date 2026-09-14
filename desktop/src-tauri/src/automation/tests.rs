@@ -34,6 +34,111 @@ fn temporary() -> PathBuf {
 }
 
 #[test]
+fn legacy_download_receipt_reviews_resume_without_bypassing_duplicate_checks() {
+    let path = temporary();
+    let mut blocked = task();
+    blocked.stage = "download".into();
+    blocked.status = Status::Review;
+    blocked.retry_at = now() + 900;
+    blocked.message = "发现无完成凭据的同名文件，请先移走该文件再继续；不会上传或清理它".into();
+    let mut duplicate = blocked.clone();
+    duplicate.id = "duplicate-review".into();
+    duplicate.stage = "upload".into();
+    duplicate.message = "频道中发现重复内容，请核对".into();
+    storage::save(
+        &path,
+        &Snapshot {
+            config: Some(config()),
+            mode: Mode::Running,
+            jobs: vec![blocked, duplicate],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let service = Service::load(path.clone()).unwrap();
+    let snapshot = service.snapshot();
+    let download = snapshot
+        .jobs
+        .iter()
+        .find(|j| j.stage == "download")
+        .unwrap();
+    assert_eq!(download.status, Status::Pending);
+    assert_eq!(download.retry_at, 0);
+    assert!(!download.allow_duplicate);
+    assert_eq!(
+        snapshot
+            .jobs
+            .iter()
+            .find(|j| j.stage == "upload")
+            .unwrap()
+            .status,
+        Status::Review
+    );
+    assert!(pipeline::select(&snapshot, &HashSet::new(), now()).contains(&download.id));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn continue_clears_stale_retry_deadline_and_explains_paused_runtime() {
+    let path = temporary();
+    let service = Service::load(path.clone()).unwrap();
+    for mode in [Mode::Running, Mode::Paused] {
+        let mut job = task();
+        job.stage = "download".into();
+        job.status = Status::Review;
+        job.retry_at = now() + 900;
+        service
+            .transaction(|s| {
+                s.mode = mode.clone();
+                s.config = Some(config());
+                s.jobs = vec![job.clone()];
+                Ok(())
+            })
+            .unwrap();
+        let result = service.review(&job.id, "continue").unwrap();
+        let continued = &result.jobs[0];
+        assert_eq!(continued.retry_at, 0);
+        assert!(continued.retry_ready);
+        assert!(!continued.allow_duplicate);
+        assert_eq!(continued.message.contains("暂停"), mode == Mode::Paused);
+        assert_eq!(
+            pipeline::select(&result, &HashSet::new(), now()).len(),
+            usize::from(mode == Mode::Running)
+        );
+    }
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn polling_view_does_not_copy_episode_evidence_or_ai_payloads() {
+    let path = temporary();
+    let service = Service::load(path.clone()).unwrap();
+    let mut job = task();
+    job.metadata = Some(json!({"image": "x".repeat(1_000_000)}));
+    job.owned = (0..300)
+        .map(|i| OwnedFile {
+            path: PathBuf::from(format!("/test/{i}.mp4")),
+            size: 5_000_000_000,
+            hash: "a".repeat(64),
+        })
+        .collect();
+    service
+        .transaction(|s| {
+            s.jobs.push(job);
+            Ok(())
+        })
+        .unwrap();
+    let view = serde_json::to_value(service.view()).unwrap();
+    assert_eq!(view["jobs"][0]["config"]["channel"], "channel-a");
+    assert!(view["jobs"][0].get("owned").is_none());
+    assert!(view["jobs"][0].get("metadata").is_none());
+    assert!(serde_json::to_vec(&view).unwrap().len() < 4000);
+    assert_eq!(service.snapshot().jobs[0].owned.len(), 300);
+    assert!(fs::metadata(&path).unwrap().len() > 1_000_000);
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn manual_skip_while_busy_survives_a_late_checkpoint_and_restart() {
     let path = temporary();
     let service = Service::load(path.clone()).unwrap();

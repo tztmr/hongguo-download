@@ -499,6 +499,21 @@ impl Task {
             Status::Completed | Status::Skipped | Status::Review | Status::Failed
         )
     }
+    pub fn recover_legacy_download_review(&mut self) {
+        // Only migrate the old download-receipt blocker, never a duplicate
+        // upload review or a user's manual skip.
+        let receipt_review =
+            self.status == Status::Review && self.message.contains("无完成凭据的同名文件");
+        let confirmed = self.status == Status::Pending
+            && self.message == "已确认继续；仍检查缺集和真实视频格式";
+        if self.stage == "download" && !self.manual_skip && (receipt_review || confirmed) {
+            self.status = Status::Pending;
+            self.retry_at = 0;
+            self.attempts = 0;
+            self.retry_ready = true;
+            self.message = "正在恢复旧下载任务，将核验已有文件并补下缺集".into();
+        }
+    }
     pub fn skip_manually(&mut self) {
         self.manual_skip = true;
         self.status = Status::Skipped;

@@ -168,14 +168,17 @@ function updateItem(
   itemId: string,
   update: (item: DownloadItem) => DownloadItem,
 ): DownloadManagerState {
-  const now = Date.now();
-  return {
-    ...state,
-    batches: state.batches.map((batch) => {
-      if (!batch.items.some((item) => item.id === itemId)) return batch;
-      return { ...batch, items: batch.items.map((item) => (item.id === itemId ? update(item) : item)), updatedAt: now };
-    }),
-  };
+  const batchIndex = state.batches.findIndex(batch => batch.items.some(item => item.id === itemId));
+  if (batchIndex < 0) return state;
+  const batch = state.batches[batchIndex];
+  const itemIndex = batch.items.findIndex(item => item.id === itemId);
+  const item = update(batch.items[itemIndex]);
+  if (item === batch.items[itemIndex]) return state;
+  const items = batch.items.slice();
+  items[itemIndex] = item;
+  const batches = state.batches.slice();
+  batches[batchIndex] = { ...batch, items, updatedAt: Date.now() };
+  return { ...state, batches };
 }
 
 function removeIdleRequestedBatches(state: DownloadManagerState) {
@@ -211,7 +214,7 @@ export function downloadReducer(state: DownloadManagerState, action: DownloadAct
       // Progress and command results use separate IPC paths. A late event must
       // never revive a settled download or take a queued retry out of the queue.
       return updateItem(state, action.itemId, (item) =>
-        item.status === "running"
+        item.status === "running" && (item.received !== action.received || item.total !== action.total || item.percent !== Math.max(0, Math.min(100, action.percent)))
           ? {
               ...item,
               received: action.received,

@@ -90,6 +90,33 @@ const manyEpisodes: EpisodeItem[] = Array.from({ length: 10 }, (_, offset) => ({
 }));
 
 describe("useDownloadManager", () => {
+  it("ignores automation progress without rendering or persisting manual history", async () => {
+    vi.useFakeTimers();
+    const fake = deferredAdapter();
+    const storage = memoryStorage();
+    const write = vi.spyOn(storage, "setItem");
+    let renders = 0;
+    const { result, unmount } = renderHook(() => {
+      renders += 1;
+      return useDownloadManager({ adapter: fake.adapter, storage });
+    });
+    try {
+      await act(async () => {});
+      const before = result.current.state;
+      const beforeRenders = renders;
+      write.mockClear();
+      for (let batch = 0; batch < 10; batch += 1) {
+        act(() => {
+          for (let i = 0; i < 100; i += 1) fake.progress({ taskId: `auto-job-${i}`, received: i, total: 100, percent: i });
+        });
+      }
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      expect(result.current.state).toBe(before);
+      expect(renders).toBe(beforeRenders);
+      expect(write).not.toHaveBeenCalled();
+    } finally { unmount(); vi.useRealTimers(); }
+  });
+
   it("keeps the final episode completed when its last progress event arrives after the result", async () => {
     vi.useFakeTimers();
     const fake = deferredAdapter();

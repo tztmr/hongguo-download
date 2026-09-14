@@ -8,6 +8,7 @@ pub mod source;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod view;
 
 use crate::{AppError, AppState};
 use model::*;
@@ -54,6 +55,7 @@ impl Service {
             }
         }
         for job in &mut snapshot.jobs {
+            job.recover_legacy_download_review();
             if job.manual_skip {
                 job.skip_manually();
                 continue;
@@ -108,7 +110,10 @@ impl Service {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
     pub fn running(&self) -> bool {
-        self.snapshot().mode == Mode::Running
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).mode == Mode::Running
+    }
+    fn view(&self) -> view::SnapshotView {
+        view::SnapshotView::from(&*self.state.lock().unwrap_or_else(|e| e.into_inner()))
     }
     pub(crate) fn is_skipped(&self, id: &str) -> bool {
         self.state
@@ -285,9 +290,20 @@ impl Service {
                 .ok_or_else(|| AppError::new("AUTOMATION_JOB_NOT_FOUND", "任务不存在"))?;
             match action {
                 "continue" if j.status == Status::Review => {
-                    j.allow_duplicate = true;
+                    if matches!(j.stage.as_str(), "inspect" | "upload" | "short") {
+                        j.allow_duplicate = true;
+                    }
                     j.status = Status::Pending;
-                    j.message = "已确认继续；仍检查缺集和真实视频格式".into();
+                    j.retry_at = 0;
+                    j.attempts = 0;
+                    j.retry_ready = true;
+                    j.updated_at = now();
+                    j.message = if s.mode == Mode::Running {
+                        "已加入恢复队列，将校验已有文件并补齐缺集"
+                    } else {
+                        "已加入恢复队列；自动追剧已暂停或停止，恢复运行后继续"
+                    }
+                    .into();
                 }
                 "skip" if !matches!(j.status, Status::Completed | Status::Skipped) => {
                     j.skip_manually();
@@ -461,54 +477,77 @@ fn unavailable() -> AppError {
 }
 
 #[tauri::command]
-pub(crate) fn get_automation_snapshot(state: State<AppState>) -> Snapshot {
-    state.automation.snapshot()
+pub(crate) async fn get_automation_snapshot(
+    state: State<'_, AppState>,
+) -> Result<view::SnapshotView, AppError> {
+    let service = state.automation.clone();
+    // Checkpoints hold the mutex while committing to disk. Never wait for that
+    // lock on the WebView2 window thread, even for a read-only poll.
+    crate::run_blocking(move || Ok(service.view())).await
 }
 #[tauri::command]
 pub(crate) async fn save_automation_settings(
     state: State<'_, AppState>,
     config: Value,
     secrets: Option<credentials::Updates>,
-) -> Result<Snapshot, AppError> {
+) -> Result<view::SnapshotView, AppError> {
     let service = state.automation.clone();
-    crate::run_blocking(move || service.save_config(config, secrets.unwrap_or_default())).await
+    crate::run_blocking(move || {
+        service.save_config(config, secrets.unwrap_or_default())?;
+        Ok(service.view())
+    })
+    .await
 }
 #[tauri::command]
-pub(crate) fn start_automation(
+pub(crate) async fn start_automation(
     app: AppHandle,
-    state: State<AppState>,
-) -> Result<Snapshot, AppError> {
-    state.automation.activate(&app)
+    state: State<'_, AppState>,
+) -> Result<view::SnapshotView, AppError> {
+    let service = state.automation.clone();
+    crate::run_blocking(move || {
+        service.activate(&app)?;
+        Ok(service.view())
+    })
+    .await
 }
 #[tauri::command]
-pub(crate) fn control_automation(
+pub(crate) async fn control_automation(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     action: String,
-) -> Result<Snapshot, AppError> {
-    if action == "resume" {
-        return state.automation.activate(&app);
-    }
-    let result = state.automation.control(&action)?;
-    if action == "pause" || action == "stop" {
-        for job in &result.jobs {
-            runner::pause_owned(&app, job);
+) -> Result<view::SnapshotView, AppError> {
+    let service = state.automation.clone();
+    crate::run_blocking(move || {
+        let result = if action == "resume" {
+            service.activate(&app)?
+        } else {
+            service.control(&action)?
+        };
+        if action == "pause" || action == "stop" {
+            for job in &result.jobs {
+                runner::pause_owned(&app, job);
+            }
         }
-    }
-    Ok(result)
+        Ok(view::SnapshotView::from(&result))
+    })
+    .await
 }
 #[tauri::command]
-pub(crate) fn review_automation_job(
+pub(crate) async fn review_automation_job(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     job_id: String,
     action: String,
-) -> Result<Snapshot, AppError> {
-    let result = state.automation.review(&job_id, &action)?;
-    if action == "skip" {
-        if let Some(job) = result.jobs.iter().find(|j| j.id == job_id) {
-            runner::cancel_owned(&app, job);
+) -> Result<view::SnapshotView, AppError> {
+    let service = state.automation.clone();
+    crate::run_blocking(move || {
+        let result = service.review(&job_id, &action)?;
+        if action == "skip" {
+            if let Some(job) = result.jobs.iter().find(|j| j.id == job_id) {
+                runner::cancel_owned(&app, job);
+            }
         }
-    }
-    Ok(result)
+        Ok(view::SnapshotView::from(&result))
+    })
+    .await
 }

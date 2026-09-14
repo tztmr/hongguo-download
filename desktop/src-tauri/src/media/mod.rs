@@ -2,6 +2,7 @@ pub mod ai;
 mod audio_prepare;
 pub mod components;
 pub mod deletion;
+pub(crate) mod download_validation;
 mod framing;
 pub mod hardware;
 #[cfg(unix)]
@@ -10,6 +11,7 @@ pub mod merge;
 #[path = "merge_windows.rs"]
 pub mod merge;
 pub mod model;
+mod probe;
 #[cfg(unix)]
 pub mod process_control;
 #[cfg(windows)]
@@ -30,16 +32,14 @@ pub use components::{
     ComponentManager, ComponentManifest, ComponentProgress, ComponentRelease, ComponentStatus,
     InstalledComponent,
 };
-pub use merge::{
-    can_stream_copy, probe_media, run_merge, MediaProbe, MergeProgress, MergeResult,
-    StreamSignature,
-};
+pub use merge::{can_stream_copy, probe_media, run_merge, MergeProgress, MergeResult};
 pub use model::{
     InputSnapshot, MediaJob, MediaJobKind, MediaJobOutput, MediaJobOutputKind, MediaJobPauseOrigin,
     MediaJobRequest, MediaJobScope, MediaJobStatus, MediaJobTransition, MediaJobsSnapshot,
     MergeConflictPolicy, MergeInput, MergeRequest, StartAIJobRequest, StartMergeInput,
     StartMergeRequest, ValidatedAIJobRequest, ValidatedMergeRequest,
 };
+pub use probe::{MediaProbe, StreamSignature};
 pub use process_control::{CancellationToken, ProcessControl};
 pub use storage::MediaJobManager;
 pub use tools::MediaTools;

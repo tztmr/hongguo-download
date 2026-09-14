@@ -569,6 +569,19 @@ async fn download(
     } else {
         task.episodes.len()
     };
+    if wanted == 0 {
+        return Err(invalid_file());
+    }
+    if task.retry_ready || task.files.len() >= wanted {
+        let mut copy = task.clone();
+        copy = crate::run_blocking(move || {
+            reconcile_download_files(&mut copy)?;
+            Ok(copy)
+        })
+        .await?;
+        *task = copy;
+        task.retry_ready = false;
+    }
     if task.files.len() >= wanted {
         task.next(
             if task.main_done { "metadata" } else { "merge" },
@@ -614,60 +627,18 @@ async fn download(
     service.checkpoint(task)?;
     let owner = service.clone();
     let task_id = task.id.clone();
-    let path = crate::run_blocking(move || {
+    let record = crate::run_blocking(move || {
         ensure_task_running(&owner, &task_id)?;
         let verify_download = |path: &Path| -> Result<(), AppError> {
-            let probe = tools()?.probe_media(path).map_err(|error| {
-                AppError::with_cause(
-                    "AUTOMATION_MEDIA_PROBE_FAILED",
-                    "下载文件媒体检测失败，已清理文件并自动重试",
-                    error.message.clone(),
-                )
-            })?;
-            if probe.duration_seconds <= 0.0 {
-                return Err(AppError::new(
-                    "AUTOMATION_MEDIA_PROBE_FAILED",
-                    "下载文件时长无效，已清理文件并自动重试",
-                ));
-            }
+            tools()?.probe_media(path)?;
             Ok(())
         };
         if let Some(path) = existing {
-            safe_root(&path)?;
-            // Older versions could leave a finished media file without the
-            // sidecar receipt (or the file may have been moved and restored).
-            // Re-probe the file and adopt it when it is a valid episode. This
-            // keeps recovery automatic and avoids asking the user to move a
-            // stale file by hand.
-            match verify_download(&path) {
-                Ok(()) => {
-                    let actual = identity(&path)?;
-                    let matches_receipt = fs::read(&receipt)
-                        .ok()
-                        .and_then(|bytes| serde_json::from_slice::<OwnedFile>(&bytes).ok())
-                        .is_some_and(|record| {
-                            record.path == path
-                                && record.hash == actual.hash
-                                && record.size == actual.size
-                        });
-                    if !matches_receipt {
-                        crate::atomic_write(
-                            &receipt,
-                            &serde_json::to_vec(&actual).map_err(|_| invalid_file())?,
-                            "补写下载完成凭据",
-                        )?;
-                    }
-                    return Ok(path);
-                }
-                Err(error) if error.code == "AUTOMATION_MEDIA_PROBE_FAILED" => {
-                    // It is inside this task's protected root and has failed
-                    // media validation, so it is safe to remove before retry.
-                    let _ = fs::remove_file(&path);
-                    let _ = fs::remove_file(&receipt);
-                }
-                Err(error) => return Err(error),
+            if let Some(record) = recover_download_file(&root, &path, &receipt, verify_download)? {
+                return Ok(record);
             }
         }
+        ensure_task_running(&owner, &task_id)?;
         let state = a.state::<AppState>();
         crate::ensure_api_ready(&state.client, &state.api_base, &state.api_ready)?;
         let result = crate::perform_download_episode(
@@ -700,24 +671,13 @@ async fn download(
             state.prepared_series_assets.clone(),
         )?;
         let path = PathBuf::from(result.path);
-        match verify_download(&path) {
-            Ok(()) => {}
-            Err(error) if error.code == "AUTOMATION_MEDIA_PROBE_FAILED" => {
-                let _ = fs::remove_file(&path);
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-        }
-        let record = identity(&path)?;
-        crate::atomic_write(
-            &receipt,
-            &serde_json::to_vec(&record).map_err(|_| invalid_file())?,
-            "下载完成凭据",
-        )?;
-        Ok(path)
+        recover_download_file(&root, &path, &receipt, verify_download)?
+            .ok_or_else(|| AppError::new("DOWNLOAD_INCOMPLETE", "剧集下载不完整，等待重新下载"))
     })
     .await?;
-    own(task, &path)?;
+    let path = record.path.clone();
+    task.owned.retain(|item| item.path != path);
+    task.owned.push(record);
     if task.files.is_empty() && orientation != "all" {
         let p = path.clone();
         let actual =
@@ -733,6 +693,88 @@ async fn download(
     task.progress = 100.0 * task.episode_done as f64 / wanted as f64;
     task.message = format!("已下载并校验 {}/{} 集", task.episode_done, wanted);
     Ok(())
+}
+
+fn reconcile_download_files(task: &mut Task) -> Result<(), AppError> {
+    safe_root(&task.root)?;
+    let root = fs::canonicalize(&task.root).map_err(|_| invalid_file())?;
+    for (index, path) in task.files.iter().enumerate() {
+        safe_root(path)?;
+        match fs::metadata(path) {
+            Ok(meta) if meta.is_file() && meta.len() > 0 => {
+                let canonical = fs::canonicalize(path).map_err(|_| invalid_file())?;
+                if !canonical.starts_with(&root) {
+                    return Err(invalid_file());
+                }
+                if let Err(error) = crate::media::download_validation::validate_mp4(&canonical) {
+                    if error.code != "DOWNLOAD_INCOMPLETE" {
+                        return Err(error);
+                    }
+                    task.files.truncate(index);
+                    break;
+                }
+            }
+            Ok(_) => {
+                task.files.truncate(index);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                task.files.truncate(index);
+                break;
+            }
+            Err(_) => return Err(invalid_file()),
+        }
+    }
+    task.episode_done = task.files.len();
+    Ok(())
+}
+
+fn recover_download_file(
+    root: &Path,
+    path: &Path,
+    receipt: &Path,
+    probe: impl FnOnce(&Path) -> Result<(), AppError>,
+) -> Result<Option<OwnedFile>, AppError> {
+    safe_root(path)?;
+    safe_root(receipt)?;
+    let path = fs::canonicalize(path).map_err(|_| invalid_file())?;
+    let root = fs::canonicalize(root).map_err(|_| invalid_file())?;
+    if !path.starts_with(&root) || !fs::metadata(&path).map_err(|_| invalid_file())?.is_file() {
+        return Err(invalid_file());
+    }
+    if let Err(error) = crate::media::download_validation::validate_mp4(&path) {
+        if error.code != "DOWNLOAD_INCOMPLETE" {
+            return Err(error);
+        }
+        // Preserve unknown/truncated files under a non-video suffix. They cannot
+        // be uploaded, adopted again, or deleted by owned-file cleanup.
+        for sequence in 0..1000 {
+            let target = path.with_extension(format!("mp4.incomplete-{sequence}"));
+            match atomicwrites::move_atomic(&path, &target) {
+                Ok(()) => return Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(invalid_file()),
+            }
+        }
+        return Err(invalid_file());
+    }
+    // A missing/broken ffprobe is a tool error, not evidence to delete a video.
+    probe(&path)?;
+    let actual = identity(&path)?;
+    let matches = fs::read(receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<OwnedFile>(&bytes).ok())
+        .is_some_and(|record| {
+            record.path == path && record.hash == actual.hash && record.size == actual.size
+        });
+    if !matches {
+        crate::atomic_write(
+            receipt,
+            &serde_json::to_vec(&actual).map_err(|_| invalid_file())?,
+            "补写下载完成凭据",
+        )?;
+    }
+    Ok(Some(actual))
 }
 
 fn reusable_media(job: &MediaJob) -> bool {

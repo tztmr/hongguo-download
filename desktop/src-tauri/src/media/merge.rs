@@ -4,7 +4,6 @@ use super::{
     tools::MediaTools,
 };
 use crate::AppError;
-use serde::Deserialize;
 use std::{
     ffi::{CStr, CString, OsString},
     fs,
@@ -30,136 +29,8 @@ mod smart;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamSignature {
-    pub codec_name: String,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-    pub frame_rate: Option<String>,
-    pub time_base: Option<String>,
-    pub sample_rate: Option<u32>,
-    pub channels: Option<u16>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct MediaProbe {
-    pub video: StreamSignature,
-    pub audio: Option<StreamSignature>,
-    pub duration_seconds: f64,
-}
-
-#[derive(Deserialize)]
-struct RawProbe {
-    streams: Vec<RawStream>,
-    format: RawFormat,
-}
-
-#[derive(Deserialize)]
-struct RawStream {
-    codec_type: Option<String>,
-    codec_name: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
-    r_frame_rate: Option<String>,
-    time_base: Option<String>,
-    sample_rate: Option<String>,
-    channels: Option<u16>,
-    duration: Option<String>,
-    disposition: Option<RawDisposition>,
-}
-
-#[derive(Deserialize)]
-struct RawDisposition {
-    attached_pic: Option<u8>,
-}
-
-#[derive(Deserialize)]
-struct RawFormat {
-    duration: Option<String>,
-}
-
-fn parse_probe_json(bytes: &[u8]) -> Result<MediaProbe, AppError> {
-    let raw: RawProbe = serde_json::from_slice(bytes).map_err(|error| {
-        AppError::with_cause("FFPROBE_INVALID", "媒体检测结果无效", error.to_string())
-    })?;
-    let mut videos = raw.streams.iter().filter(|stream| {
-        stream.codec_type.as_deref() == Some("video")
-            && stream
-                .disposition
-                .as_ref()
-                .and_then(|value| value.attached_pic)
-                .unwrap_or_default()
-                != 1
-    });
-    let video = videos.next().ok_or_else(invalid_probe)?;
-    if videos.next().is_some() {
-        return Err(invalid_probe());
-    }
-    let audios = raw
-        .streams
-        .iter()
-        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
-        .collect::<Vec<_>>();
-    // Some downloaded fragmented MP4 files report format.duration as N/A while
-    // the selected stream still has a valid duration. Use that value instead
-    // of rejecting a file that ffprobe can otherwise read safely. If multiple
-    // audio tracks are present, the first (the source default) is retained.
-    let duration_seconds = raw
-        .format
-        .duration
-        .as_deref()
-        .and_then(parse_duration)
-        .or_else(|| video.duration.as_deref().and_then(parse_duration))
-        .or_else(|| {
-            audios
-                .first()
-                .and_then(|stream| stream.duration.as_deref())
-                .and_then(parse_duration)
-        })
-        .ok_or_else(invalid_probe)?;
-    Ok(MediaProbe {
-        video: video_signature(video)?,
-        audio: audios
-            .first()
-            .map(|stream| audio_signature(stream))
-            .transpose()?,
-        duration_seconds,
-    })
-}
-
-fn parse_duration(value: &str) -> Option<f64> {
-    let duration = value.parse::<f64>().ok()?;
-    (duration.is_finite() && duration > 0.0).then_some(duration)
-}
-
-fn video_signature(stream: &RawStream) -> Result<StreamSignature, AppError> {
-    Ok(StreamSignature {
-        codec_name: stream.codec_name.clone().ok_or_else(invalid_probe)?,
-        width: stream.width,
-        height: stream.height,
-        frame_rate: stream.r_frame_rate.clone(),
-        time_base: stream.time_base.clone(),
-        sample_rate: None,
-        channels: None,
-    })
-}
-
-fn audio_signature(stream: &RawStream) -> Result<StreamSignature, AppError> {
-    Ok(StreamSignature {
-        codec_name: stream.codec_name.clone().ok_or_else(invalid_probe)?,
-        width: None,
-        height: None,
-        frame_rate: None,
-        time_base: stream.time_base.clone(),
-        sample_rate: stream
-            .sample_rate
-            .as_deref()
-            .map(str::parse)
-            .transpose()
-            .map_err(|_| invalid_probe())?,
-        channels: stream.channels,
-    })
-}
+use super::probe::parse_probe_json;
+pub use super::probe::{MediaProbe, StreamSignature};
 
 fn invalid_probe() -> AppError {
     AppError::new("FFPROBE_INVALID", "媒体检测结果无效")

@@ -487,6 +487,19 @@ mod tests {
     }
 
     #[test]
+    fn download_length_validation_handles_large_files_and_rejects_partial_results() {
+        let large = (1u64 << 32) + 123;
+        validate_download_length(large, Some(large)).unwrap();
+        assert_eq!(
+            validate_download_length(large - 1, Some(large))
+                .unwrap_err()
+                .code,
+            "DOWNLOAD_INCOMPLETE"
+        );
+        assert!(validate_download_length(0, None).is_err());
+    }
+
+    #[test]
     fn downloaded_series_text_matches_the_demo_layout() {
         let metadata = DownloadSeriesMetadata {
             cover_url: "https://example.invalid/cover".into(),
@@ -1151,13 +1164,18 @@ fn get_media_scheduling(state: State<AppState>) -> serde_json::Value {
 }
 
 #[tauri::command]
-fn get_media_jobs(state: State<AppState>) -> MediaJobsSnapshot {
-    state.media_jobs.snapshot()
+async fn get_media_jobs(state: State<'_, AppState>) -> AppResult<MediaJobsSnapshot> {
+    let service = state.media_jobs.clone();
+    run_blocking(move || Ok(service.snapshot())).await
 }
 
 #[tauri::command]
-fn start_merge_job(state: State<AppState>, request: StartMergeRequest) -> AppResult<MediaJob> {
-    state.media_jobs.start_merge(request)
+async fn start_merge_job(
+    state: State<'_, AppState>,
+    request: StartMergeRequest,
+) -> AppResult<MediaJob> {
+    let service = state.media_jobs.clone();
+    run_blocking(move || service.start_merge(request)).await
 }
 
 #[tauri::command]
@@ -1603,11 +1621,13 @@ fn perform_download_episode(
         }
     }
     file.flush().map_err(|e| err(format!("写文件失败: {e}")))?;
+    validate_download_length(received, total)?;
+    file.get_ref()
+        .sync_all()
+        .map_err(|e| err(format!("保存视频失败: {e}")))?;
     drop(file);
-    if dest.exists() {
-        let _ = fs::remove_file(&dest);
-    }
-    fs::rename(&tmp, &dest).map_err(|e| err(format!("保存文件失败: {e}")))?;
+    media::download_validation::validate_mp4(&tmp)?;
+    atomicwrites::replace_atomic(&tmp, &dest).map_err(|e| err(format!("保存文件失败: {e}")))?;
     let _ = app.emit(
         "download-progress",
         DownloadProgress {
@@ -1623,6 +1643,21 @@ fn perform_download_episode(
         definition: actual_definition,
         bytes: received,
     })
+}
+
+fn validate_download_length(received: u64, expected: Option<u64>) -> AppResult<()> {
+    if received == 0 || expected.is_some_and(|bytes| received != bytes) {
+        return Err(AppError::new(
+            "DOWNLOAD_INCOMPLETE",
+            format!(
+                "剧集下载不完整：收到 {received} 字节，预期 {}；保留临时文件等待重试",
+                expected
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "非空视频".into())
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn shutdown_child(child: &mut Option<ApiChild>) {

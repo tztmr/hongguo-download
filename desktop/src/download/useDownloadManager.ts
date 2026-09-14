@@ -84,6 +84,7 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
 
   const replaceState = useCallback(
     (next: DownloadManagerState, immediate = true) => {
+      if (next === stateRef.current) return;
       stateRef.current = next;
       setState(next);
       persist(next, immediate);
@@ -143,6 +144,9 @@ export function useDownloadManager({ adapter, storage, initialState, enabled = t
     let unsubscribe: (() => void) | undefined;
     void adapter.subscribeProgress((progress) => {
       if (!mountedRef.current) return;
+      // Automation uses the same native event but owns a separate durable queue.
+      // Ignore it before scanning/serializing the manual download history.
+      if (!activeRef.current.has(progress.taskId)) return;
       commit({
         type: "update-progress",
         itemId: progress.taskId,
