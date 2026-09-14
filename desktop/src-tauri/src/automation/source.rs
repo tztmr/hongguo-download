@@ -87,7 +87,8 @@ pub fn parse_candidate(value: &Value) -> Option<Candidate> {
 }
 
 pub fn eligible(candidate: &Candidate, config: &Value, now: i64) -> bool {
-    if candidate.episode_count > super::model::number(config, "maxEpisodes", 300) {
+    let max_episodes = super::model::number(config, "maxEpisodes", 300);
+    if max_episodes > 0 && candidate.episode_count > max_episodes {
         return false;
     }
     let label = match candidate.release_type.as_str() {
@@ -108,14 +109,9 @@ pub fn eligible(candidate: &Candidate, config: &Value, now: i64) -> bool {
             return false;
         }
     }
-    let searchable = format!(
-        "{} {} {} {}",
-        candidate.title,
-        candidate.summary,
-        candidate.category,
-        candidate.tags.join(" ")
-    )
-    .to_lowercase();
+    // These settings are classification filters. Do not match a title or
+    // synopsis merely because it contains a category word.
+    let categories = format!("{} {}", candidate.category, candidate.tags.join(" ")).to_lowercase();
     let keywords = |key: &str| -> Vec<String> {
         config[key]
             .as_str()
@@ -127,10 +123,10 @@ pub fn eligible(candidate: &Candidate, config: &Value, now: i64) -> bool {
             .collect()
     };
     let include = keywords("keywords");
-    (include.is_empty() || include.iter().any(|word| searchable.contains(word)))
+    (include.is_empty() || include.iter().any(|word| categories.contains(word)))
         && !keywords("exclude")
             .iter()
-            .any(|word| searchable.contains(word))
+            .any(|word| categories.contains(word))
 }
 
 pub fn feed_path(release_type: &str, scope: &str, cursor: &str) -> String {
@@ -324,7 +320,7 @@ mod tests {
     fn candidate() -> Candidate {
         parse_candidate(
             &json!({"book_id":"42","title":"归途 第二季 S02", "content_type":1,
-            "episode_count":80,"abstract":"都市重生", "online_time": 86400 - 8 * 3600}),
+            "episode_count":80,"abstract":"都市重生", "category":"都市", "category_tags":["重生","古代"], "online_time": 86400 - 8 * 3600}),
         )
         .unwrap()
     }
@@ -369,7 +365,8 @@ mod tests {
             &json!({"types":["真人剧"],"keywords":"仙侠， 重生"}),
             1
         ));
-        assert!(!eligible(&c, &json!({"exclude":"测试, S02"}), 1));
+        assert!(!eligible(&c, &json!({"exclude":"测试, 古代"}), 1));
+        assert!(!eligible(&c, &json!({"keywords":"第二季"}), 1));
         assert!(!eligible(&c, &json!({"types":["漫剧"]}), 1));
         assert!(!eligible(&c, &json!({"types":[]}), 1));
     }

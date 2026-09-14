@@ -98,7 +98,7 @@ fn episode_limit_defaults_and_validates_without_truncating_a_series() {
         number(&validate_config(config()).unwrap(), "maxEpisodes", 0),
         300
     );
-    for limit in [json!(0), json!(-1), json!(1.5), json!("bad"), json!(10001)] {
+    for limit in [json!(-1), json!(1.5), json!("bad"), json!(10001)] {
         let mut c = config();
         c["maxEpisodes"] = limit;
         assert!(validate_config(c).is_err());
@@ -117,6 +117,10 @@ fn episode_limit_defaults_and_validates_without_truncating_a_series() {
         source::eligible(&candidate, &config(), 1),
         "unknown feed counts require catalogue verification"
     );
+    let mut unlimited = config();
+    unlimited["maxEpisodes"] = json!("0");
+    candidate.episode_count = 10000;
+    assert!(source::eligible(&candidate, &unlimited, 1));
 }
 
 #[test]

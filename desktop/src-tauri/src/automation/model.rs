@@ -247,7 +247,7 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         ("concurrency", 1, 3),
         ("retries", 0, 5),
         ("minDisk", 1, 1000),
-        ("maxEpisodes", 1, 10000),
+        ("maxEpisodes", 0, 10000),
         ("collectPages", 1, 30),
         ("recommendDevices", 1, 10),
     ] {

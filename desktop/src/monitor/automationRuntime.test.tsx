@@ -63,6 +63,16 @@ describe("native automation boundaries", () => {
     save(view);
     await waitFor(() => expect(state.config?.maxEpisodes).toBe("200"));
   });
+  it("accepts zero as an unlimited episode filter and saves category wording", async () => {
+    const view = page(); await loaded(view);
+    const input = view.getByRole("spinbutton", { name: /^最多集数/ });
+    fireEvent.change(input, { target: { value: "0" } });
+    fireEvent.change(view.getByPlaceholderText("如：权谋，重生，古代"), { target: { value: "权谋，重生，古代，甜宠，校园，青春" } });
+    save(view);
+    await waitFor(() => expect(state.config?.maxEpisodes).toBe("0"));
+    expect(state.config?.keywords).toBe("权谋，重生，古代，甜宠，校园，青春");
+    expect(view.getByText("不限集数", { exact: true })).toBeTruthy();
+  });
   it("keeps uploading dramas outside the ten media slots", async () => {
     state.mode = "running";
     state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `upload-${i}`, bookId: `book-${i}`, title: `上传剧${i}`, stage: "upload", status: "pending", message: "上传中", episodeDone: 2, episodeTotal: 2, progress: 50, updatedAt: 1 }));
@@ -228,19 +238,19 @@ describe("native automation boundaries", () => {
   it("retains unsaved edits after a failed save", async () => {
     const view = page(); await loaded(view);
     vi.mocked(invoke).mockRejectedValueOnce(new Error("凭据库不可用"));
-    fireEvent.change(view.getByLabelText("包含关键词", { exact: false }), { target: { value: "保留草稿" } });
+    fireEvent.change(view.getByPlaceholderText("如：权谋，重生，古代"), { target: { value: "保留草稿" } });
     save(view);
     await waitFor(() => expect(view.getByRole("alert").textContent).toBe("凭据库不可用"));
     expect(button(view, "启动 24 小时自动任务").disabled).toBe(true);
-    expect((view.getByLabelText("包含关键词", { exact: false }) as HTMLInputElement).value).toBe("保留草稿");
+    expect((view.getByPlaceholderText("如：权谋，重生，古代") as HTMLInputElement).value).toBe("保留草稿");
   });
   it("polls native progress without overwriting edits, and unmounting never stops the backend", async () => {
     vi.useFakeTimers();
     const view = page(); await act(async () => {});
-    fireEvent.change(view.getByLabelText("包含关键词", { exact: false }), { target: { value: "未保存" } });
+    fireEvent.change(view.getByPlaceholderText("如：权谋，重生，古代"), { target: { value: "未保存" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(vi.mocked(invoke).mock.calls.filter(([name]) => name === "get_automation_snapshot")).toHaveLength(2);
-    expect((view.getByLabelText("包含关键词", { exact: false }) as HTMLInputElement).value).toBe("未保存");
+    expect((view.getByPlaceholderText("如：权谋，重生，古代") as HTMLInputElement).value).toBe("未保存");
     view.unmount();
     await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
     expect(vi.mocked(invoke).mock.calls).toHaveLength(2);
