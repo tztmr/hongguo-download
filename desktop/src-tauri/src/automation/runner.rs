@@ -400,7 +400,7 @@ pub async fn advance(
             task.status = Status::Completed;
             task.progress = 100.0;
             task.message = if !task.short_video_url.is_empty() {
-                format!("{summary}；正片与首集 Shorts 已完成")
+                format!("{summary}；正片与首集 Shorts 上传已完成；相关视频需在 YouTube Studio 手动设置或核对")
             } else {
                 summary
             };
@@ -1266,7 +1266,10 @@ async fn upload(
                 if is_short {
                     task.short_done = true;
                     task.short_video_url = job.youtube_url.unwrap_or_default();
-                    task.next("cleanup", "首集 Shorts 上传处理完成");
+                    task.next(
+                        "cleanup",
+                        "首集 Shorts 上传处理完成；相关视频需在 YouTube Studio 手动设置或核对",
+                    );
                 } else {
                     task.main_done = true;
                     task.main_video_url = job.youtube_url.unwrap_or_default();

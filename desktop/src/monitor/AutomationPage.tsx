@@ -365,14 +365,14 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
       <div className="auto-grid"><Field label="字幕识别音轨"><select disabled={!draft.subtitles} value={draft.subtitleSource} onChange={(e) => update("subtitleSource", e.target.value)}><option value="original">原始音轨</option><option value="vocal" disabled={!draft.separate}>分离后的人声音轨</option></select></Field><Field label="字幕文件格式"><select disabled={!draft.subtitles} value={draft.subtitleFormat} onChange={(e) => update("subtitleFormat", e.target.value)}><option value="srt">SRT 字幕</option><option value="vtt">VTT 字幕</option></select></Field></div><div className="auto-inline-note">分离模型、字幕模型与计算设备沿用「设置 → 媒体处理模型」。模型未安装时暂停对应任务。</div></>}
       {tab === 2 && <><div className="auto-panel-heading"><h2>查重后上传到指定频道</h2><p>保留上传记录，避免同一部剧反复发布。</p></div><div className="auto-grid"><Field label="目标 YouTube 频道"><select value={draft.channel} onChange={(e) => update("channel", e.target.value)}><option value="">请选择已授权频道</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.title}</option>)}{draft.channel && !channels.some((c) => c.channelId === draft.channel) && <option value={draft.channel} disabled>原频道授权不可用，请重新选择</option>}</select></Field><Field label="上传可见性（自动规则优先）" hint="AI 图片封面成功时公开，否则不公开；此项仅保留兼容设置"><select value={draft.privacy} onChange={(e) => update("privacy", e.target.value)}><option value="private">私享</option><option value="unlisted">不公开列出</option><option value="public">公开</option></select></Field></div>{!channels.length && <div className="auto-inline-note">尚无已授权频道。{onOpenSettings && <button type="button" className="text-action" onClick={onOpenSettings}>前往设置连接 YouTube →</button>}</div>}
       <UploadFormatPicker value={draft.uploadFormat} onChange={value => update("uploadFormat", value)} />
-      {toggle("firstEpisodeShorts", "首集额外上传 Shorts 引流", "默认关闭。开启后，正片上传成功再将首集转为 1:1 方形，额外发布一条 Shorts，不替代正片。")}
+      {toggle("firstEpisodeShorts", "首集额外上传 Shorts 引流", "默认关闭。开启后，正片上传成功再将首集转为 1:1 方形，额外发布一条 Shorts。相关视频需在 Studio 手动关联。")}
       {draft.firstEpisodeShorts && <section className="auto-path" aria-label="首集 Shorts 引流方案">
         <span>首集引流方案</span>
         <strong>正片上传成功 → 首集转方形 Shorts → 在 Studio 手动关联</strong>
         <small>完整首集自动转为 1:1 方形，最长边不超过 1080 像素。横屏上下补黑边，竖屏左右补黑边，保持比例，不裁剪人物和字幕。仅时长不超过 3 分钟时上传，超时跳过并提示，不自动截断。</small>
         <small>首集单独生成标题和描述，只写首集实际剧情；AI Key 不可用时使用原剧名、源简介与源封面。正片与首集分别记录上传结果，每个频道、每部剧的每一季最多一条首集 Shorts。失败只重试首集，不重复上传正片。</small>
         <small>首集保留到 Shorts 上传及 YouTube 处理成功后再清理；失败时保留文件。正片已上传的记录不能直接跳过尚未完成的首集任务。</small>
-        <small>引流使用 YouTube Studio 的「相关视频」关联同频道正片，需要高级功能权限；YouTube API 不支持自动关联，需手动设置。关联完成前不加入“点击相关视频”的文案。</small>
+        <small>上传后，在后台任务的「Shorts 关联」中打开「相关视频 / Related video」，前往 YouTube Studio 选择同频道正片并保存。需要高级功能权限，正片须公开或不公开列出。只上传 Shorts、在简介写正片地址，都不会自动生成播放器中的关联链接。关联完成前不加入“点击相关视频”的文案。</small>
         <small>可见性规则：AI 图片封面成功时正片和 Shorts 公开，否则两者均不公开；上面的选择仅保留兼容设置。</small>
         {draft.uploadFormat === "shorts" && <small>正片上传类型当前也是 Shorts；若两项使用同一首集文件，只上传一次。要引流到中长视频，请为正片选择普通／中长视频。</small>}
       </section>}

@@ -1,17 +1,49 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { AutomationJobs } from "./AutomationJobs";
 import type { AutomationJob } from "./automationRuntime";
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: vi.fn() }));
+beforeEach(() => {
+  vi.mocked(isTauri).mockReturnValue(true);
+  vi.mocked(invoke).mockReset().mockResolvedValue(undefined);
+});
 afterEach(cleanup);
 const job = (id: number): AutomationJob => ({ id: String(id), title: `剧目${id}`, bookId: `book-${id}`, stage: "merge", status: "pending", message: "正在合并", episodeDone: 10, episodeTotal: 10, progress: 5, updatedAt: 1000 - id });
 const board = (jobs: AutomationJob[]) => <AutomationJobs jobs={jobs} loaded pending={false} onAction={vi.fn()} />;
-it("opens YouTube Studio to set the Shorts related video after both uploads finish", () => {
+it("opens the uploaded Short in the desktop browser and shows its corresponding main video", async () => {
   const view = render(board([{
     ...job(1), status: "completed", mainVideoUrl: "https://www.youtube.com/watch?v=main-123",
     shortVideoUrl: "https://www.youtube.com/shorts/short-456",
   }]));
   fireEvent.click(view.getByRole("button", { name: /已结束/ }));
   expect(view.getByRole("link", { name: "相关视频 / Related video ↗" }).getAttribute("href")).toBe("https://studio.youtube.com/video/short-456/edit");
+  const related = within(view.getByRole("region", { name: "Shorts 关联正片" }));
+  expect(related.getByRole("link", { name: "https://www.youtube.com/watch?v=main-123" }).getAttribute("href")).toBe("https://www.youtube.com/watch?v=main-123");
+  expect(fireEvent.click(related.getByRole("link", { name: "相关视频 / Related video ↗" }))).toBe(false);
+  await waitFor(() => expect(invoke).toHaveBeenCalledExactlyOnceWith("plugin:opener|open_url", { url: "https://studio.youtube.com/video/short-456/edit" }));
+});
+it("finds uploaded Shorts after cleanup and does not hide the entry when a legacy main URL is missing", () => {
+  const view = render(board([
+    { ...job(1), status: "completed", shortVideoUrl: "https://www.youtube.com/watch?v=short-1" },
+    { ...job(2), status: "completed", mainVideoUrl: "https://www.youtube.com/watch?v=main-2" },
+    { ...job(3), status: "failed", shortVideoUrl: "https://youtu.be/short-3" },
+    { ...job(4), shortVideoUrl: "https://notyoutube.com/shorts/unrelated" },
+  ]));
+  fireEvent.click(view.getByRole("button", { name: /Shorts 关联/ }));
+  expect(view.getAllByRole("article").map(card => card.getAttribute("aria-label"))).toEqual(["剧目1任务", "剧目3任务"]);
+  expect(view.getAllByRole("link", { name: "相关视频 / Related video ↗" }).map(link => link.getAttribute("href"))).toEqual([
+    "https://studio.youtube.com/video/short-1/edit", "https://studio.youtube.com/video/short-3/edit",
+  ]);
+  expect(view.getAllByText("此任务未记录有效的正片地址，请在 Studio 核对同频道正片。")).toHaveLength(2);
+});
+it("explains when the main and Short share an ID and reports browser launch failures", async () => {
+  vi.mocked(invoke).mockRejectedValueOnce("默认浏览器不可用");
+  const view = render(board([{ ...job(1), shortVideoUrl: "https://youtu.be/same-id", mainVideoUrl: "https://www.youtube.com/watch?v=same-id" }]));
+  expect(view.getByText("正片与 Shorts 是同一条视频，请在 Studio 选择同频道的其他视频。")).toBeTruthy();
+  fireEvent.click(view.getByRole("link", { name: "相关视频 / Related video ↗" }));
+  await waitFor(() => expect(view.getByRole("alert").textContent).toContain("默认浏览器不可用"));
+  expect(view.getByText(/上传成功不会自动关联正片/)).toBeTruthy();
 });
 it("lets every unfinished drama be skipped by stable ID including active uploads", () => {
   const onAction = vi.fn();

@@ -184,6 +184,13 @@
 .auto-task-footer details { color: var(--muted); font-size: 11px; min-width: 0; }
 .auto-task-footer summary { cursor: pointer; }
 .auto-task-footer .auto-runtime-actions { justify-content: flex-end; font-size: 11px; }
+.auto-related-video { display: grid; gap: 9px; padding: 13px; margin-top: 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.auto-related-video > a { color: #f29ca0; font-weight: 600; }
+.auto-related-video small, .auto-related-video p, .auto-related-video details { color: var(--muted); font-size: 11px; }
+.auto-related-video p { margin: 0; }
+.auto-related-video details p { margin: 8px 0; }
+.auto-related-video summary { cursor: pointer; }
+.auto-related-video a { color: #f29ca0; }
 .auto-task-pages { display: flex; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 16px; font-size: 12px; color: var(--muted); }
 .auto-runtime-empty { grid-column: 1 / -1; padding: 22px 0; }
 @media (max-width: 1000px) { .auto-runtime-jobs { grid-template-columns: 1fr; } }

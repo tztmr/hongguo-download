@@ -1,7 +1,8 @@
 import { SubtitleUploadDialog } from "./SubtitleUploadDialog";
 import { useEffect, useRef, useState } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { YouTubeVideoLink } from "./YouTubeVideoLink";
 import type { YouTubeJob, YouTubeModel } from "./types";
+export { YouTubeVideoLink } from "./YouTubeVideoLink";
 
 function statusCopy(job: YouTubeJob) {
   return {
@@ -21,31 +22,6 @@ function statusCopy(job: YouTubeJob) {
     failed: "失败",
     cancelled: "已取消",
   }[job.status];
-}
-
-export function YouTubeVideoLink({ url, label = "打开 YouTube 视频" }: { url: string; label?: string }) {
-  const [opening, setOpening] = useState(false);
-  const [error, setError] = useState("");
-  return <>
-    <a href={url} target="_blank" rel="noreferrer" aria-disabled={opening} onClick={async (event) => {
-      if (!isTauri()) return;
-      // Handle the desktop launch explicitly, including errors. Prevent the
-      // WebView/plugin's delegated link handler from opening it a second time.
-      event.preventDefault();
-      if (opening) return;
-      setOpening(true);
-      setError("");
-      try {
-        await invoke("plugin:opener|open_url", { url });
-      } catch (reason) {
-        const detail = reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "请检查默认浏览器设置";
-        setError(`无法打开 YouTube 视频：${detail}`);
-      } finally {
-        setOpening(false);
-      }
-    }}>{opening ? "正在打开…" : label}</a>
-    {error ? <small className="error-copy" role="alert">{error}</small> : null}
-  </>;
 }
 
 const activeStatuses = ["pausing", "preparingAuthorization", "creatingSession", "uploading", "waitingToRetry", "processing", "settingThumbnail", "uploadingSubtitles"];
