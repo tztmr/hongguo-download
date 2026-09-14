@@ -227,9 +227,9 @@ fn configured_for_platform(
     }
     if windows
         && active.iter().any(|b| b.merge)
-        && (!resources
+        && (resources
             .available_memory
-            .is_some_and(|free| free >= memory_reservation(job, false) + 2 * GIB)
+            .is_none_or(|free| free < memory_reservation(job, false) + 2 * GIB)
             || !resources.cpu_usage.is_some_and(|usage| {
                 usage.is_finite()
                     && (0.0..85.0).contains(&usage)
@@ -355,9 +355,9 @@ fn admit_merge(
     .min(resources.cores.max(1));
     let memory = if copy_only { GIB / 2 } else { GIB };
     if !active.is_empty()
-        && (!resources
+        && (resources
             .available_memory
-            .is_some_and(|free| free >= memory + 2 * GIB)
+            .is_none_or(|free| free < memory + 2 * GIB)
             || !resources.cpu_usage.is_some_and(|usage| {
                 usage.is_finite()
                     && (0.0..85.0).contains(&usage)

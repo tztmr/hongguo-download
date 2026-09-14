@@ -131,8 +131,7 @@ pub(super) fn finish(task: &mut Task) -> Result<String, AppError> {
             Some("srt" | "vtt")
         );
         let owned = task.owned.iter().find(|f| f.path == path);
-        if subtitle && flag(&task.config, "keepSubtitles") && owned.is_some() {
-            let original = owned.unwrap();
+        if let Some(original) = owned.filter(|_| subtitle && flag(&task.config, "keepSubtitles")) {
             let actual = identity(&path)?;
             if actual.hash != original.hash || actual.size != original.size {
                 return Err(invalid_file());
