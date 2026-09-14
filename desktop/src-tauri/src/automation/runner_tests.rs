@@ -7,6 +7,20 @@ struct Fixture {
     task: Task,
 }
 
+#[test]
+fn automated_privacy_is_public_only_after_ai_cover_succeeds() {
+    let mut fixture = Fixture::new();
+    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Unlisted);
+
+    let generated = fixture.file("生成封面.png", b"generated cover");
+    fixture.task.cover = Some(generated);
+    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Public);
+
+    let source = fixture.file("源封面.png", b"source cover");
+    fixture.task.cover = Some(source);
+    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Unlisted);
+}
+
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);

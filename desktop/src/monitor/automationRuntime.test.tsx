@@ -5,9 +5,9 @@ import { AutomationPage } from "./AutomationPage";
 import type { AutomationSnapshot } from "./automationRuntime";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: () => false }));
-const storageKey = "hongguo.automation.settings-draft.v1";
+const storageKey = "hongguo.automation.settings-draft.v2";
 const snapshot = (): AutomationSnapshot => ({
-  config: { channel: "channel-fixture", privacy: "private", title: "后台 {剧名}", metadataVersion: 3, scope: "today" },
+  config: { channel: "channel-fixture", privacy: "unlisted", title: "后台 {剧名}", metadataVersion: 3, scope: "today" },
   mode: "stopped", jobs: [], logs: [], lastScan: 0, nextScan: 0, warning: "", keyStatus: { text: true, image: false },
 });
 let state: AutomationSnapshot;
@@ -171,7 +171,7 @@ describe("native automation boundaries", () => {
     save(view);
     await waitFor(() => expect(button(view, "启动 24 小时自动任务").disabled).toBe(false));
     fireEvent.click(button(view, "启动 24 小时自动任务"));
-    expect(view.getByLabelText("确认自动任务启动").textContent).toContain("channel-fixture；上传可见性：私享");
+    expect(view.getByLabelText("确认自动任务启动").textContent).toContain("channel-fixture；上传可见性：自动：AI 图片封面成功公开，否则不公开");
     expect(vi.mocked(invoke).mock.calls.some(([name]) => name === "start_automation")).toBe(false);
     fireEvent.click(button(view, "确认启动"));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_automation"));

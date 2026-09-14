@@ -5,6 +5,13 @@ import type { AutomationJob } from "./automationRuntime";
 afterEach(cleanup);
 const job = (id: number): AutomationJob => ({ id: String(id), title: `剧目${id}`, bookId: `book-${id}`, stage: "merge", status: "pending", message: "正在合并", episodeDone: 10, episodeTotal: 10, progress: 5, updatedAt: 1000 - id });
 const board = (jobs: AutomationJob[]) => <AutomationJobs jobs={jobs} loaded pending={false} onAction={vi.fn()} />;
+it("opens YouTube Studio to set the Shorts related video after both uploads finish", () => {
+  const view = render(board([{
+    ...job(1), status: "completed", mainVideoUrl: "https://www.youtube.com/watch?v=main-123",
+    shortVideoUrl: "https://www.youtube.com/shorts/short-456",
+  }]));
+  expect(view.getByRole("link", { name: "相关视频 / Related video ↗" })).toHaveAttribute("href", "https://studio.youtube.com/video/short-456/edit");
+});
 it("lets every unfinished drama be skipped by stable ID including active uploads", () => {
   const onAction = vi.fn();
   const jobs: AutomationJob[] = ["pending", "working", "observing", "review", "failed"].map((status, i) => ({ ...job(i), stage: "upload", status: status as AutomationJob["status"] }));

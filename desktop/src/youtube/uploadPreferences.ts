@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { YouTubePrivacy, YouTubeUploadFormat } from "./types";
 
-const KEY = "hongguo.youtube.upload-preferences.v1";
+const KEY = "hongguo.youtube.upload-preferences.v2";
+const LEGACY_KEY = "hongguo.youtube.upload-preferences.v1";
 export type UploadPreferences = {
   uploadFormat: YouTubeUploadFormat;
   privacy: YouTubePrivacy;
@@ -11,13 +12,15 @@ export type UploadPreferences = {
   paidPromotion: boolean;
   subtitleLanguage: string;
 };
-const defaults: UploadPreferences = { uploadFormat: "auto", privacy: "private", categoryId: "24", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" };
+const defaults: UploadPreferences = { uploadFormat: "auto", privacy: "unlisted", categoryId: "24", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" };
 export function readUploadPreferences(): UploadPreferences {
   try {
-    const value = JSON.parse(window.localStorage.getItem(KEY) || "{}");
+    const stored = window.localStorage.getItem(KEY);
+    const fromLegacy = stored === null;
+    const value = JSON.parse(stored ?? window.localStorage.getItem(LEGACY_KEY) ?? "{}");
     return {
       uploadFormat: ["auto", "shorts", "standard"].includes(value?.uploadFormat) ? value.uploadFormat : defaults.uploadFormat,
-      privacy: ["private", "unlisted", "public"].includes(value?.privacy) ? value.privacy : defaults.privacy,
+      privacy: ["private", "unlisted", "public"].includes(value?.privacy) ? fromLegacy && value.privacy === "private" ? defaults.privacy : value.privacy : defaults.privacy,
       categoryId: ["1", "24"].includes(value?.categoryId) ? value.categoryId : defaults.categoryId,
       madeForKids: typeof value?.madeForKids === "boolean" ? value.madeForKids : defaults.madeForKids,
       synthetic: typeof value?.synthetic === "boolean" ? value.synthetic : defaults.synthetic,

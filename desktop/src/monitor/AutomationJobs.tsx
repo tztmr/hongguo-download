@@ -18,6 +18,17 @@ const activityLabel = (job: AutomationJob) => {
   return statuses[job.status];
 };
 const time = (value: number) => new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
+function youtubeVideoId(value?: string) {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    if (url.hostname === "youtu.be") return url.pathname.split("/").filter(Boolean)[0] || "";
+    if (!url.hostname.endsWith("youtube.com")) return "";
+    if (url.pathname === "/watch") return url.searchParams.get("v") || "";
+    const parts = url.pathname.split("/").filter(Boolean);
+    return parts[0] === "shorts" || parts[0] === "live" ? parts[1] || "" : "";
+  } catch { return ""; }
+}
 
 export function AutomationJobs({ jobs, loaded, pending, onAction }: { jobs: AutomationJob[]; loaded: boolean; pending: boolean; onAction: (id: string, action: "continue" | "skip" | "retry") => void }) {
   const [filter, setFilter] = useState<Filter>("active");
@@ -51,7 +62,7 @@ export function AutomationJobs({ jobs, loaded, pending, onAction }: { jobs: Auto
           {job.status === "review" && <button type="button" disabled={pending} onClick={() => onAction(job.id, "continue")}>确认继续处理</button>}
           {!finished(job) && <button type="button" disabled={!loaded || pending} title="停止后续处理和上传，删除本地任务文件夹；保留记录，后续监听不再自动加入此剧" onClick={() => onAction(job.id, "skip")}>跳过此任务</button>}
           {job.status === "failed" && <button type="button" disabled={pending} onClick={() => onAction(job.id, "retry")}>重试此任务</button>}
-          {job.mainVideoUrl && <a href={job.mainVideoUrl} target="_blank" rel="noreferrer">查看正片 ↗</a>}{job.shortVideoUrl && <a href={job.shortVideoUrl} target="_blank" rel="noreferrer">查看首集 Shorts ↗</a>}
+          {job.mainVideoUrl && <a href={job.mainVideoUrl} target="_blank" rel="noreferrer">查看正片 ↗</a>}{job.shortVideoUrl && <a href={job.shortVideoUrl} target="_blank" rel="noreferrer">查看首集 Shorts ↗</a>}{job.mainVideoUrl && job.shortVideoUrl && youtubeVideoId(job.shortVideoUrl) && <a href={`https://studio.youtube.com/video/${youtubeVideoId(job.shortVideoUrl)}/edit`} target="_blank" rel="noreferrer" title="打开 YouTube Studio，为此 Shorts 选择正片作为相关视频">相关视频 / Related video ↗</a>}
         </div></footer>
       </article>;
     })}</div>

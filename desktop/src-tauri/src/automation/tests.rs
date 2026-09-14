@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 use std::fs;
 fn config() -> Value {
-    json!({"uploadFormat":"auto","firstEpisodeShorts":false,"interval":"5","types":["漫剧"],"scope":"all","orientation":"all","keywords":"","exclude":"","completeOnly":true,"definition":"auto","concurrency":"1","separate":false,"subtitles":false,"subtitleSource":"original","subtitleFormat":"srt","retries":"3","channel":"channel-a","privacy":"private","title":"{剧名}","description":"{简介}","tags":"{剧名}","coverSource":"source","metadataSource":"template","category":"24","imageMode":"reference","minDisk":"20","resume":true,"notify":false})
+    json!({"uploadFormat":"auto","firstEpisodeShorts":false,"interval":"5","types":["漫剧"],"scope":"all","orientation":"all","keywords":"","exclude":"","completeOnly":true,"definition":"auto","concurrency":"1","separate":false,"subtitles":false,"subtitleSource":"original","subtitleFormat":"srt","retries":"3","channel":"channel-a","privacy":"unlisted","title":"{剧名}","description":"{简介}","tags":"{剧名}","coverSource":"source","metadataSource":"template","category":"24","imageMode":"reference","minDisk":"20","resume":true,"notify":false})
 }
 fn task() -> Task {
     Task::new(

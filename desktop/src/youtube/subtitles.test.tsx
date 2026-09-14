@@ -38,7 +38,7 @@ it("remembers only general settings across single and batch dialogs", async () =
   expect(second.getByLabelText("YouTube 标题")).toHaveProperty("value", batch.title.slice(0, 100));
   expect(second.getByLabelText("YouTube 简介")).not.toHaveProperty("value", "不能缓存的简介");
   expect(second.getByLabelText("YouTube 标签")).not.toHaveProperty("value", "不能缓存的标签");
-  expect(window.localStorage.getItem("hongguo.youtube.upload-preferences.v1")).not.toContain("不能缓存");
+  expect(window.localStorage.getItem("hongguo.youtube.upload-preferences.v2")).not.toContain("不能缓存");
   fireEvent.click(second.getByRole("button", { name: "开始批量上传" }));
   await waitFor(() => expect(props.onSubmit).toHaveBeenCalledWith(expect.objectContaining({ privacyStatus: "unlisted", subtitle: { path: null, language: "en" } })));
 });
@@ -92,7 +92,7 @@ it("retries only subtitles on the existing video job", async () => {
 
 it("falls back safely for corrupt or invalid cached settings", () => {
   window.localStorage.setItem("hongguo.youtube.upload-preferences.v1", "broken");
-  expect(readUploadPreferences().privacy).toBe("private");
+  expect(readUploadPreferences().privacy).toBe("unlisted");
   window.localStorage.setItem("hongguo.youtube.upload-preferences.v1", JSON.stringify({ privacy: "invalid", madeForKids: "false", subtitleLanguage: "invalid language", title: "do not load" }));
-  expect(readUploadPreferences()).toEqual({ uploadFormat: "auto", privacy: "private", categoryId: "24", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" });
+  expect(readUploadPreferences()).toEqual({ uploadFormat: "auto", privacy: "unlisted", categoryId: "24", madeForKids: false, synthetic: true, paidPromotion: false, subtitleLanguage: "zh-Hans" });
 });

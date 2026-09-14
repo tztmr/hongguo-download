@@ -1325,11 +1325,7 @@ async fn upload(
             })
             .unwrap_or_default(),
         category_id: text(m, "categoryId").into(),
-        privacy_status: match text(&task.config, "privacy") {
-            "public" => PrivacyStatus::Public,
-            "unlisted" => PrivacyStatus::Unlisted,
-            _ => PrivacyStatus::Private,
-        },
+        privacy_status: automated_privacy(task),
         self_declared_made_for_kids: false,
         contains_synthetic_media: true,
         has_paid_product_placement: false,
@@ -1388,6 +1384,20 @@ async fn upload(
     task.allow_duplicate = false;
     task.message = "已加入真实 YouTube 上传队列，等待处理结果".into();
     Ok(())
+}
+
+fn automated_privacy(task: &Task) -> PrivacyStatus {
+    let ai_cover_succeeded = task
+        .cover
+        .as_ref()
+        .and_then(|path| path.file_stem())
+        .and_then(|stem| stem.to_str())
+        == Some("生成封面");
+    if ai_cover_succeeded {
+        PrivacyStatus::Public
+    } else {
+        PrivacyStatus::Unlisted
+    }
 }
 async fn short(app: &AppHandle, service: &Arc<Service>, task: &mut Task) -> Result<(), AppError> {
     if !task.shorts_required() || task.short_done {
