@@ -34,6 +34,92 @@ fn temporary() -> PathBuf {
 }
 
 #[test]
+fn manual_skip_while_busy_survives_a_late_checkpoint_and_restart() {
+    let path = temporary();
+    let service = Service::load(path.clone()).unwrap();
+    let mut job = task();
+    job.stage = "upload".into();
+    job.status = Status::Working;
+    service
+        .transaction(|s| {
+            s.config = Some(config());
+            s.mode = Mode::Running;
+            s.jobs.push(job.clone());
+            Ok(())
+        })
+        .unwrap();
+    service.busy.lock().unwrap().insert(job.id.clone());
+    service.review(&job.id, "skip").unwrap();
+    job.files.push(PathBuf::from("completed-during-skip.mp4"));
+    job.next("short", "late upload response");
+    service.checkpoint(&job).unwrap();
+    let stored = service.snapshot().jobs[0].clone();
+    assert_eq!(stored.status, Status::Skipped);
+    assert_eq!(stored.files, job.files);
+    assert_eq!(stored.retry_at, 0);
+    assert!(pipeline::select(&service.snapshot(), &HashSet::new(), now()).is_empty());
+    assert_eq!(
+        Service::load(path.clone()).unwrap().snapshot().jobs[0].status,
+        Status::Skipped
+    );
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn uploads_release_media_admission_without_waiting_for_network_completion() {
+    let mut s = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for n in 0..10 {
+        let mut j = task();
+        j.id = format!("upload-{n}");
+        j.stage = "upload".into();
+        s.jobs.push(j);
+    }
+    assert_eq!(pipeline::free_slots(&s), 10);
+    for n in 0..10 {
+        let mut j = task();
+        j.id = format!("media-{n}");
+        j.stage = "download".into();
+        s.jobs.push(j);
+    }
+    pipeline::normalize_group(&mut s);
+    assert_eq!(s.jobs.len(), 20);
+    assert_eq!(pipeline::free_slots(&s), 0);
+    let ready = pipeline::select(&s, &HashSet::new(), now());
+    assert!(ready.contains(&"media-9".to_string()));
+}
+
+#[test]
+fn episode_limit_defaults_and_validates_without_truncating_a_series() {
+    assert_eq!(
+        number(&validate_config(config()).unwrap(), "maxEpisodes", 0),
+        300
+    );
+    for limit in [json!(0), json!(-1), json!(1.5), json!("bad"), json!(10001)] {
+        let mut c = config();
+        c["maxEpisodes"] = limit;
+        assert!(validate_config(c).is_err());
+    }
+    let mut c = config();
+    c["maxEpisodes"] = json!("500");
+    assert_eq!(number(&validate_config(c).unwrap(), "maxEpisodes", 0), 500);
+    let mut candidate = task().source;
+    candidate.release_type = "comic_series_rank".into();
+    candidate.episode_count = 300;
+    assert!(source::eligible(&candidate, &config(), 1));
+    candidate.episode_count = 301;
+    assert!(!source::eligible(&candidate, &config(), 1));
+    candidate.episode_count = 0;
+    assert!(
+        source::eligible(&candidate, &config(), 1),
+        "unknown feed counts require catalogue verification"
+    );
+}
+
+#[test]
 fn upgrade_requeues_only_completed_jobs_that_need_folder_cleanup() {
     let path = temporary();
     let mut job = task();
@@ -94,12 +180,12 @@ fn one_group_pipelines_download_merge_ai_and_upload_without_starvation() {
 }
 
 #[test]
-fn pipeline_bounds_download_backlog_but_keeps_resuming_existing_downloads() {
+fn pipeline_bounds_media_backlog_but_keeps_resuming_existing_downloads() {
     let mut jobs = vec![];
     for i in 0..10 {
         let mut job = task();
         job.id = format!("cooldown-{i}");
-        job.stage = "upload".into();
+        job.stage = "separate".into();
         job.retry_at = now() + 900;
         job.files.push(PathBuf::from("ready.mp4"));
         jobs.push(job);
@@ -562,6 +648,33 @@ fn completion_and_manual_skip_wake_scanner_without_waiting_for_interval() {
     assert_eq!(pipeline::free_slots(&service.snapshot()), 2);
     service.control("pause").unwrap();
     assert!(!pipeline::can_scan(&service.snapshot()));
+    fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn entering_upload_wakes_scanner_and_preserves_the_remaining_media_group() {
+    let path = temporary();
+    let service = Service::load(path.clone()).unwrap();
+    service
+        .transaction(|s| {
+            s.config = Some(config());
+            s.mode = Mode::Running;
+            for n in 0..10 {
+                let mut j = task();
+                j.id = format!("media-{n}");
+                j.stage = "metadata".into();
+                s.jobs.push(j);
+            }
+            s.next_scan = now() + 3600;
+            Ok(())
+        })
+        .unwrap();
+    let mut uploaded = service.snapshot().jobs[0].clone();
+    uploaded.next("upload", "媒体已准备完毕");
+    service.checkpoint(&uploaded).unwrap();
+    assert_eq!(service.snapshot().next_scan, 0);
+    assert_eq!(pipeline::free_slots(&service.snapshot()), 1);
+    assert_eq!(service.snapshot().jobs.len(), 10);
     fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
 

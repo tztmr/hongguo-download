@@ -71,6 +71,7 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         "keywords",
         "exclude",
         "completeOnly",
+        "maxEpisodes",
         "definition",
         "concurrency",
         "separate",
@@ -153,6 +154,9 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         clean.insert("coverModels".into(), serde_json::json!(models));
     }
     let mut c = Value::Object(clean);
+    if value.get("maxEpisodes").is_none() {
+        c["maxEpisodes"] = json!("300");
+    }
     for (key, options) in [
         ("uploadFormat", vec!["auto", "shorts", "standard"]),
         ("scope", vec!["today", "new", "all"]),
@@ -190,6 +194,7 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         ("concurrency", 1, 3),
         ("retries", 0, 5),
         ("minDisk", 1, 1000),
+        ("maxEpisodes", 1, 10000),
     ] {
         let n = number(&c, key, u64::MAX);
         if n < min || n > max {
@@ -262,6 +267,8 @@ pub struct DurationCheck {
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     #[serde(default)]
+    pub manual_skip: bool,
+    #[serde(default)]
     pub duration_check: Option<DurationCheck>,
     /// Persist admission before the first download, including failed attempts.
     #[serde(default)]
@@ -333,6 +340,7 @@ impl Task {
             &id[..8]
         ));
         Self {
+            manual_skip: false,
             duration_check: None,
             download_admitted: false,
             cleanup_version: 0,
@@ -381,6 +389,24 @@ impl Task {
             self.status,
             Status::Completed | Status::Skipped | Status::Review | Status::Failed
         )
+    }
+    pub fn skip_manually(&mut self) {
+        self.manual_skip = true;
+        self.status = Status::Skipped;
+        self.retry_at = 0;
+        self.retry_ready = false;
+        self.attempts = 0;
+        self.media_state = None;
+        self.message = "已手动跳过，不再自动处理或上传；保留本地文件和已有上传结果".into();
+    }
+    // In-flight stages may finish after a skip. Keep their file receipts and
+    // side-effect handles, but never let their stale status undo the skip.
+    pub fn accept_progress(&mut self, incoming: &Task) {
+        let skipped = self.manual_skip || incoming.manual_skip;
+        *self = incoming.clone();
+        if skipped {
+            self.skip_manually();
+        }
     }
     pub fn defer_retry(&mut self) {
         // The configured count controls quick retries, not whether unattended
@@ -434,6 +460,18 @@ pub struct Snapshot {
     pub cursor_type: usize,
     #[serde(default)]
     pub cursor: String,
+    #[serde(default)]
+    pub scan_summary: ScanSummary,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanSummary {
+    pub checked: usize,
+    pub filtered: usize,
+    pub known: usize,
+    pub added: usize,
+    pub more: bool,
+    pub at: u64,
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KeyStatus {

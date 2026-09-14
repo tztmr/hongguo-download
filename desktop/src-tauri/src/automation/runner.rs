@@ -44,6 +44,16 @@ fn ensure_running(service: &Service) -> Result<(), AppError> {
         ))
     }
 }
+fn ensure_task_running(service: &Service, id: &str) -> Result<(), AppError> {
+    ensure_running(service)?;
+    if service.is_skipped(id) {
+        return Err(AppError::new(
+            "AUTOMATION_SKIPPED",
+            "任务已手动跳过，停止后续处理",
+        ));
+    }
+    Ok(())
+}
 fn tools() -> Result<MediaTools, AppError> {
     let exe = std::env::current_exe().map_err(|_| invalid_file())?;
     MediaTools::from_resource_root(exe.parent().ok_or_else(invalid_file)?)
@@ -166,6 +176,7 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
     fs::create_dir_all(&save_dir).map_err(|_| invalid_file())?;
     let save_dir = fs::canonicalize(save_dir).map_err(|_| invalid_file())?;
     let mut candidates = vec![];
+    let checked = page["items"].as_array().map_or(0, Vec::len);
     for value in page["items"]
         .as_array()
         .ok_or_else(|| AppError::new("AUTOMATION_FEED_INVALID", "新剧列表响应不完整"))?
@@ -201,18 +212,27 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         if !super::pipeline::can_scan(s) || s.config.as_ref() != Some(&config) {
             return Ok(());
         }
+        let filtered = checked.saturating_sub(candidates.len());
+        let known = candidates
+            .iter()
+            .filter(|c| {
+                let id = Task::new((*c).clone(), config.clone(), save_dir.clone()).id;
+                s.jobs.iter().any(|j| j.id == id)
+            })
+            .count();
         let count = admit_group(s, candidates, &config, &save_dir);
+        if snapshot.cursor.is_empty() && snapshot.cursor_type == 0 {
+            s.scan_summary = ScanSummary::default();
+        }
+        s.scan_summary.checked += checked;
+        s.scan_summary.filtered += filtered;
+        s.scan_summary.known += known;
+        s.scan_summary.added += count;
+        s.scan_summary.more = more || selected + 1 < types.len();
+        s.scan_summary.at = now();
         s.warning.clear();
         s.last_scan = now();
-        if count > 0 {
-            s.cursor.clear();
-            s.cursor_type = (selected + 1) % types.len();
-            s.next_scan = if super::pipeline::free_slots(s) > 0 {
-                now() + 2
-            } else {
-                now() + number(&config, "interval", 5) * 60
-            };
-        } else if more {
+        if more {
             s.cursor = next;
             s.cursor_type = selected;
             s.next_scan = now() + 2;
@@ -228,7 +248,7 @@ pub async fn scan(app: &AppHandle, service: &Arc<Service>) -> Result<(), AppErro
         if count > 0 {
             s.log(
                 None,
-                format!("本轮补入 {count} 部，最多同时处理 10 部；完成或跳过后自动监听补位"),
+                format!("本轮补入 {count} 部；媒体处理最多 10 部，转入上传或跳过后自动补位"),
             );
         }
         Ok(())
@@ -240,7 +260,7 @@ pub async fn advance(
     service: &Arc<Service>,
     task: &mut Task,
 ) -> Result<(), AppError> {
-    ensure_running(service)?;
+    ensure_task_running(service, &task.id)?;
     // Also check merged files created by older versions before resuming AI or
     // upload. Cache only while the exact path/size/modification time still match.
     if !task.main_done
@@ -259,7 +279,7 @@ pub async fn advance(
             .await?;
             if let Some(seconds) = task.duration_check.as_ref().map(|check| check.seconds) {
                 if duration::skip(task, seconds) {
-                    pause_owned(app, task);
+                    cancel_owned(app, task);
                     return Ok(());
                 }
             }
@@ -396,6 +416,15 @@ async fn inspect(app: &AppHandle, task: &mut Task) -> Result<(), AppError> {
     }
     task.episodes = source::parse_catalogue(&catalogue, task.source.episode_count)?;
     task.episode_total = task.episodes.len();
+    let limit = number(&task.config, "maxEpisodes", 300);
+    if task.episode_total as u64 > limit {
+        task.status = Status::Skipped;
+        task.message = format!(
+            "目录确认共 {} 集，超过最多 {limit} 集设置，跳过整部剧",
+            task.episode_total
+        );
+        return Ok(());
+    }
     let query = DuplicateQuery {
         channel_id: text(&task.config, "channel").into(),
         title: task.title.chars().take(100).collect(),
@@ -488,7 +517,7 @@ async fn download(
     let id = format!("auto-{}-{}", task.id, episode.index);
     let receipt = task.root.join(format!("下载完成-{}.json", episode.index));
     let orientation = text(&task.config, "orientation").to_owned();
-    ensure_running(service)?;
+    ensure_task_running(service, &task.id)?;
     task.message = format!(
         "正在{}第 {}/{} 集",
         if existing.is_some() {
@@ -500,7 +529,10 @@ async fn download(
         wanted
     );
     service.checkpoint(task)?;
+    let owner = service.clone();
+    let task_id = task.id.clone();
     let path = crate::run_blocking(move || {
+        ensure_task_running(&owner, &task_id)?;
         if let Some(path) = existing {
             safe_root(&path)?;
             let record: OwnedFile = serde_json::from_slice(&fs::read(&receipt).map_err(|_| {
@@ -696,15 +728,16 @@ async fn merge(
     let job = if let Some(job) = current_media(app, &old, &book, MediaJobKind::Merge) {
         job
     } else {
-        ensure_running(service)?;
+        ensure_task_running(service, &task.id)?;
         if !is_short {
             task.message = "正在核对合并总时长，超过 12 小时将自动跳过".into();
             service.checkpoint(task)?;
             let paths = task.files.clone();
             let owner = service.clone();
+            let task_id = task.id.clone();
             let over = crate::run_blocking(move || {
                 duration::inputs_over_limit(&paths, |p| {
-                    ensure_running(&owner)?;
+                    ensure_task_running(&owner, &task_id)?;
                     Ok(tools()?.probe_media(p)?.duration_seconds)
                 })
             })
@@ -777,7 +810,13 @@ async fn merge(
             conflict_policy: Default::default(),
         };
         let media = app.state::<AppState>().media_jobs.clone();
-        crate::run_blocking(move || media.start_merge(request)).await?
+        let owner = service.clone();
+        let task_id = task.id.clone();
+        crate::run_blocking(move || {
+            ensure_task_running(&owner, &task_id)?;
+            media.start_merge(request)
+        })
+        .await?
     };
     if is_short {
         task.short_merge_job = Some(job.id.clone())
@@ -785,6 +824,7 @@ async fn merge(
         task.merge_job = Some(job.id.clone())
     };
     service.checkpoint(task)?;
+    ensure_task_running(service, &task.id)?;
     if let Some(job) = refresh_media(app, task, job)? {
         let path = job.output_path.ok_or_else(invalid_file)?;
         own(task, &path)?;
@@ -914,7 +954,7 @@ async fn ai_media(
     let job = if let Some(job) = current_media(app, &old, &book, kind) {
         job
     } else {
-        ensure_running(service)?;
+        ensure_task_running(service, &task.id)?;
         let state = app.state::<AppState>();
         let settings = state.settings.lock().map_err(|_| invalid_file())?.clone();
         let input = if subtitles && text(&task.config, "subtitleSource") == "original" {
@@ -956,7 +996,13 @@ async fn ai_media(
             device: settings.ai_device.as_str().into(),
         };
         let media = state.media_jobs.clone();
-        crate::run_blocking(move || media.start_ai(request, kind)).await?
+        let owner = service.clone();
+        let task_id = task.id.clone();
+        crate::run_blocking(move || {
+            ensure_task_running(&owner, &task_id)?;
+            media.start_ai(request, kind)
+        })
+        .await?
     };
     if subtitles {
         task.subtitle_job = Some(job.id.clone())
@@ -964,6 +1010,7 @@ async fn ai_media(
         task.separate_job = Some(job.id.clone())
     }
     service.checkpoint(task)?;
+    ensure_task_running(service, &task.id)?;
     if let Some(job) = refresh_media(app, task, job)? {
         for output in &job.outputs {
             own(task, &output.path)?;
@@ -1017,6 +1064,7 @@ async fn upload(
     task: &mut Task,
     is_short: bool,
 ) -> Result<(), AppError> {
+    ensure_task_running(service, &task.id)?;
     if !is_short && task.main_done {
         task.next("short", "正片已有上传记录，继续核对首集 Shorts");
         return Ok(());
@@ -1102,7 +1150,7 @@ async fn upload(
         }
         return Ok(());
     }
-    ensure_running(service)?;
+    ensure_task_running(service, &task.id)?;
     let source = if is_short {
         task.short_path.clone()
     } else {
@@ -1208,8 +1256,12 @@ async fn upload(
             return Ok(());
         }
     }
-    ensure_running(service)?;
+    ensure_task_running(service, &task.id)?;
     youtube.start_upload(request).await?;
+    if service.is_skipped(&task.id) {
+        let _ = youtube.cancel_upload(&task.upload_id(is_short));
+        return ensure_task_running(service, &task.id);
+    }
     task.allow_duplicate = false;
     task.message = "已加入真实 YouTube 上传队列，等待处理结果".into();
     Ok(())
@@ -1252,6 +1304,27 @@ pub fn pause_owned(app: &AppHandle, task: &Task) {
     }
     for short in [false, true] {
         let _ = state.youtube.pause_upload(&task.upload_id(short));
+    }
+}
+
+pub fn cancel_owned(app: &AppHandle, task: &Task) {
+    let state = app.state::<AppState>();
+    for id in [
+        &task.merge_job,
+        &task.separate_job,
+        &task.subtitle_job,
+        &task.short_merge_job,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        // Pausing first prevents queued work from starting. Running workers must
+        // then be cancelled so a skipped drama releases its CPU/GPU allocation.
+        let _ = state.media_jobs.pause(id);
+        let _ = state.media_jobs.cancel(id);
+    }
+    for short in [false, true] {
+        let _ = state.youtube.cancel_upload(&task.upload_id(short));
     }
 }
 

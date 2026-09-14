@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { AutomationPage } from "./AutomationPage";
@@ -31,6 +31,28 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it("explains vacant slots using actual scan counts", async () => {
+    state.scanSummary = { checked: 99, filtered: 89, known: 10, added: 0, more: false, at: 100 };
+    const view = page(); await loaded(view);
+    expect(view.getByText(/本轮已检查 99 部.*筛选排除 89 部.*已有记录 10 部.*新加入 0 部/)).toBeTruthy();
+    expect(view.getByText(/当前筛选下暂无可补入的新剧/)).toBeTruthy();
+  });
+  it("defaults to a 300 episode ceiling and persists an edited whole-drama filter", async () => {
+    const view = page(); await loaded(view);
+    const input = view.getByRole("spinbutton", { name: /^最多集数/ });
+    expect(input).toHaveProperty("value", "300");
+    fireEvent.change(input, { target: { value: "200" } });
+    save(view);
+    await waitFor(() => expect(state.config?.maxEpisodes).toBe("200"));
+  });
+  it("keeps uploading dramas outside the ten media slots", async () => {
+    state.mode = "running";
+    state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `upload-${i}`, bookId: `book-${i}`, title: `上传剧${i}`, stage: "upload", status: "pending", message: "上传中", episodeDone: 2, episodeTotal: 2, progress: 50, updatedAt: 1 }));
+    const view = page(); await loaded(view);
+    expect(view.getByText(/媒体处理 0 部.*空位 10 部/)).toBeTruthy();
+    expect(view.getByText(/上传与收尾 10 部/)).toBeTruthy();
+    expect(button(view, "立即扫描").disabled).toBe(false);
+  });
   it("keeps completed tasks behind the finished filter and searches by title", async () => {
     state.jobs = [
       { id: "done", bookId: "done-book", title: "已完成剧目", stage: "done", status: "completed", message: "任务文件夹已删除", episodeDone: 12, episodeTotal: 12, progress: 100, updatedAt: 1 },
@@ -59,7 +81,7 @@ describe("native automation boundaries", () => {
     state.jobs = Array.from({ length: 10 }, (_, i) => ({ id: `job-${i}`, bookId: `book-${i}`, title: `剧目${i}`, stage: "merge", status: i === 0 ? "completed" as const : "pending" as const, message: "等待处理", episodeDone: 2, episodeTotal: 2, progress: 0, updatedAt: 1 }));
     const view = page(); await loaded(view);
     expect(view.getByText(/1 组.*最多 10 部.*自动补位/)).toBeTruthy();
-    expect(view.getByText(/正在处理 9 部.*空位 1 部/)).toBeTruthy();
+    expect(view.getByText(/媒体处理 9 部.*空位 1 部/)).toBeTruthy();
     expect(view.getByRole("button", { name: "立即扫描" })).toHaveProperty("disabled", false);
     expect(view.queryByText(/待入队 140/)).toBeNull();
     fireEvent.click(view.getByRole("button", { name: /清理与运行/ }));
@@ -171,7 +193,7 @@ describe("native automation boundaries", () => {
     await waitFor(() => expect(button(view, "暂停").disabled).toBe(false));
     expect(button(view, "立即扫描").disabled).toBe(false);
     fireEvent.click(button(view, "确认继续处理")); await loaded(view);
-    fireEvent.click(button(view, "跳过此任务")); await loaded(view);
+    fireEvent.click(within(view.getByRole("article", { name: "需核对剧目任务" })).getByRole("button", { name: "跳过此任务" })); await loaded(view);
     fireEvent.click(button(view, "重试此任务")); await loaded(view);
     fireEvent.click(button(view, "停止")); await loaded(view);
     for (const action of ["pause", "resume", "stop"]) expect(invoke).toHaveBeenCalledWith("control_automation", { action });

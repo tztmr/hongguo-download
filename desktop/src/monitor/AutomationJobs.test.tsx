@@ -5,6 +5,18 @@ import type { AutomationJob } from "./automationRuntime";
 afterEach(cleanup);
 const job = (id: number): AutomationJob => ({ id: String(id), title: `剧目${id}`, bookId: `book-${id}`, stage: "merge", status: "pending", message: "正在合并", episodeDone: 10, episodeTotal: 10, progress: 5, updatedAt: 1000 - id });
 const board = (jobs: AutomationJob[]) => <AutomationJobs jobs={jobs} loaded pending={false} onAction={vi.fn()} />;
+it("lets every unfinished drama be skipped by stable ID including active uploads", () => {
+  const onAction = vi.fn();
+  const jobs: AutomationJob[] = ["pending", "working", "observing", "review", "failed"].map((status, i) => ({ ...job(i), stage: "upload", status: status as AutomationJob["status"] }));
+  const view = render(<AutomationJobs jobs={jobs} loaded pending={false} onAction={onAction} />);
+  const buttons = view.getAllByRole("button", { name: "跳过此任务" });
+  expect(buttons).toHaveLength(5);
+  fireEvent.click(buttons[1]);
+  expect(onAction).toHaveBeenCalledWith("1", "skip");
+  view.rerender(<AutomationJobs jobs={jobs.map(j => ({ ...j, status: "skipped" }))} loaded pending={false} onAction={onAction} />);
+  fireEvent.click(view.getByRole("button", { name: /已结束/ }));
+  expect(view.queryByRole("button", { name: "跳过此任务" })).toBeNull();
+});
 it("keeps queue order and an open task while polling changes status and timestamps", () => {
   const jobs = [job(1), job(2), job(3)];
   const view = render(board(jobs));

@@ -500,3 +500,23 @@ fn merge_duration_preflight_stops_early_and_does_not_skip_unknown_durations() {
         assert!(duration::inputs_over_limit(&paths, |_| Ok(unknown)).is_err());
     }
 }
+
+#[test]
+fn skipped_task_guard_blocks_late_side_effects_while_other_tasks_keep_running() {
+    let f = Fixture::new();
+    let service = Service::load(f.base.join("guard-state.json")).unwrap();
+    service
+        .transaction(|s| {
+            s.mode = Mode::Running;
+            s.jobs.push(f.task.clone());
+            Ok(())
+        })
+        .unwrap();
+    assert!(ensure_task_running(&service, &f.task.id).is_ok());
+    service.review(&f.task.id, "skip").unwrap();
+    assert_eq!(
+        ensure_task_running(&service, &f.task.id).unwrap_err().code,
+        "AUTOMATION_SKIPPED"
+    );
+    assert!(service.running());
+}

@@ -87,6 +87,9 @@ pub fn parse_candidate(value: &Value) -> Option<Candidate> {
 }
 
 pub fn eligible(candidate: &Candidate, config: &Value, now: i64) -> bool {
+    if candidate.episode_count > super::model::number(config, "maxEpisodes", 300) {
+        return false;
+    }
     let label = match candidate.release_type.as_str() {
         "playlet" => "真人剧",
         "comic_series_rank" => "漫剧",

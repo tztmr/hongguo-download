@@ -53,6 +53,10 @@ impl Service {
             }
         }
         for job in &mut snapshot.jobs {
+            if job.manual_skip {
+                job.skip_manually();
+                continue;
+            }
             if job.status == Status::Completed
                 && job.cleanup_version == 0
                 && flag(&job.config, "deleteEpisodes")
@@ -96,6 +100,14 @@ impl Service {
     pub fn running(&self) -> bool {
         self.snapshot().mode == Mode::Running
     }
+    pub(crate) fn is_skipped(&self, id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .jobs
+            .iter()
+            .any(|j| j.id == id && j.manual_skip)
+    }
     fn transaction<T>(
         &self,
         f: impl FnOnce(&mut Snapshot) -> Result<T, AppError>,
@@ -124,7 +136,7 @@ impl Service {
                 .iter_mut()
                 .find(|j| j.id == job.id)
                 .ok_or_else(unavailable)?;
-            *target = job.clone();
+            target.accept_progress(job);
             Ok(())
         })
     }
@@ -247,7 +259,7 @@ impl Service {
         Ok(self.snapshot())
     }
     fn review(&self, id: &str, action: &str) -> Result<Snapshot, AppError> {
-        if self.busy.lock().map_err(|_| unavailable())?.contains(id) {
+        if action != "skip" && self.busy.lock().map_err(|_| unavailable())?.contains(id) {
             return Err(AppError::new(
                 "AUTOMATION_BUSY",
                 "当前阶段仍在收尾，请稍后重试",
@@ -265,9 +277,8 @@ impl Service {
                     j.status = Status::Pending;
                     j.message = "已确认继续；仍检查缺集和真实视频格式".into();
                 }
-                "skip" if j.status == Status::Review || j.status == Status::Failed => {
-                    j.status = Status::Skipped;
-                    j.message = "用户跳过，保留文件".into();
+                "skip" if !matches!(j.status, Status::Completed | Status::Skipped) => {
+                    j.skip_manually();
                 }
                 "retry" if matches!(j.status, Status::Failed | Status::Observing) => {
                     j.status = Status::Pending;
@@ -394,7 +405,8 @@ impl Service {
                                 }
                                 let _ = owner.transaction(|s| {
                                     if let Some(j) = s.jobs.iter_mut().find(|j| j.id == task.id) {
-                                        *j = task.clone();
+                                        j.accept_progress(&task);
+                                        task = j.clone();
                                     }
                                     if task.message != before {
                                         s.log(Some(task.id.clone()), task.message.clone());
@@ -414,6 +426,9 @@ impl Service {
                                 }
                                 if !owner.running() {
                                     runner::pause_owned(&a, &task);
+                                }
+                                if task.manual_skip {
+                                    runner::cancel_owned(&a, &task);
                                 }
                                 owner
                                     .busy
@@ -472,9 +487,16 @@ pub(crate) fn control_automation(
 }
 #[tauri::command]
 pub(crate) fn review_automation_job(
+    app: AppHandle,
     state: State<AppState>,
     job_id: String,
     action: String,
 ) -> Result<Snapshot, AppError> {
-    state.automation.review(&job_id, &action)
+    let result = state.automation.review(&job_id, &action)?;
+    if action == "skip" {
+        if let Some(job) = result.jobs.iter().find(|j| j.id == job_id) {
+            runner::cancel_owned(&app, job);
+        }
+    }
+    Ok(result)
 }

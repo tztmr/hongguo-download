@@ -3,6 +3,11 @@ use std::collections::HashSet;
 
 pub(super) const GROUP_SIZE: usize = 10;
 
+pub(super) fn uses_media_slot(job: &Task) -> bool {
+    !matches!(job.status, Status::Completed | Status::Skipped)
+        && !matches!(job.stage.as_str(), "upload" | "short" | "cleanup" | "done")
+}
+
 pub(super) fn free_slots(snapshot: &Snapshot) -> usize {
     let Some(config) = snapshot.config.as_ref() else {
         return 0;
@@ -12,8 +17,7 @@ pub(super) fn free_slots(snapshot: &Snapshot) -> usize {
             .jobs
             .iter()
             .filter(|job| {
-                text(&job.config, "channel") == text(config, "channel")
-                    && !matches!(job.status, Status::Completed | Status::Skipped)
+                text(&job.config, "channel") == text(config, "channel") && uses_media_slot(job)
             })
             .count(),
     )
@@ -23,7 +27,8 @@ pub(super) fn can_scan(snapshot: &Snapshot) -> bool {
     snapshot.mode == Mode::Running && free_slots(snapshot) > 0
 }
 
-// Keep at most ten admitted dramas. Discard only excess unstarted records;
+// Keep at most ten media-stage dramas; uploads have their own network queue.
+// Discard only excess unstarted records;
 // downloaded files and existing media/upload work must always finish safely.
 pub(super) fn normalize_group(snapshot: &mut Snapshot) {
     let Some(config) = snapshot.config.as_ref() else {
@@ -44,7 +49,7 @@ pub(super) fn normalize_group(snapshot: &mut Snapshot) {
     let reserved = snapshot
         .jobs
         .iter()
-        .filter(|j| text(&j.config, "channel") == channel && unfinished(j) && started(j))
+        .filter(|j| text(&j.config, "channel") == channel && uses_media_slot(j) && started(j))
         .count();
     let mut free = GROUP_SIZE.saturating_sub(reserved);
     snapshot.jobs.retain(|j| {
@@ -98,7 +103,7 @@ pub(super) fn select(snapshot: &Snapshot, busy: &HashSet<String>, timestamp: u64
     }
     // Members advance independently. The scanner fills only vacant slots.
     let in_window = |j: &Task| {
-        !matches!(j.status, Status::Completed | Status::Skipped)
+        uses_media_slot(j)
             && (j.download_admitted
                 || !j.files.is_empty()
                 || !matches!(j.stage.as_str(), "inspect" | "download"))
