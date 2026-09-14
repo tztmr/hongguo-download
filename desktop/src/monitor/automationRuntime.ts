@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 export type AutomationSecrets = Partial<Record<"text" | "image", string>>;
 export type AutomationJob = {
   id: string; title: string; bookId: string; season?: number; stage: string;
+  queueOrder?: number;
   status: "pending" | "working" | "review" | "failed" | "completed" | "skipped" | "observing";
   mediaState?: "queued" | "running" | "paused";
   message: string; episodeDone: number; episodeTotal: number; progress: number;

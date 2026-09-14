@@ -3,7 +3,30 @@ use crate::{youtube::duplicates::inferred_season, AppError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+static LAST_QUEUE_ORDER: AtomicU64 = AtomicU64::new(0);
+
+fn next_queue_order() -> u64 {
+    let wall_clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    loop {
+        let previous = LAST_QUEUE_ORDER.load(Ordering::Relaxed);
+        let next = wall_clock.max(previous.saturating_add(1));
+        if LAST_QUEUE_ORDER
+            .compare_exchange(previous, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
 
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -356,6 +379,10 @@ pub struct Task {
     pub download_admitted: bool,
     #[serde(default)]
     pub cleanup_version: u32,
+    /// Stable admission order. Unlike `updated_at`, this never changes when
+    /// progress, retries, or a media stage updates the task.
+    #[serde(default)]
+    pub queue_order: u64,
     pub id: String,
     pub title: String,
     pub book_id: String,
@@ -425,6 +452,7 @@ impl Task {
             duration_check: None,
             download_admitted: false,
             cleanup_version: 0,
+            queue_order: next_queue_order(),
             id,
             title: source.title.clone(),
             book_id: source.book_id.clone(),

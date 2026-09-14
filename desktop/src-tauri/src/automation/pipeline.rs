@@ -3,6 +3,12 @@ use std::collections::HashSet;
 
 pub(super) const GROUP_SIZE: usize = 10;
 
+fn queue_order(left: &Task, right: &Task) -> std::cmp::Ordering {
+    left.queue_order
+        .cmp(&right.queue_order)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
 pub(super) fn uses_media_slot(job: &Task) -> bool {
     !matches!(job.status, Status::Completed | Status::Skipped)
         && !matches!(job.stage.as_str(), "upload" | "short" | "cleanup" | "done")
@@ -31,6 +37,39 @@ pub(super) fn can_scan(snapshot: &Snapshot) -> bool {
 // Discard only excess unstarted records;
 // downloaded files and existing media/upload work must always finish safely.
 pub(super) fn normalize_group(snapshot: &mut Snapshot) {
+    // Backfill records written before v0.4.6 using their persisted array
+    // order, then keep the queue sorted after every state transition.
+    let missing = snapshot
+        .jobs
+        .iter()
+        .chain(snapshot.waiting.iter())
+        .filter(|job| job.queue_order == 0)
+        .count() as u64;
+    let first_existing = snapshot
+        .jobs
+        .iter()
+        .chain(snapshot.waiting.iter())
+        .filter_map(|job| (job.queue_order > 0).then_some(job.queue_order))
+        .min();
+    if first_existing.is_some_and(|value| value <= missing) {
+        for job in snapshot
+            .jobs
+            .iter_mut()
+            .chain(snapshot.waiting.iter_mut())
+            .filter(|job| job.queue_order > 0)
+        {
+            job.queue_order = job.queue_order.saturating_add(missing);
+        }
+    }
+    let mut next = first_existing
+        .map(|value| value.saturating_sub(missing).max(1))
+        .unwrap_or(1);
+    for job in snapshot.jobs.iter_mut().chain(snapshot.waiting.iter_mut()) {
+        if job.queue_order == 0 {
+            job.queue_order = next;
+            next = next.saturating_add(1);
+        }
+    }
     let Some(config) = snapshot.config.as_ref() else {
         return;
     };
@@ -63,6 +102,7 @@ pub(super) fn normalize_group(snapshot: &mut Snapshot) {
             false
         }
     });
+    snapshot.jobs.sort_by(queue_order);
 }
 
 // Separate lanes keep slow network calls and media result polling from
@@ -90,11 +130,12 @@ pub(super) fn select(snapshot: &Snapshot, busy: &HashSet<String>, timestamp: u64
         return Vec::new();
     };
     let capacity = GROUP_SIZE;
-    let jobs: Vec<_> = snapshot
+    let mut jobs: Vec<_> = snapshot
         .jobs
         .iter()
         .filter(|j| text(&j.config, "channel") == text(config, "channel"))
         .collect();
+    jobs.sort_by(|left, right| queue_order(left, right));
     let mut occupied = [0usize; 8];
     for job in &jobs {
         if busy.contains(&job.id) {

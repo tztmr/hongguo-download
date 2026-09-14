@@ -261,6 +261,40 @@ fn each_concurrent_group_admits_ten_downloads_and_counts_busy_first_episodes() {
 }
 
 #[test]
+fn dispatch_order_uses_persisted_queue_order_instead_of_status_updates() {
+    let mut state = Snapshot {
+        config: Some(config()),
+        mode: Mode::Running,
+        ..Default::default()
+    };
+    for (id, order) in [("later", 30), ("first", 10), ("middle", 20)] {
+        let mut job = task();
+        job.id = id.into();
+        job.stage = "merge".into();
+        job.queue_order = order;
+        state.jobs.push(job);
+    }
+    assert_eq!(
+        pipeline::select(&state, &HashSet::new(), now()),
+        ["first", "middle", "later"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    );
+
+    // Progress/status changes must never change the dispatch order.
+    state.jobs[0].status = Status::Working;
+    state.jobs[0].updated_at = now() + 10;
+    assert_eq!(
+        pipeline::select(&state, &HashSet::new(), now()),
+        ["first", "middle", "later"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn full_group_keeps_all_media_stages_advancing_and_ignores_other_channels() {
     let mut state = Snapshot {
         config: Some(config()),

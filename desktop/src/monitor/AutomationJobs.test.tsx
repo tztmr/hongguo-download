@@ -30,6 +30,18 @@ it("keeps queue order and an open task while polling changes status and timestam
   expect(cards[0].querySelector("details")!.open).toBe(true);
   expect(cards[0].querySelector("progress")!.value).toBe(20);
 });
+
+it("uses persisted queue order when a refreshed snapshot arrives in another order", () => {
+  const jobs = [
+    { ...job(3), queueOrder: 30 },
+    { ...job(1), queueOrder: 10 },
+    { ...job(2), queueOrder: 20 },
+  ];
+  const view = render(board(jobs));
+  expect(view.getAllByRole("article").map(card => card.getAttribute("aria-label"))).toEqual(["剧目1任务", "剧目2任务", "剧目3任务"]);
+  view.rerender(board(jobs.slice().reverse().map(item => ({ ...item, updatedAt: 3000 }))));
+  expect(view.getAllByRole("article").map(card => card.getAttribute("aria-label"))).toEqual(["剧目1任务", "剧目2任务", "剧目3任务"]);
+});
 it("keeps the current page stable when other jobs progress and new jobs are appended", () => {
   const jobs = Array.from({ length: 25 }, (_, i) => job(i + 1));
   const view = render(board(jobs));

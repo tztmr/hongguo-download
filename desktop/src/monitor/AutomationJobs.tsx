@@ -24,9 +24,14 @@ export function AutomationJobs({ jobs, loaded, pending, onAction }: { jobs: Auto
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const counts = { active: jobs.filter(job => !finished(job)).length, attention: jobs.filter(attention).length, completed: jobs.filter(finished).length, all: jobs.length };
-  // The backend appends jobs in queue order. Polling changes status and updatedAt
-  // even while a media job waits, so neither value is a stable display order.
-  const visible = jobs.filter(job => (filter === "all" || filter === "active" && !finished(job) || filter === "attention" && attention(job) || filter === "completed" && finished(job)) && `${job.title} ${job.bookId}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  // Polling changes status and updatedAt even while a media job waits. Use the
+  // persisted queue order when available, while preserving legacy array order.
+  const ordered = jobs.some(job => Number.isFinite(job.queueOrder))
+    ? jobs.map((job, index) => ({ job, index })).sort((left, right) =>
+      (left.job.queueOrder ?? Number.MAX_SAFE_INTEGER) - (right.job.queueOrder ?? Number.MAX_SAFE_INTEGER)
+      || left.index - right.index).map(({ job }) => job)
+    : jobs;
+  const visible = ordered.filter(job => (filter === "all" || filter === "active" && !finished(job) || filter === "attention" && attention(job) || filter === "completed" && finished(job)) && `${job.title} ${job.bookId}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
   const pages = Math.max(1, Math.ceil(visible.length / 20));
   const currentPage = Math.min(page, pages);
   useEffect(() => setPage(1), [filter, query]);
