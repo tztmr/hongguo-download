@@ -1,5 +1,6 @@
-use super::{model::*, source, Service};
+use super::{Service, model::*, source};
 use crate::{
+    AppError, AppState,
     media::model::{MediaJobOutputKind, MediaJobScope, MediaJobStatus, MergeMode, StartMergeInput},
     media::{MediaJob, MediaJobKind, MediaTools, StartAIJobRequest, StartMergeRequest},
     youtube::{
@@ -8,9 +9,8 @@ use crate::{
         models::{PrivacyStatus, UploadIntent, YouTubeJobStatus},
         subtitles::SubtitleRequest,
     },
-    AppError, AppState,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -410,7 +410,7 @@ pub async fn advance(
             return Err(AppError::new(
                 "AUTOMATION_STAGE_INVALID",
                 "未知任务阶段，保留记录等待检查",
-            ))
+            ));
         }
     }
     Ok(())
@@ -1390,7 +1390,7 @@ async fn upload(
     Ok(())
 }
 async fn short(app: &AppHandle, service: &Arc<Service>, task: &mut Task) -> Result<(), AppError> {
-    if !flag(&task.config, "firstEpisodeShorts") || task.short_done {
+    if !task.shorts_required() || task.short_done {
         task.next("cleanup", "全部启用的上传已完成");
         return Ok(());
     }
@@ -1491,7 +1491,7 @@ mod cleanup_files;
 mod duration;
 
 fn cleanup(task: &mut Task) -> Result<String, AppError> {
-    if !task.main_done || (flag(&task.config, "firstEpisodeShorts") && !task.short_done) {
+    if !task.main_done || (task.shorts_required() && !task.short_done) {
         return Err(AppError::new(
             "AUTOMATION_CLEANUP_BLOCKED",
             "上传尚未完成，保留所有文件",

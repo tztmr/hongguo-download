@@ -16,8 +16,8 @@ use std::{
     collections::HashSet,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
 };
 use tauri::{AppHandle, Manager, State};
@@ -63,7 +63,7 @@ impl Service {
                 && flag(&job.config, "deleteEpisodes")
                 && flag(&job.config, "deleteFinal")
                 && job.main_done
-                && (!flag(&job.config, "firstEpisodeShorts") || job.short_done)
+                && (!job.shorts_required() || job.short_done)
             {
                 job.stage = "cleanup".into();
                 job.status = Status::Pending;
@@ -254,7 +254,7 @@ impl Service {
                     return Err(AppError::new(
                         "AUTOMATION_INVALID_ACTION",
                         "不支持的运行操作",
-                    ))
+                    ));
                 }
             }
             Ok(())
@@ -294,7 +294,7 @@ impl Service {
                     return Err(AppError::new(
                         "AUTOMATION_INVALID_ACTION",
                         "此任务当前不能执行该操作",
-                    ))
+                    ));
                 }
             }
             s.log(Some(id.into()), format!("任务操作：{action}"));

@@ -168,6 +168,19 @@ fn cleanup_waits_for_main_and_every_enabled_short_output() {
 }
 
 #[test]
+fn cleanup_waits_for_recorded_short_work_even_if_setting_is_missing() {
+    let mut f = Fixture::new();
+    let path = f.owned("成片.mp4");
+    f.task.short_merge_job = Some("short-merge-in-flight".into());
+    let error = cleanup(&mut f.task).unwrap_err();
+    assert_eq!(error.code, "AUTOMATION_CLEANUP_BLOCKED");
+    assert!(
+        path.exists(),
+        "main media must remain while Shorts is pending"
+    );
+}
+
+#[test]
 fn cleanup_deletes_owned_media_but_preserves_untracked_media_and_receipts() {
     let mut f = Fixture::new();
     let episode = f.owned("0001_episode_auto.mp4");
@@ -469,11 +482,13 @@ fn duration_cache_rechecks_replaced_media_and_preserves_missing_media_recovery()
         48518.0
     );
     fs::remove_file(&file).unwrap();
-    assert!(duration::inspect(&file, None, |_| panic!(
-        "missing file belongs to existing recovery flow"
-    ))
-    .unwrap()
-    .is_none());
+    assert!(
+        duration::inspect(&file, None, |_| panic!(
+            "missing file belongs to existing recovery flow"
+        ))
+        .unwrap()
+        .is_none()
+    );
 }
 
 #[test]

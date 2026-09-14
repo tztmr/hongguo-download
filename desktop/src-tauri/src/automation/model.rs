@@ -1,7 +1,7 @@
 use super::source::{Candidate, Episode};
-use crate::{youtube::duplicates::inferred_season, AppError};
+use crate::{AppError, youtube::duplicates::inferred_season};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     path::PathBuf,
@@ -551,6 +551,18 @@ impl Task {
     }
     pub fn upload_id(&self, short: bool) -> String {
         format!("auto-{}-{}", self.id, if short { "short" } else { "main" })
+    }
+
+    /// A Shorts flow remains part of the cleanup contract once it was enabled
+    /// or any of its durable outputs/handles were recorded. This protects
+    /// in-flight tasks when an older snapshot omitted the setting or a later
+    /// settings edit no longer reflects the task's original intent.
+    pub fn shorts_required(&self) -> bool {
+        flag(&self.config, "firstEpisodeShorts")
+            || self.short_merge_job.is_some()
+            || self.short_path.is_some()
+            || self.short_metadata.is_some()
+            || !self.short_video_url.is_empty()
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
