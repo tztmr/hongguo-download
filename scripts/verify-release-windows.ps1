@@ -53,9 +53,9 @@ try {
         }
         Write-Host "Passed running application $Pass in a Unicode path"
     }
-    $AppProcess = Start-Process -FilePath $App -PassThru
-    Start-Sleep -Seconds 5
-    if ($AppProcess.HasExited) { throw 'Updated application failed to start' }
+    $Version = (Get-Content (Join-Path $PSScriptRoot '../desktop/src-tauri/tauri.conf.json') -Raw | ConvertFrom-Json).version
+    python (Join-Path $PSScriptRoot 'verify-app-startup.py') $App $Version
+    if ($LASTEXITCODE -ne 0) { throw 'Installed application API startup verification failed' }
 }
 finally {
     if ($AppProcess -and -not $AppProcess.HasExited) {

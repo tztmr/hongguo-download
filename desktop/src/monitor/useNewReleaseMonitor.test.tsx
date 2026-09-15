@@ -129,6 +129,22 @@ describe("useNewReleaseMonitor", () => {
     expect(model.result.current.error).toBe("network down");
   });
 
+  it("shows a native startup error and recovers when refresh is retried", async () => {
+    const api = { fetchNewReleases: vi.fn()
+      .mockRejectedValueOnce({ code: "API_STARTUP_TIMEOUT", message: "本地 API 暂未就绪，请稍后点击重试" })
+      .mockResolvedValueOnce(page(["recovered"])) };
+    const notifications = { getStatus: vi.fn(), send: vi.fn() };
+    const local = storage();
+    const model = renderHook(() => useNewReleaseMonitor({ api, storage: local, notifications, enabled: true, notify: false }));
+    await act(flush);
+    expect(model.result.current.error).toBe("本地 API 暂未就绪，请稍后点击重试");
+    expect(model.result.current.scanComplete).toBe(false);
+    await act(async () => { await model.result.current.refresh(); });
+    expect(model.result.current.error).toBe("");
+    expect(model.result.current.items.map(item => item.bookId)).toEqual(["recovered"]);
+    expect(model.result.current.scanComplete).toBe(true);
+  });
+
   it("starts a request for the latest type after an older request finishes", async () => {
     let resolvePlaylet!: (value: NewReleasePage) => void;
     const pending = new Promise<NewReleasePage>((resolve) => { resolvePlaylet = resolve; });

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { errorMessage } from "../errors";
 import type { NotificationAdapter } from "../notifications";
 import type { NewReleasePage, NewReleaseType, SeriesItem } from "../types";
 import { releaseCategoryNames, releaseCategoryOptions } from "./categories";
@@ -161,7 +162,7 @@ export function useNewReleaseMonitor({ api, storage, notifications, enabled, not
       }
     };
     const operation = run().catch((reason) => {
-      if (valid()) setError(reason instanceof Error ? reason.message : String(reason));
+      if (valid()) setError(errorMessage(reason));
     }).finally(() => {
       if (inFlight.current?.generation === requestedGeneration) inFlight.current = null;
       if (valid()) setLoading(false);

@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(debug_assertions)]
 use std::process::{Child, Stdio};
+#[cfg(test)]
+use std::thread;
 use std::{
     collections::HashMap,
     fs,
@@ -12,14 +14,15 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex, OnceLock},
-    thread,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 #[cfg(not(debug_assertions))]
 use tauri_plugin_shell::{process::CommandChild, ShellExt};
 
+mod api_startup;
+use api_startup::{ensure_api_ready, ApiReadiness};
 pub mod app_error;
 pub mod automation;
 use automation::{
@@ -29,6 +32,7 @@ use automation::{
 pub mod media;
 mod platform_fs;
 mod settings;
+mod startup_probe;
 pub mod youtube;
 use app_error::AppError;
 use media::{
@@ -43,7 +47,6 @@ use youtube::{
     service::{YouTubeEventSink, YouTubeService},
 };
 
-const API_CONTRACT: &str = "hongguo-desktop-v2";
 const MEDIA_JOB_PROGRESS_EVENT: &str = "media-job-progress";
 const AI_COMPONENT_PROGRESS_EVENT: &str = "ai-component-progress";
 const YOUTUBE_JOB_PROGRESS_EVENT: &str = "youtube-job-progress";
@@ -61,7 +64,7 @@ const EMBEDDED_AI_COMPONENT_MANIFEST: &str = include_str!(concat!(
 struct AppState {
     client: Client,
     api_base: String,
-    api_ready: Arc<OnceLock<AppResult<()>>>,
+    api_ready: Arc<ApiReadiness>,
     api_child: Mutex<Option<ApiChild>>,
     settings: Mutex<AppSettings>,
     settings_path: PathBuf,
@@ -111,11 +114,6 @@ fn reserve_api_port() -> AppResult<u16> {
         .local_addr()
         .map(|address| address.port())
         .map_err(|e| err(format!("读取本地 API 端口失败: {e}")))
-}
-
-fn health_matches_contract(value: &Value) -> bool {
-    value.get("status").and_then(Value::as_str) == Some("ok")
-        && value.get("api_contract").and_then(Value::as_str) == Some(API_CONTRACT)
 }
 
 #[cfg(debug_assertions)]
@@ -199,40 +197,6 @@ fn get_json(client: &Client, api_base: &str, path: &str) -> AppResult<Value> {
     serde_json::from_str(&body).map_err(|e| err(format!("JSON 解析失败: {e}")))
 }
 
-fn wait_for_health(client: &Client, api_base: &str, timeout: Duration) -> AppResult<()> {
-    let start = Instant::now();
-    loop {
-        let remaining = timeout.saturating_sub(start.elapsed());
-        if remaining.is_zero() {
-            return Err(err("本地 API 启动超时，请重新打开应用"));
-        }
-        if let Ok(response) = client
-            .get(format!("{api_base}/health"))
-            .timeout(remaining.min(Duration::from_millis(500)))
-            .send()
-        {
-            if response.status().is_success() {
-                if let Ok(value) = response.json::<Value>() {
-                    if health_matches_contract(&value) {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(100).min(timeout.saturating_sub(start.elapsed())));
-    }
-}
-
-fn ensure_api_ready(
-    client: &Client,
-    api_base: &str,
-    ready: &OnceLock<AppResult<()>>,
-) -> AppResult<()> {
-    ready
-        .get_or_init(|| wait_for_health(client, api_base, Duration::from_secs(20)))
-        .clone()
-}
-
 enum ApiChild {
     #[cfg(debug_assertions)]
     Development(Child),
@@ -249,12 +213,13 @@ fn sidecar_spawn_error(error: impl std::fmt::Display) -> AppError {
     )
 }
 
-fn spawn_api(app: &AppHandle, port: u16, download_proxy: Option<&str>) -> AppResult<ApiChild> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| err(format!("应用数据目录失败: {e}")))?;
-    fs::create_dir_all(&data_dir).map_err(|e| err(format!("创建应用数据目录失败: {e}")))?;
+fn spawn_api(
+    _app: &AppHandle,
+    port: u16,
+    data_dir: &Path,
+    download_proxy: Option<&str>,
+) -> AppResult<ApiChild> {
+    fs::create_dir_all(data_dir).map_err(|e| err(format!("创建应用数据目录失败: {e}")))?;
 
     let playback_tools = std::env::current_exe()
         .ok()
@@ -295,11 +260,11 @@ fn spawn_api(app: &AppHandle, port: u16, download_proxy: Option<&str>) -> AppRes
 
     #[cfg(not(debug_assertions))]
     {
-        let command = app
+        let command = _app
             .shell()
             .sidecar("hongguo-api")
             .map_err(sidecar_spawn_error)?
-            .args(release_api_args(port, &data_dir));
+            .args(release_api_args(port, data_dir));
         let mut command = command;
         if let Some(directory) = &playback_tools {
             command = command.env("HONGGUO_PLAYBACK_TOOLS_DIR", directory);
@@ -331,40 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn startup_health_timeout_bounds_a_server_that_accepts_without_responding() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let (release, wait) = std::sync::mpsc::channel();
-        let server = thread::spawn(move || {
-            let (_connection, _) = listener.accept().unwrap();
-            let _ = wait.recv_timeout(Duration::from_secs(2));
-        });
-        let client = Client::builder().no_proxy().build().unwrap();
-        let start = Instant::now();
-        let result = wait_for_health(&client, &base, Duration::from_millis(80));
-        let elapsed = start.elapsed();
-        release.send(()).unwrap();
-        server.join().unwrap();
-        assert!(result.is_err());
-        assert!(elapsed < Duration::from_secs(1));
-    }
-
-    #[test]
     fn api_base_uses_the_reserved_port() {
         // Production mutation caught: constructing requests against a port other than the reservation.
         assert_eq!(api_base_for_port(49152), "http://127.0.0.1:49152");
-    }
-
-    #[test]
-    fn api_sidecar_health_requires_the_current_desktop_api_contract() {
-        // Production mutation caught: accepting a generic status response from an incompatible API.
-        assert!(health_matches_contract(&serde_json::json!({
-            "status": "ok",
-            "api_contract": "hongguo-desktop-v2"
-        })));
-        assert!(!health_matches_contract(
-            &serde_json::json!({ "status": "ok" })
-        ));
     }
 
     #[test]
@@ -1754,23 +1688,40 @@ fn load_ai_component_manager(
 }
 
 pub fn run() {
+    let probe_dir = startup_probe::directory();
+    let mut context = tauri::generate_context!();
+    if probe_dir.is_some() {
+        context.config_mut().app.windows.clear();
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
-        .setup(|app| {
-            let config_dir = app
-                .path()
-                .app_config_dir()
-                .map_err(|e| format!("应用配置目录失败: {e}"))?;
+        .setup(move |app| {
+            let config_dir = if let Some(root) = &probe_dir {
+                root.join("config")
+            } else {
+                app.path()
+                    .app_config_dir()
+                    .map_err(|e| format!("应用配置目录失败: {e}"))?
+            };
             let settings_path = config_dir.join("settings.json");
-            let settings = load_settings(&settings_path, default_save_dir());
+            let settings = load_settings(
+                &settings_path,
+                probe_dir
+                    .as_ref()
+                    .map(|root| root.join("downloads"))
+                    .unwrap_or_else(default_save_dir),
+            );
             fs::create_dir_all(&settings.save_dir).ok();
-            let media_jobs_path = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("应用数据目录失败: {e}"))?;
+            let media_jobs_path = if let Some(root) = &probe_dir {
+                root.join("data")
+            } else {
+                app.path()
+                    .app_data_dir()
+                    .map_err(|e| format!("应用数据目录失败: {e}"))?
+            };
             let media_job_manager = std::sync::Arc::new(
                 MediaJobManager::load(&media_jobs_path).map_err(|e| e.to_string())?,
             );
@@ -1794,8 +1745,13 @@ pub fn run() {
                     .map_err(|e| e.to_string())?;
             }
             let child = Some(
-                spawn_api(app.handle(), port, settings.download_proxy.as_deref())
-                    .map_err(|e| e.to_string())?,
+                spawn_api(
+                    app.handle(),
+                    port,
+                    &media_jobs_path,
+                    settings.download_proxy.as_deref(),
+                )
+                .map_err(|e| e.to_string())?,
             );
             let event_sink = std::sync::Arc::new(TauriMediaJobEventSink {
                 app: app.handle().clone(),
@@ -1835,7 +1791,7 @@ pub fn run() {
                 automation: automation.clone(),
                 client,
                 api_base,
-                api_ready: Arc::new(OnceLock::new()),
+                api_ready: Arc::new(ApiReadiness::default()),
                 api_child: Mutex::new(child),
                 settings: Mutex::new(settings),
                 settings_path,
@@ -1844,7 +1800,11 @@ pub fn run() {
                 youtube,
                 prepared_series_assets: Arc::new(PreparedSeriesAssets::default()),
             });
-            automation.spawn(app.handle().clone());
+            if let Some(directory) = &probe_dir {
+                startup_probe::start(app.handle().clone(), directory.clone());
+            } else {
+                automation.spawn(app.handle().clone());
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1920,6 +1880,6 @@ pub fn run() {
             upload_youtube_subtitle,
             mark_youtube_job_notified
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("tauri-run-failed");
 }

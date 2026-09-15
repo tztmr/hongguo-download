@@ -50,3 +50,5 @@ artifact_paths="$(
 app_path="${artifact_paths%%$'\n'*}"
 dmg_path="${artifact_paths#*$'\n'}"
 ./scripts/verify-release.sh "$app_path" "$dmg_path"
+
+python3 "$project_root/scripts/verify-app-startup.py" "$app_path/Contents/MacOS/hongguo-desktop" "$product_version"

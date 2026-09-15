@@ -727,7 +727,7 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              {(nav === "discover"
+              {!error && items.length > 0 && (nav === "discover"
                 ? discoveryPagingRef.current.hasMore || discoveryPagingRef.current.visibleCount < discoveryPagingRef.current.allItems.length
                 : nav === "search"
                   ? Boolean(submittedQuery) && (searchPagingRef.current.hasMore || searchPagingRef.current.visibleCount < searchPagingRef.current.allItems.length)
