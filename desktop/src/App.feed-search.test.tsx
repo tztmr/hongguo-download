@@ -127,6 +127,42 @@ describe("App feed and search controls", () => {
     apiMocks.fetchSearchAll.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
   });
 
+  it.each(["全部", "真人剧"])("keeps scrolling %s home results past 100 through the paginated library", async (type) => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(Array.from({ length: 6 }, (_, i) => series(i)), 6, false));
+    apiMocks.fetchRank.mockResolvedValue(rankPage([], 0, false));
+    apiMocks.fetchWebCategory.mockImplementation(async (_type, _filters, number) => ({
+      items: Array.from({ length: 24 }, (_, i) => series(1000 + (number - 1) * 24 + i)),
+      nextPage: number + 1, hasMore: number < 10, total: 240,
+    }));
+    const view = render(<App />);
+    if (type === "真人剧") fireEvent.click(view.getByRole("button", { name: "真人剧" }));
+    await view.findByRole("button", { name: "加载更多" });
+    const scroller = view.container.querySelector(".library-main") as HTMLElement;
+    for (let count = 0; count < 6; count++) {
+      const before = view.container.querySelectorAll(".poster-card").length;
+      fireEvent.scroll(scroller);
+      await waitFor(() => expect(view.container.querySelectorAll(".poster-card").length).toBeGreaterThan(before));
+    }
+    expect(view.container.querySelectorAll(".poster-card").length).toBeGreaterThan(100);
+    expect(apiMocks.fetchDiscoveryMore).not.toHaveBeenCalled();
+    const pages = apiMocks.fetchWebCategory.mock.calls.map(call => call[2]);
+    expect(pages).toEqual(Array.from({ length: pages.length }, (_, i) => i + 1));
+    expect(view.getByRole("button", { name: "加载更多" })).toBeTruthy();
+  });
+
+  it("selects the current website category slug and retains it on the next page", async () => {
+    apiMocks.fetchWebCategoryGroups.mockResolvedValue([{ id: "topic", name: "分类", items: [{ id: "", name: "全部" }, { id: "romance", name: "爱情" }] }]);
+    apiMocks.fetchWebCategory.mockImplementation(async (_type, _filters, number) => ({ items: [series(888 + number, `爱情分类第${number}页`)], nextPage: number + 1, hasMore: true }));
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "分类浏览" }));
+    fireEvent.click(await view.findByRole("button", { name: "爱情" }));
+    await waitFor(() => expect(apiMocks.fetchWebCategory).toHaveBeenLastCalledWith("drama", expect.objectContaining({ topic: "romance" }), 1));
+    fireEvent.click(await view.findByRole("button", { name: "加载更多" }));
+    await waitFor(() => expect(apiMocks.fetchWebCategory).toHaveBeenLastCalledWith("drama", expect.objectContaining({ topic: "romance" }), 2));
+    await view.findByRole("heading", { name: "爱情分类第2页" });
+    expect(view.queryByRole("alert")).toBeNull();
+  });
+
   it("keeps healthy home sources and retries only the failed source", async () => {
     apiMocks.fetchDiscovery.mockImplementation(async type => { if (type === "manju") throw { message: "漫剧维护中" }; return discoveryPage([series(900, "真人推荐")], 0, false); });
     apiMocks.fetchRank.mockResolvedValue(rankPage([{ ...series(901, "AI来源推荐"), releaseType: "ai_playlet" }], 0, false));

@@ -1,4 +1,4 @@
-"""Public hongguoduanju.com category adapter (verified 2026-09-09).
+"""Public hongguoduanju.com category adapter (verified 2026-09-16).
 
 The site exposes its category dictionary in JSON inside /category HTML, and
 serves result pages from /api/category/page. No external JavaScript is executed.
@@ -12,6 +12,7 @@ from typing import Any
 from urllib.parse import urlencode
 
 WEB_ORIGIN = 'https://hongguoduanju.com'
+WEB_CATEGORY_URL = f'{WEB_ORIGIN}/category/real-drama'
 GROUPS = (
     ('background', '背景', ''),
     ('topic', '主题', ''),
@@ -60,7 +61,8 @@ def parse_selector_html(html: str) -> list[dict]:
             continue
         try:
             data, _ = json.JSONDecoder().raw_decode(script[assignment.end():])
-            candidate = data.get('loaderData', {}).get('category_page')
+            loaders = data.get('loaderData', {})
+            candidate = loaders.get('category_$') or loaders.get('category_page')
         except (ValueError, AttributeError):
             continue
         if isinstance(candidate, dict):
@@ -71,6 +73,31 @@ def parse_selector_html(html: str) -> list[dict]:
     rows = page.get('selectorList')
     if not isinstance(rows, list):
         raise CatalogFormatError('官网分类字典缺少筛选维度')
+    route = page.get('categoryRoute')
+    if isinstance(route, dict) and route.get('contentType') == 'real-drama':
+        # The current site exposes one topic dimension with route slugs and RPC IDs.
+        # These are not the old cate_N values used by background/topic/setting.
+        items = [{'id': '', 'name': '全部'}]
+        seen = {''}
+        for row in rows:
+            if not isinstance(row, dict) or str(row.get('row_id')) != '1':
+                continue
+            options = row.get('items')
+            if not isinstance(options, list):
+                continue
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                slug, label = _text(option.get('selector_item_id')), _text(option.get('show_name'))
+                ids = option.get('category_json_ids')
+                if (re.fullmatch(r'[a-z][a-z0-9-]*', slug) and label and slug not in seen
+                        and isinstance(ids, list) and ids
+                        and all(isinstance(value, str) and value.isdigit() for value in ids)):
+                    items.append({'id': slug, 'name': label, 'category_json_ids': list(dict.fromkeys(ids))})
+                    seen.add(slug)
+        if len(items) == 1:
+            raise CatalogFormatError('官网分类字典的分类选项为空')
+        return [{'id': 'topic', 'name': '分类', 'items': items}]
     result = []
     for row_id, (group_id, name, default) in enumerate(GROUPS, start=1):
         row = next((row for row in rows if isinstance(row, dict) and str(row.get('row_id')) == str(row_id)), None)
@@ -92,14 +119,16 @@ def parse_selector_html(html: str) -> list[dict]:
     return result
 
 
-def build_category_url(*, background='', topic='', setting='', gender='2', time='0', sort_type='0', page=1) -> str:
+def build_category_url(*, background='', topic='', setting='', gender='2', time='0', sort_type='0', page=1, category_json_ids=None) -> str:
     # min_first_visible_time is the site's 0..4 interval enum, not a timestamp.
     params = {
-        'tab': '1', 'min_first_visible_time': time, 'gender': gender,
+        'tab': '1', 'content_type': '1', 'min_first_visible_time': time, 'gender': gender,
         'sort_type': sort_type, 'page_num': page,
     }
     categories = [value for value in (topic, setting, background) if value]
-    if categories:
+    if category_json_ids:
+        params['category_json_ids'] = ','.join(category_json_ids)
+    elif categories:
         params['categories_v2'] = ','.join(categories)
     return f'{WEB_ORIGIN}/api/category/page?{urlencode(params)}'
 
@@ -159,5 +188,5 @@ def parse_category_page(payload: Any, *, page: int) -> dict:
         'items': items, 'page': page_number, 'page_size': page_size,
         'next_page': page_number + 1 if has_more else None,
         'has_more': has_more, 'total': total,
-        'source': 'hongguo_web', 'source_url': f'{WEB_ORIGIN}/category',
+        'source': 'hongguo_web', 'source_url': WEB_CATEGORY_URL,
     }

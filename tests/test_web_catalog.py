@@ -35,6 +35,16 @@ def selector_html(rows=None):
     return '<html><script>_ROUTER_DATA = ' + json.dumps(data) + ';</script></html>'
 
 
+def modern_selector_html():
+    return '<script>window._ROUTER_DATA = ' + json.dumps({"loaderData": {"category_$": {
+        "isSuccess": True, "categoryRoute": {"contentType": "real-drama"},
+        "selectorList": [{"row_id": 1, "items": [
+            {"selector_item_id": "romance", "show_name": "爱情", "category_json_ids": ["5000"]},
+            {"selector_item_id": "urban", "show_name": "都市", "category_json_ids": ["5022"]},
+        ]}],
+    }}}) + ';</script>'
+
+
 def category_payload(page=1, total=25):
     return {
         "isSuccess": True, "pageNum": page, "pageSize": 24, "total": total,
@@ -56,6 +66,17 @@ class WebCatalogParserTests(unittest.TestCase):
             {"id": "2", "name": "全部"}, {"id": "1", "name": "男频"}, {"id": "0", "name": "女频"},
         ])
         self.assertNotIn("webID", json.dumps(groups))
+
+    def test_current_route_dictionary_preserves_slugs_and_rpc_category_ids(self):
+        groups = parse_selector_html(modern_selector_html())
+        self.assertEqual([group["id"] for group in groups], ["topic"])
+        self.assertEqual(groups[0]["items"][1], {"id": "romance", "name": "爱情", "category_json_ids": ["5000"]})
+        url = build_category_url(topic="romance", category_json_ids=["5000"], page=6)
+        params = parse_qs(urlparse(url).query)
+        self.assertEqual(params["content_type"], ["1"])
+        self.assertEqual(params["category_json_ids"], ["5000"])
+        self.assertNotIn("categories_v2", params)
+        self.assertEqual(params["page_num"], ["6"])
 
     def test_category_url_keeps_combined_facets_and_time_enum(self):
         url = build_category_url(background="cate_757", topic="cate_1021", setting="cate_36", gender="0", time="1", sort_type="2", page=2)
@@ -105,7 +126,7 @@ class WebCatalogEndpointTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_combined_filters_page_and_default_have_separate_cache_keys(self):
         async def fetch(url):
-            if url.endswith('/category'):
+            if '/category' in url and '/api/' not in url:
                 return selector_html()
             params = parse_qs(urlparse(url).query)
             return category_payload(page=int(params["page_num"][0]))
@@ -138,6 +159,35 @@ class WebCatalogEndpointTests(unittest.IsolatedAsyncioTestCase):
             second = await self.client.get('/api/duanju/web-category')
             self.assertEqual(second.status_code, 200)
             self.assertEqual(upstream.await_count, 2)
+
+    async def test_current_classification_validates_slug_and_forwards_rpc_ids_on_every_page(self):
+        async def fetch(url):
+            if '/api/' not in url:
+                return modern_selector_html()
+            return category_payload(page=int(parse_qs(urlparse(url).query)["page_num"][0]), total=800)
+        with patch.object(web_catalog, "_fetch_public", new=AsyncMock(side_effect=fetch)) as upstream:
+            groups = await self.client.get('/api/duanju/web-categories')
+            self.assertEqual(groups.json()["data"]["groups"][0]["items"][1]["name"], "爱情")
+            for number in (1, 6):
+                response = await self.client.get(f'/api/duanju/web-category?topic=romance&page={number}')
+                self.assertEqual(response.status_code, 200)
+                params = parse_qs(urlparse(upstream.call_args.args[0]).query)
+                self.assertEqual(params['category_json_ids'], ['5000'])
+                self.assertEqual(params['page_num'], [str(number)])
+                self.assertTrue(response.json()['data']['has_more'])
+            for query in ('topic=unknown', 'background=cate_757'):
+                response = await self.client.get('/api/duanju/web-category?' + query)
+                self.assertEqual(response.status_code, 400)
+
+    async def test_public_category_fetch_follows_the_website_redirect(self):
+        def handler(request):
+            if request.url.path == '/category':
+                return httpx.Response(301, headers={'location': '/category/real-drama'})
+            return httpx.Response(200, text=modern_selector_html())
+        client_class = httpx.AsyncClient
+        with patch.object(httpx, 'AsyncClient', side_effect=lambda **kwargs: client_class(transport=httpx.MockTransport(handler), **kwargs)):
+            html = await web_catalog._fetch_public('https://hongguoduanju.com/category')
+        self.assertEqual(parse_selector_html(html)[0]['items'][1]['id'], 'romance')
 
     async def test_api_validates_enum_and_page_before_upstream_request(self):
         with patch.object(web_catalog, "_fetch_public", new=AsyncMock()) as upstream:

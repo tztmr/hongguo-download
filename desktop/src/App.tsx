@@ -8,9 +8,7 @@ import {
   downloadEpisode,
   fetchCatalog,
   fetchCategoryGroups,
-  fetchDiscovery,
   fetchDiscoveryByCategory,
-  fetchDiscoveryMore,
   fetchHealth,
   fetchRank,
   fetchSearch,
@@ -19,6 +17,7 @@ import {
   fetchNewReleases,
   revealPath,
 } from "./api";
+import { fetchHomeDiscovery, fetchHomeDiscoveryMore } from "./feed/homeDiscovery";
 import { AppRail } from "./components/AppRail";
 import { CategoryFilter } from "./components/CategoryFilter";
 import { CategoryBrowser } from "./components/CategoryBrowser";
@@ -382,11 +381,11 @@ export default function App() {
       const initial = createGroupedPagingState<SeriesItem, DiscoveryPage | null>(null);
       const result = await fillUniqueGroup(initial, async (cursor) => {
         const page = searchContentType === "all"
-          ? await combinedDiscovery(cursor, fetchDiscovery, fetchDiscoveryMore, fetchHomeAI)
-          : cursor ? await fetchDiscoveryMore(contentType, cursor)
+          ? await combinedDiscovery(cursor, fetchHomeDiscovery, fetchHomeDiscoveryMore, fetchHomeAI)
+          : cursor ? await fetchHomeDiscoveryMore(contentType, cursor)
           : selectedCategory
             ? await fetchDiscoveryByCategory(contentType, selectedCategory)
-            : await fetchDiscovery(contentType);
+            : await fetchHomeDiscovery(contentType);
         return { items: page.items, nextCursor: page, hasMore: page.hasMore };
       }, { maxRequests: 1 });
       if (requestId !== pageRequestRef.current) return;
@@ -412,7 +411,7 @@ export default function App() {
     const requestId = ++pageRequestRef.current;
     setLoading(true);
     try {
-      const page = await combinedDiscovery(current.cursor, fetchDiscovery, fetchDiscoveryMore, fetchHomeAI, true);
+      const page = await combinedDiscovery(current.cursor, fetchHomeDiscovery, fetchHomeDiscoveryMore, fetchHomeAI, true);
       if (requestId !== pageRequestRef.current) return;
       const allItems = [...new Map([...current.allItems, ...page.items].map(item => [item.bookId, item])).values()];
       const visibleCount = Math.min(Math.max(20, current.visibleCount), allItems.length);
@@ -434,8 +433,8 @@ export default function App() {
       const result = await fillUniqueGroup(current, async (cursor) => {
         if (!cursor) throw new Error("发现页分页状态丢失");
         const page = searchContentType === "all"
-          ? await combinedDiscovery(cursor as CombinedDiscoveryPage, fetchDiscovery, fetchDiscoveryMore, fetchHomeAI)
-          : await fetchDiscoveryMore(contentType, cursor);
+          ? await combinedDiscovery(cursor as CombinedDiscoveryPage, fetchHomeDiscovery, fetchHomeDiscoveryMore, fetchHomeAI)
+          : await fetchHomeDiscoveryMore(contentType, cursor);
         return { items: page.items, nextCursor: page, hasMore: page.hasMore };
       });
       if (requestId !== pageRequestRef.current) return;

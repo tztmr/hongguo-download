@@ -9,6 +9,7 @@ from core.cache import TTLCache, make_cache_key
 from core.response import error, success
 from core.web_catalog import (
     WEB_ORIGIN,
+    WEB_CATEGORY_URL,
     CatalogFormatError,
     build_category_url,
     parse_category_page,
@@ -21,10 +22,10 @@ _catalog_cache = TTLCache(default_ttl=60, max_size=256)
 
 
 async def _fetch_public(url: str):
-    async with httpx.AsyncClient(timeout=15.0, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json,text/html'}) as client:
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True, headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json,text/html'}) as client:
         response = await client.get(url)
         response.raise_for_status()
-        if url == f'{WEB_ORIGIN}/category':
+        if url.startswith(f'{WEB_ORIGIN}/category'):
             return response.text
         try:
             return response.json()
@@ -36,7 +37,7 @@ async def _load_groups():
     cached = _catalog_cache.get('groups')
     if cached is not None:
         return cached
-    groups = parse_selector_html(await _fetch_public(f'{WEB_ORIGIN}/category'))
+    groups = parse_selector_html(await _fetch_public(WEB_CATEGORY_URL))
     _catalog_cache.set('groups', groups, ttl=300)
     return groups
 
@@ -50,7 +51,7 @@ async def web_categories(content_type: str = Query('drama', pattern='^(drama|man
     if content_type != 'drama':
         return _unsupported_comics()
     try:
-        return success({'groups': await _load_groups(), 'source': 'hongguo_web', 'source_url': f'{WEB_ORIGIN}/category'})
+        return success({'groups': await _load_groups(), 'source': 'hongguo_web', 'source_url': WEB_CATEGORY_URL})
     except (httpx.HTTPError, CatalogFormatError) as exc:
         logger.warning('Public category dictionary failed: %s', type(exc).__name__)
         return error('官网分类暂不可用，请稍后重试', code=502, status_code=502)
@@ -60,7 +61,7 @@ async def web_categories(content_type: str = Query('drama', pattern='^(drama|man
 async def web_category(
     content_type: str = Query('drama', pattern='^(drama|manju)$'),
     background: str = Query('', pattern=r'^(cate_\d+)?$'),
-    topic: str = Query('', pattern=r'^(cate_\d+)?$'),
+    topic: str = Query('', pattern=r'^(cate_\d+|[a-z][a-z0-9-]*)?$'),
     setting: str = Query('', pattern=r'^(cate_\d+)?$'),
     gender: str = Query('2', pattern='^[012]$'),
     time: str = Query('0', pattern='^[0-4]$'),
@@ -75,12 +76,20 @@ async def web_category(
     if cached is not None:
         return success(cached)
     try:
+        category_json_ids = []
         if any((background, topic, setting)):
-            for group in await _load_groups():
-                selected = filters.get(group['id'])
-                if selected and str(selected) not in {option['id'] for option in group['items']}:
-                    return error(f"无效的{group['name']}筛选，请刷新分类后重试", status_code=400)
-        payload = await _fetch_public(build_category_url(**filters))
+            groups = {group['id']: group for group in await _load_groups()}
+            for key in ('background', 'topic', 'setting'):
+                selected = filters[key]
+                if not selected:
+                    continue
+                group = groups.get(key)
+                option = next((item for item in group['items'] if item['id'] == selected), None) if group else None
+                if option is None:
+                    name = group['name'] if group else '分类'
+                    return error(f"无效的{name}筛选，请刷新分类后重试", status_code=400)
+                category_json_ids.extend(option.get('category_json_ids', []))
+        payload = await _fetch_public(build_category_url(**filters, category_json_ids=category_json_ids))
         data = parse_category_page(payload, page=page)
     except (httpx.HTTPError, CatalogFormatError) as exc:
         logger.warning('Public category page failed: %s', type(exc).__name__)
