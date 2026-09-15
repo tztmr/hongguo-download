@@ -14,11 +14,13 @@ import {
 import { createTauriNotificationAdapter, type NotificationStatus } from "../notifications";
 import type { AIComponentProgress, AIComponentStatus, AppSettings, DevicePoolStatus } from "../types";
 import { errorMessage } from "../errors";
+import type { SavePhase } from "../components/SaveStatus";
 export { errorMessage } from "../errors";
 
 export type AppSettingsPatch = Partial<
   Omit<AppSettings, "version" | "warning">
 >;
+export type SettingsSaveResult = { ok: true } | { ok: false; message: string };
 
 export type AppSettingsDependencies = {
   getSettings(): Promise<AppSettings>;
@@ -42,7 +44,8 @@ export type UseAppSettingsResult = {
   components: AIComponentStatus[];
   devicePool: DevicePoolStatus | null;
   devicesLoading: boolean;
-  update(patch: AppSettingsPatch): Promise<void>;
+  savePhase: SavePhase;
+  update(patch: AppSettingsPatch): Promise<SettingsSaveResult>;
   chooseDirectory(): Promise<void>;
   openDirectory(): Promise<void>;
   installComponent(id: string): Promise<void>;
@@ -73,6 +76,7 @@ export function useAppSettings(
   const [loading, setLoading] = useState(true);
   const [warning, setWarning] = useState("");
   const [componentWarning, setComponentWarning] = useState("");
+  const [savePhase, setSavePhase] = useState<SavePhase>("idle");
   const [notificationPermission, setNotificationPermission] =
     useState<NotificationStatus>("prompt");
   const [components, setComponents] = useState<AIComponentStatus[]>([]);
@@ -82,7 +86,8 @@ export function useAppSettings(
   const pendingPatches = useRef<AppSettingsPatch[]>([]);
   const batchWarning = useRef("");
   const directoryPending = useRef(false);
-  const updateQueue = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaves = useRef(0);
+  const updateQueue = useRef<Promise<unknown>>(Promise.resolve());
   const [loadRevision, setLoadRevision] = useState(0);
 
   const publishSettings = useCallback(() => {
@@ -138,10 +143,24 @@ export function useAppSettings(
     };
   }, [dependencies]);
 
+  const beginSave = useCallback(() => {
+    if (!pendingSaves.current) { batchWarning.current = ""; setWarning(""); }
+    pendingSaves.current += 1;
+    setSavePhase("saving");
+  }, []);
+  const finishSave = useCallback(() => {
+    pendingSaves.current -= 1;
+    setSavePhase(pendingSaves.current ? "saving" : batchWarning.current ? "error" : "saved");
+  }, []);
+
   const update = useCallback(
     async (patch: AppSettingsPatch) => {
-      if (!confirmedSettings.current) return;
-      if (!pendingPatches.current.length) { batchWarning.current = ""; setWarning(""); }
+      if (!confirmedSettings.current) {
+        const message = "设置尚未读取成功，请重新读取后再保存";
+        setWarning(message); setSavePhase("error");
+        return { ok: false, message } as const;
+      }
+      beginSave();
       pendingPatches.current.push(patch);
       publishSettings();
       const operation = updateQueue.current.then(async () => {
@@ -149,35 +168,40 @@ export function useAppSettings(
           const saved = await dependencies.updateSettings(patch);
           confirmedSettings.current = saved;
           if (!batchWarning.current) setWarning(saved.warning || "");
+          return { ok: true } as const;
         } catch (error) {
           batchWarning.current = errorMessage(error);
           setWarning(batchWarning.current);
+          return { ok: false, message: batchWarning.current } as const;
         } finally {
           pendingPatches.current.splice(pendingPatches.current.indexOf(patch), 1);
           publishSettings();
+          finishSave();
         }
       });
       updateQueue.current = operation;
-      await operation;
+      return operation;
     },
-    [dependencies, publishSettings],
+    [dependencies, publishSettings, beginSave, finishSave],
   );
 
   const chooseDirectory = useCallback(async () => {
-    if (directoryPending.current) return;
+    if (directoryPending.current || !confirmedSettings.current) return;
     directoryPending.current = true;
+    beginSave();
     const operation = updateQueue.current.then(async () => { try {
       const saveDir = await dependencies.chooseSaveDir();
       if (!confirmedSettings.current) return;
       confirmedSettings.current = { ...confirmedSettings.current, saveDir };
       publishSettings();
-      setWarning("");
+      if (!batchWarning.current) setWarning("");
     } catch (error) {
-      setWarning(errorMessage(error));
-    } finally { directoryPending.current = false; } });
+      batchWarning.current = errorMessage(error);
+      setWarning(batchWarning.current);
+    } finally { directoryPending.current = false; finishSave(); } });
     updateQueue.current = operation;
     await operation;
-  }, [dependencies, publishSettings]);
+  }, [dependencies, publishSettings, beginSave, finishSave]);
 
   const openDirectory = useCallback(async () => {
     try {
@@ -241,6 +265,7 @@ export function useAppSettings(
     components,
     devicePool,
     devicesLoading,
+    savePhase,
     update,
     chooseDirectory,
     openDirectory,

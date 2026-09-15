@@ -1,23 +1,47 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { DefinitionPreference } from "../types";
 import type { UseAppSettingsResult } from "./useAppSettings";
 import type { YouTubeModel } from "../youtube/types";
 import { YouTubeSettings } from "../youtube/YouTubeSettings";
 import { MediaModelsSettings } from "./MediaModelsSettings";
+import { SaveStatus, type SavePhase } from "../components/SaveStatus";
+import { errorMessage } from "../errors";
 
 export function SettingsPage({ model, youtube, hidden = false }: { model: UseAppSettingsResult; youtube?: YouTubeModel; hidden?: boolean }) {
   const [proxyDraft, setProxyDraft] = useState<string | undefined>(undefined);
   const [mirrorDraft, setMirrorDraft] = useState<string | undefined>(undefined);
+  const [networkPhase, setNetworkPhase] = useState<SavePhase>("idle");
+  const [networkMessage, setNetworkMessage] = useState("");
+  const [networkSaving, setNetworkSaving] = useState(false);
+  const networkLock = useRef(false);
+  const networkRevision = useRef(0);
+  function editNetwork(field: "proxy" | "mirror", value: string) {
+    networkRevision.current += 1;
+    if (field === "proxy") setProxyDraft(value); else setMirrorDraft(value);
+    setNetworkPhase("dirty"); setNetworkMessage("");
+  }
   if (model.loading) {
     return <main hidden={hidden} className="settings-page loading-state">正在加载设置…</main>;
   }
   if (!model.settings) return <main hidden={hidden} className="settings-page"><h1>设置</h1><div className="warning-banner" role="alert">{model.warning || "设置读取失败，请重试"}</div>{model.reload && <button type="button" className="secondary-button" onClick={model.reload}>重新读取设置</button>}</main>;
   const settings = model.settings;
-  const saveNetworkSettings = () => {
-    void model.update({
-      downloadProxy: (proxyDraft ?? settings.downloadProxy ?? "").trim(),
-      downloadMirror: (mirrorDraft ?? settings.downloadMirror ?? "").trim(),
-    });
+  const saveNetworkSettings = async (reset = false) => {
+    if (networkLock.current) return;
+    networkLock.current = true;
+    if (reset) { networkRevision.current += 1; setProxyDraft(""); setMirrorDraft(""); }
+    const submittedRevision = networkRevision.current;
+    setNetworkSaving(true); setNetworkMessage("");
+    try {
+      const result = await model.update({
+        downloadProxy: reset ? "" : (proxyDraft ?? settings.downloadProxy ?? "").trim(),
+        downloadMirror: reset ? "" : (mirrorDraft ?? settings.downloadMirror ?? "").trim(),
+      });
+      if (!result.ok) { setNetworkPhase("error"); setNetworkMessage(`保存失败：${result.message}。修改尚未生效，可重试。`); }
+      else if (submittedRevision !== networkRevision.current) {
+        setNetworkPhase("dirty"); setNetworkMessage("已保存提交时的配置，仍有新的修改未保存。");
+      } else { setProxyDraft(undefined); setMirrorDraft(undefined); setNetworkPhase("saved"); }
+    } catch (cause) { setNetworkPhase("error"); setNetworkMessage(`保存失败：${errorMessage(cause)}。修改尚未生效，可重试。`); }
+    finally { networkLock.current = false; setNetworkSaving(false); }
   };
   const resolutions: Array<{ value: DefinitionPreference; label: string; hint: string }> = [
     { value: "auto", label: "自动最高", hint: "优先 1080p，不可用时自动降档" },
@@ -35,6 +59,7 @@ export function SettingsPage({ model, youtube, hidden = false }: { model: UseApp
         <span>APP SETTINGS</span>
         <h1>设置</h1>
         <p>管理下载偏好、媒体模型与账号配置</p>
+        <SaveStatus phase={model.savePhase}>{model.savePhase === "saving" ? "正在保存设置…" : model.savePhase === "error" ? "设置保存失败，未成功的修改已恢复原值，请重试。" : model.savePhase === "saved" ? "设置已保存" : "画质、通知和模型修改后自动保存；下载网络需点击保存。"}</SaveStatus>
       </header>
       <div className="settings-overview" aria-label="当前设置概览">
         <a href="#settings-download"><span>默认画质</span><strong>{resolutions.find((item) => item.value === settings.definition)?.label}</strong><small>新任务自动使用</small></a>
@@ -117,7 +142,7 @@ export function SettingsPage({ model, youtube, hidden = false }: { model: UseApp
             <span>代理地址</span>
             <input
               value={proxyDraft ?? settings.downloadProxy ?? ""}
-              onChange={(event) => setProxyDraft(event.target.value)}
+              onChange={(event) => editNetwork("proxy", event.target.value)}
               placeholder="http://127.0.0.1:7890 或 socks5://127.0.0.1:7890"
               spellCheck={false}
             />
@@ -126,15 +151,16 @@ export function SettingsPage({ model, youtube, hidden = false }: { model: UseApp
             <span>国内镜像地址（可选）</span>
             <input
               value={mirrorDraft ?? settings.downloadMirror ?? ""}
-              onChange={(event) => setMirrorDraft(event.target.value)}
+              onChange={(event) => editNetwork("mirror", event.target.value)}
               placeholder="https://你的镜像域名/ai-components/"
               spellCheck={false}
             />
           </label>
           <div className="settings-network-actions">
-            <button type="button" className="primary-button" onClick={saveNetworkSettings}>保存网络设置</button>
-            <button type="button" className="secondary-button" onClick={() => { setProxyDraft(""); setMirrorDraft(""); void model.update({ downloadProxy: "", downloadMirror: "" }); }}>恢复直连</button>
+            <button type="button" className="primary-button" disabled={networkSaving || (networkPhase !== "dirty" && networkPhase !== "error")} onClick={() => void saveNetworkSettings()}>{networkSaving ? "保存中…" : networkPhase === "error" ? "重试保存网络设置" : "保存网络设置"}</button>
+            <button type="button" className="secondary-button" disabled={networkSaving} onClick={() => void saveNetworkSettings(true)}>恢复直连</button>
           </div>
+          <SaveStatus phase={networkSaving ? "saving" : networkPhase}>{networkSaving ? "正在保存网络设置…" : networkMessage || (networkPhase === "dirty" ? "网络设置有未保存的修改" : networkPhase === "saved" ? "网络设置已保存" : "编辑后点击保存，成功后应用新配置。")}</SaveStatus>
           <p className="settings-network-help">代理支持 HTTP、HTTPS、SOCKS5。视频/API 下载的代理在重启应用后生效；留空时使用系统代理环境。</p>
         </div>
       </section>

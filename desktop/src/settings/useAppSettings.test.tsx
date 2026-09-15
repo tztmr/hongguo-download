@@ -26,6 +26,26 @@ function dependencies(overrides: Partial<AppSettingsDependencies> = {}): AppSett
 }
 
 describe("useAppSettings", () => {
+  it("reports per-request results while keeping a mixed save batch pending until all requests finish", async () => {
+    let failFirst!: (reason: unknown) => void, finishSecond!: (value: AppSettings) => void;
+    const deps = dependencies({ updateSettings: vi.fn()
+      .mockReturnValueOnce(new Promise((_resolve, reject) => { failFirst = reject; }))
+      .mockReturnValueOnce(new Promise(resolve => { finishSecond = resolve; }))
+      .mockResolvedValue({ ...defaultSettings, definition: "720p" }) });
+    const { result } = renderHook(() => useAppSettings(deps));
+    await waitFor(() => expect(result.current.settings).not.toBeNull());
+    expect(result.current.savePhase).toBe("idle");
+    let first!: ReturnType<typeof result.current.update>, second!: ReturnType<typeof result.current.update>;
+    act(() => { first = result.current.update({ definition: "720p" }); second = result.current.update({ notifyNewReleases: false }); });
+    expect(result.current.savePhase).toBe("saving");
+    await act(async () => { failFirst(new Error("设置写入失败")); expect(await first).toEqual({ ok: false, message: "设置写入失败" }); });
+    expect(result.current.savePhase).toBe("saving");
+    await act(async () => { finishSecond({ ...defaultSettings, notifyNewReleases: false }); expect(await second).toEqual({ ok: true }); });
+    expect(result.current.savePhase).toBe("error");
+    await act(async () => { await result.current.update({ definition: "720p" }); });
+    expect(result.current.savePhase).toBe("saved");
+  });
+
   it("does not restore an earlier failed optimistic patch after consecutive failures", async () => {
     const deps = dependencies({ updateSettings: vi.fn().mockRejectedValue(new Error("磁盘写入失败")) });
     const { result } = renderHook(() => useAppSettings(deps));
@@ -46,7 +66,7 @@ describe("useAppSettings", () => {
       .mockReturnValueOnce(new Promise(resolve => { finishSecond = resolve; })) });
     const { result } = renderHook(() => useAppSettings(deps));
     await waitFor(() => expect(result.current.settings).not.toBeNull());
-    let first!: Promise<void>, second!: Promise<void>;
+    let first!: Promise<unknown>, second!: Promise<unknown>;
     act(() => { first = result.current.update({ definition: "720p" }); second = result.current.update({ notifyNewReleases: false }); });
     await act(async () => { finishFirst({ ...defaultSettings, definition: "720p" }); await first; });
     expect(result.current.settings?.notifyNewReleases).toBe(false);

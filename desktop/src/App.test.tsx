@@ -18,7 +18,7 @@ describe("App preview workflow", () => {
   it("retains an unsaved automation draft across sidebar navigation", async () => {
     window.history.replaceState({}, "", "/?preview=automation");
     const view = render(<App />);
-    const input = view.getByRole("spinbutton", { name: /最多集数/ });
+    const input = await view.findByRole("spinbutton", { name: /最多集数/ });
     fireEvent.change(input, { target: { value: "123" } });
     fireEvent.click(view.getByRole("button", { name: "设置" }));
     expect(view.queryByRole("heading", { name: "24 小时自动追剧" })).toBeNull();
@@ -37,7 +37,7 @@ describe("App preview workflow", () => {
     await view.findByText("已加载全部频道视频与 Shorts");
     fireEvent.click(view.getByRole("button", { name: "数据分析" }));
     expect(view.getByRole("heading", { name: "数据分析" })).toBeTruthy();
-    expect(view.getByText("频道累计观看次数")).toBeTruthy();
+    expect(await view.findByText("频道累计观看次数")).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: "设置" }));
     expect(view.getByRole("heading", { name: "设置" })).toBeTruthy();
     expect(view.queryByRole("heading", { name: "视频管理" })).toBeNull();
@@ -50,7 +50,7 @@ describe("App preview workflow", () => {
     const search = view.getByRole("searchbox", { name: "搜索频道视频" });
     fireEvent.change(search, { target: { value: "保留筛选" } });
     fireEvent.click(view.getByRole("button", { name: "数据分析" }));
-    fireEvent.click(view.getByRole("button", { name: "7 天" }));
+    fireEvent.click(await view.findByRole("button", { name: "7 天" }));
     fireEvent.click(view.getByRole("button", { name: "视频管理" }));
     expect(view.getByRole("searchbox", { name: "搜索频道视频" })).toBe(search);
     expect((search as HTMLInputElement).value).toBe("保留筛选");
@@ -61,7 +61,7 @@ describe("App preview workflow", () => {
     window.history.replaceState({}, "", "/?preview=library");
     const view = render(<App />);
     fireEvent.click(view.getByRole("button", { name: /下载管理/ }));
-    const rows = view.getAllByTestId("download-batch-row");
+    const rows = await view.findAllByTestId("download-batch-row");
     fireEvent.click(within(rows[1]).getByRole("button", { name: /任务详情/ }));
     const selectedHeading = within(view.getByRole("complementary", { name: "任务详情" })).getAllByRole("heading")[1].textContent;
     fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), {target:{value: selectedHeading}});
@@ -106,7 +106,7 @@ describe("App preview workflow", () => {
     expect(view.getByText("已加入 3 集，跳过 0 个重复项")).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: /下载管理/ }));
     expect(view.getByRole("heading", { name: "下载管理" })).toBeTruthy();
-    expect(view.getAllByTestId("download-batch-row")).toHaveLength(4);
+    expect(await view.findAllByTestId("download-batch-row")).toHaveLength(4);
   });
 
   it("opens the five-column monitor and applies a 720p setting to the inspector", async () => {

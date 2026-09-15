@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyticsCommands, type AnalyticsCommands, type AnalyticsReport, type ChannelAnalyticsSnapshot } from "../youtube/analyticsCommands";
-import { YouTubeVideoLink } from "../youtube/YouTubeUploadJobs";
+import { YouTubeVideoLink } from "../youtube/YouTubeVideoLink";
 import type { YouTubeModel } from "../youtube/types";
 import { AnalyticsTrend } from "../youtube/AnalyticsTrend";
 import { AnalyticsDetails } from "../youtube/AnalyticsDetails";

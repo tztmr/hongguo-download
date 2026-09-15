@@ -130,6 +130,19 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .inline-error, .warning-banner { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; padding: 10px 12px; border: 1px solid rgba(239, 83, 91, .28); border-radius: 8px; color: #f39a9f; background: rgba(239, 83, 91, .08); font-size: 12px; }
 .warning-banner > span { min-width: 0; }
 .warning-dismiss { flex: 0 0 auto; margin-left: auto; color: currentColor; }
+.deferred-page { min-width: 0; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 32px; text-align: center; }
+.deferred-page h1 { margin: 0; font-size: 22px; }
+.deferred-page p { margin: 0; color: var(--muted); font-size: 13px; }
+.save-feedback { display: flex; align-items: baseline; gap: 7px; margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.save-feedback-dot { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.save-feedback-dirty { color: var(--warning); }
+.save-feedback-saving { color: #91b9ff; }
+.save-feedback-saved { color: var(--success); }
+.save-feedback-error { color: var(--danger); }
+.settings-header .save-feedback { color: var(--muted); }
+.settings-header .save-feedback-saving { color: #91b9ff; }
+.settings-header .save-feedback-saved { color: var(--success); }
+.settings-header .save-feedback-error { color: var(--danger); }
 
 .series-inspector { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 24px 20px 20px; overflow-x: hidden; overflow-y: auto; border-left: 1px solid var(--border); background: #0f1013; }
 .series-inspector .episode-picker { min-height: 144px; }
@@ -220,10 +233,11 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .path-button:hover { color: white; text-decoration: underline; }
 .global-actions { display: flex; gap: 8px; }
 .warning-banner { flex: 0 0 auto; margin: 16px 0 0; }
-.download-control-row { flex: 0 0 auto; display: flex; justify-content: flex-end; margin-top: 16px; padding: 10px 13px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
+.download-control-row { flex: 0 0 auto; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; margin-top: 16px; padding: 10px 13px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface); }
 .download-control-row label { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 11px; }
 .download-control-row select { width: 64px; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 7px; outline: 0; color: var(--text); background: var(--surface-3); }
 .download-control-row label span { color: var(--muted-2); }
+.download-control-row .density-select { width: 82px; }
 .stat-grid { flex: 0 0 auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
 .stat-grid article { min-height: 92px; display: flex; flex-direction: column; justify-content: center; padding: 15px 19px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
 .stat-grid span { color: var(--muted); font-size: 12px; }
@@ -693,6 +707,35 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 [hidden] { display: none !important; }
 .manager-section-content { display: flex; flex: 1; min-height: 0; flex-direction: column; }
 .batch-row { grid-template-columns: 32px minmax(0, 1fr) auto; }
+.download-compact { padding-top: 20px; padding-bottom: 18px; }
+.download-compact .manager-tabs { margin-top: 12px; }
+.download-compact .download-control-row { margin-top: 10px; padding: 6px 12px; }
+.download-compact .stat-grid { gap: 8px; margin-top: 10px; }
+.download-compact .stat-grid article { min-height: 44px; flex-direction: row; align-items: center; justify-content: space-between; padding: 8px 12px; border-radius: 8px; }
+.download-compact .stat-grid strong { margin: 0; font-size: 21px; }
+.download-compact .download-workspace { margin-top: 10px; }
+.download-compact .panel-title { min-height: 38px; padding-inline: 12px; }
+.download-compact .batch-filter-toolbar { padding: 8px 10px 0; gap: 5px; }
+.download-compact .batch-filter-toolbar .upload-filters { margin: 0; gap: 4px; }
+.download-compact .batch-filter-toolbar .upload-filters button { min-height: 28px; padding: 4px 9px; }
+.download-compact .bulk-task-toolbar { padding: 7px 10px; gap: 5px; }
+.download-compact .bulk-task-toolbar .secondary-button { height: 30px; min-height: 30px; padding: 4px 7px; }
+.download-compact .batch-list { flex: 1; padding: 8px; gap: 6px; }
+.download-compact .batch-main { grid-template-columns: 38px minmax(0, 1fr); gap: 10px; padding: 8px 6px; }
+.download-compact .batch-cover { width: 38px; height: 50px; border-radius: 5px; }
+.download-compact .batch-title-line { gap: 8px; }
+.download-compact .batch-title-line h3 { font-size: 13px; }
+.download-compact .batch-title-line > span { font-size: 10px; }
+.download-compact .batch-copy > .progress-track { margin-top: 7px; height: 4px; }
+.download-compact .batch-meta { margin-top: 5px; gap: 6px; font-size: 10px; }
+.download-compact .batch-meta span + span::before { margin-right: 6px; }
+.download-compact .batch-row-actions { gap: 0; padding-right: 5px; }
+.download-compact .batch-row-actions .icon-button { height: 28px; }
+.download-compact .detail-summary { grid-template-columns: 38px minmax(0, 1fr); gap: 10px; padding: 10px 12px; }
+.download-compact .detail-cover { width: 38px; height: 50px; }
+.download-compact .detail-summary h3 { font-size: 14px; }
+.download-compact .detail-actions { padding: 9px 12px; gap: 6px; }
+.download-compact .detail-actions button { height: 32px; min-height: 32px; }
 .task-row-checkbox { width: 16px; height: 16px; margin: 0 0 0 12px; accent-color: var(--accent); cursor: pointer; }
 .bulk-task-toolbar, .bulk-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 12px; }
 .bulk-task-toolbar label, .bulk-toolbar label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }

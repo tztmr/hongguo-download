@@ -23,6 +23,12 @@ import { getUploadSourceOptions } from "../youtube/uploadSources";
 import { AIInstallProgress } from "./AIInstallProgress";
 
 type ManagerSection = "downloads" | "media" | "youtube";
+const densityKey = "hongguo.download.density.v1";
+type Density = "compact" | "comfortable";
+function readDensity(): Density {
+  try { return window.localStorage.getItem(densityKey) === "comfortable" ? "comfortable" : "compact"; }
+  catch { return "compact"; }
+}
 
 type DownloadManagerPageProps = {
   manager: DownloadManager;
@@ -141,6 +147,11 @@ function DownloadManagerPageView({
   hidden = false,
 }: DownloadManagerPageProps) {
   const [section, setSection] = useState<ManagerSection>("downloads");
+  const [density, setDensity] = useState<Density>(readDensity);
+  function changeDensity(value: Density) {
+    setDensity(value);
+    try { window.localStorage.setItem(densityKey, value); } catch { /* Keep the current display preference when storage is unavailable. */ }
+  }
   const [batchFilter, setBatchFilter] = useState("all");
   const [batchQuery, setBatchQuery] = useState("");
   const [checkedBatchIds, setCheckedBatchIds] = useState(new Set<string>());
@@ -390,7 +401,7 @@ function DownloadManagerPageView({
   }
 
   return (
-    <main className="download-page" hidden={hidden}>
+    <main className={`download-page ${density === "compact" ? "download-compact" : ""}`} hidden={hidden}>
       <header className="download-page-header">
         <div>
           <h1>下载管理</h1>
@@ -424,6 +435,11 @@ function DownloadManagerPageView({
       {section === "downloads" ? (
         <>
           <div className="download-control-row">
+            <label>列表密度
+              <select className="density-select" aria-label="下载列表密度" value={density} onChange={event => changeDensity(event.target.value as Density)}>
+                <option value="compact">紧凑</option><option value="comfortable">宽松</option>
+              </select>
+            </label>
             <label>同时下载
               <select aria-label="同时下载" value={manager.state.concurrency} onChange={(event) => manager.setConcurrency(Number(event.target.value))}>
                 {Array.from({ length: 10 }, (_, index) => index + 1).map((value) => <option value={value} key={value}>{value}</option>)}

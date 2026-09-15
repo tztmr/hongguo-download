@@ -3,7 +3,7 @@ import { seriesTypeLabel, seriesHeatKey } from "./seriesPresentation";
 import { AIRecommendations } from "./components/AIRecommendations";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { type FormEvent, type UIEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type ComponentProps, type FormEvent, type UIEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   downloadEpisode,
   fetchCatalog,
@@ -24,9 +24,7 @@ import { CategoryFilter } from "./components/CategoryFilter";
 import { CategoryBrowser } from "./components/CategoryBrowser";
 import { Cover } from "./components/Cover";
 import { VideoOrientationBadge } from "./components/VideoOrientationBadge";
-import { PlatformVideosPage } from "./components/PlatformVideosPage";
-import { DataAnalyticsPage } from "./components/DataAnalyticsPage";
-import { DownloadManagerPage } from "./components/DownloadManagerPage";
+import { deferPage } from "./components/DeferredPage";
 import { CheckIcon, CloseIcon, SearchIcon } from "./components/icons";
 import { SeriesInspector } from "./components/SeriesInspector";
 import { SeriesDialog } from "./components/SeriesDialog";
@@ -38,7 +36,6 @@ import {
   type GroupedPagingState,
 } from "./feed/groupedPaging";
 import { NewReleasesPage } from "./monitor/NewReleasesPage";
-import { AutomationPage } from "./monitor/AutomationPage";
 import { useNewReleaseMonitor } from "./monitor/useNewReleaseMonitor";
 import { createTauriNotificationAdapter, type NotificationTarget } from "./notifications";
 import { useNotificationRouter } from "./notifications/useNotificationRouter";
@@ -55,7 +52,6 @@ import {
   previewSeries,
   previewYouTubeModel,
 } from "./preview";
-import { SettingsPage } from "./settings/SettingsPage";
 import { errorMessage, useAppSettings, type AppSettingsDependencies } from "./settings/useAppSettings";
 import { useYouTube } from "./youtube/useYouTube";
 import type {
@@ -77,6 +73,12 @@ import { SearchCache, searchKey } from "./search/cache";
 import { combinedDiscovery, type CombinedDiscoveryPage } from "./feed/combinedDiscovery";
 
 type SearchMode = "fuzzy" | "exact";
+
+const DownloadManagerPage = deferPage<ComponentProps<typeof import("./components/DownloadManagerPage").DownloadManagerPage>>("下载管理", () => import("./components/DownloadManagerPage").then(module => ({ default: module.DownloadManagerPage })));
+const PlatformVideosPage = deferPage<ComponentProps<typeof import("./components/PlatformVideosPage").PlatformVideosPage>>("视频管理", () => import("./components/PlatformVideosPage").then(module => ({ default: module.PlatformVideosPage })));
+const DataAnalyticsPage = deferPage<ComponentProps<typeof import("./components/DataAnalyticsPage").DataAnalyticsPage>>("数据分析", () => import("./components/DataAnalyticsPage").then(module => ({ default: module.DataAnalyticsPage })));
+const AutomationPage = deferPage<ComponentProps<typeof import("./monitor/AutomationPage").AutomationPage>>("自动追剧", () => import("./monitor/AutomationPage").then(module => ({ default: module.AutomationPage })));
+const SettingsPage = deferPage<ComponentProps<typeof import("./settings/SettingsPage").SettingsPage>>("设置", () => import("./settings/SettingsPage").then(module => ({ default: module.SettingsPage })));
 
 const appNotifications = createTauriNotificationAdapter();
 const DEFAULT_RANK_BOARDS = [
@@ -585,7 +587,7 @@ export default function App() {
           media={media}
           saveDir={activeSettings.saveDir}
           aiConcurrency={activeSettings.aiConcurrency}
-          onAIConcurrencyChange={value => { setDismissedSettingsWarning(""); return settingsModel.update({ aiConcurrency: value }); }}
+          onAIConcurrencyChange={async value => { setDismissedSettingsWarning(""); await settingsModel.update({ aiConcurrency: value }); }}
           demucsModel={activeSettings.demucsModel}
           whisperModel={activeSettings.whisperModel}
           aiComponents={settingsModel.components}
@@ -607,7 +609,7 @@ export default function App() {
       ) : null}
       {platformVisited && <PlatformVideosPage hidden={nav !== "platformVideos"} youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewManagementCommands : undefined} />}
       {analyticsVisited && <DataAnalyticsPage hidden={nav !== "analytics"} youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewAnalyticsCommands : undefined} />}
-      {automationVisited && <AutomationPage hidden={nav !== "automation"} aiConcurrency={activeSettings.aiConcurrency} onAIConcurrencyChange={value => { setDismissedSettingsWarning(""); return settingsModel.update({ aiConcurrency: value }); }} runtimeEnabled={!isPreview} saveDir={activeSettings.saveDir} channels={(isPreview ? previewYouTubeModel : youtube).channels} onOpenSettings={() => navigate("settings")} />}
+      {automationVisited && <AutomationPage hidden={nav !== "automation"} aiConcurrency={activeSettings.aiConcurrency} onAIConcurrencyChange={async value => { setDismissedSettingsWarning(""); await settingsModel.update({ aiConcurrency: value }); }} runtimeEnabled={!isPreview} saveDir={activeSettings.saveDir} channels={(isPreview ? previewYouTubeModel : youtube).channels} onOpenSettings={() => navigate("settings")} />}
       {settingsVisited && <SettingsPage hidden={nav !== "settings"} model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />}
       {nav === "queue" || nav === "platformVideos" || nav === "analytics" || nav === "automation" || nav === "settings" ? null : nav === "monitor" ? (
         <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />

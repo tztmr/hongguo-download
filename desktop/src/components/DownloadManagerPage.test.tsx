@@ -1,5 +1,5 @@
 import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getDownloadStats, type DownloadManagerState } from "../download/model";
 import type { DownloadManager } from "../download/useDownloadManager";
 import type { YouTubeModel } from "../youtube/types";
@@ -8,6 +8,7 @@ import type { AIComponentStatus } from "../types";
 import { DownloadManagerPage } from "./DownloadManagerPage";
 
 vi.mock("../youtube/commands", () => ({ checkYouTubeUpload: vi.fn().mockResolvedValue([]) }));
+afterEach(() => vi.unstubAllGlobals());
 
 const state: DownloadManagerState = {
   version: 2,
@@ -163,6 +164,25 @@ it("filters download tasks by failures and title and resets filters for notifica
 });
 
 describe("DownloadManagerPage", () => {
+  it("remembers density without resetting the filtered bulk selection", () => {
+    const key = "hongguo.download.density.v1";
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", { getItem: (name: string) => storage.get(name) ?? null, setItem: (name: string, value: string) => storage.set(name, value), removeItem: (name: string) => storage.delete(name) });
+    window.localStorage.setItem(key, "comfortable");
+    const props = { manager: managerFixture(), media: mediaFixture(), saveDir: "/Downloads", onOpenDir: vi.fn(), onChooseDir: vi.fn(), onRevealPath: vi.fn() };
+    const view = render(<DownloadManagerPage {...props} />);
+    expect(view.getByRole("combobox", { name: "下载列表密度" })).toHaveProperty("value", "comfortable");
+    fireEvent.change(view.getByRole("searchbox", { name: "搜索下载任务" }), { target: { value: "女子" } });
+    fireEvent.click(view.getByRole("checkbox", { name: "选择下载任务 女子爱财，取之有道" }));
+    fireEvent.change(view.getByRole("combobox", { name: "下载列表密度" }), { target: { value: "compact" } });
+    expect(view.getByRole("checkbox", { name: "选择下载任务 女子爱财，取之有道" })).toHaveProperty("checked", true);
+    expect(view.getAllByTestId("download-batch-row")).toHaveLength(1);
+    view.unmount();
+    const reopened = render(<DownloadManagerPage {...props} />);
+    expect(reopened.getByRole("combobox", { name: "下载列表密度" })).toHaveProperty("value", "compact");
+    window.localStorage.removeItem(key);
+  });
+
   it("renders one row per series and switches the fixed episode detail", () => {
     const manager = managerFixture();
     const view = render(
