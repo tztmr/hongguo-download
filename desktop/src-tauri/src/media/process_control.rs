@@ -132,7 +132,7 @@ mod tests {
     use super::ProcessControl;
     use std::{
         fs,
-        process::{Command, Stdio},
+        process::{Child, Command, Stdio},
         thread,
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
@@ -160,7 +160,28 @@ mod tests {
         }
     }
 
-    fn spawn_heartbeat(control: &ProcessControl, path: &std::path::Path) -> std::process::Child {
+    fn wait_until_stopped(child: &Child) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let mut status = 0;
+            let result = unsafe {
+                libc::waitpid(
+                    child.id() as i32,
+                    &mut status,
+                    libc::WUNTRACED | libc::WNOHANG,
+                )
+            };
+            assert!(result >= 0, "could not read child process state");
+            if result > 0 {
+                assert!(libc::WIFSTOPPED(status), "child exited instead of pausing");
+                return;
+            }
+            assert!(Instant::now() < deadline, "child did not pause");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn spawn_unregistered_heartbeat(control: &ProcessControl, path: &std::path::Path) -> Child {
         let script = format!(
             "while true; do printf x >> '{}'; sleep 0.05; done",
             path.display()
@@ -172,20 +193,19 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         control.prepare_command(&mut command);
-        let mut child = command.spawn().unwrap();
-        control.register_child(&mut child).unwrap();
-        child
+        command.spawn().unwrap()
     }
 
     #[test]
     fn pause_stops_process_group_and_resume_continues_same_child() {
         let heartbeat = temp_heartbeat("pause-resume");
         let control = ProcessControl::new();
-        let mut child = spawn_heartbeat(&control, &heartbeat);
+        let mut child = spawn_unregistered_heartbeat(&control, &heartbeat);
+        control.register_child(&mut child).unwrap();
         let before_pause = wait_for_size(&heartbeat, 2);
 
         control.pause().unwrap();
-        thread::sleep(Duration::from_millis(180));
+        wait_until_stopped(&child);
         let stopped_size = fs::metadata(&heartbeat).unwrap().len();
         thread::sleep(Duration::from_millis(180));
         assert_eq!(fs::metadata(&heartbeat).unwrap().len(), stopped_size);
@@ -200,21 +220,22 @@ mod tests {
     }
 
     #[test]
-    fn child_registered_after_pause_is_stopped_immediately() {
+    fn child_registered_after_pause_stays_stopped_until_resume() {
         let heartbeat = temp_heartbeat("pause-before-spawn");
         let control = ProcessControl::new();
         control.pause().unwrap();
-        let mut child = spawn_heartbeat(&control, &heartbeat);
+        let mut child = spawn_unregistered_heartbeat(&control, &heartbeat);
+        // The OS may schedule the child before spawn returns to the parent.
+        // Deliberately exercise that gap instead of assuming a zero heartbeat.
+        wait_for_size(&heartbeat, 0);
+        control.register_child(&mut child).unwrap();
+        wait_until_stopped(&child);
+        let stopped_size = fs::metadata(&heartbeat).unwrap().len();
         thread::sleep(Duration::from_millis(180));
-        assert_eq!(
-            fs::metadata(&heartbeat)
-                .map(|value| value.len())
-                .unwrap_or(0),
-            0
-        );
+        assert_eq!(fs::metadata(&heartbeat).unwrap().len(), stopped_size);
 
         control.resume().unwrap();
-        wait_for_size(&heartbeat, 0);
+        wait_for_size(&heartbeat, stopped_size);
         control.cancel();
         let _ = child.wait();
         control.clear_child(child.id());
