@@ -57,7 +57,18 @@ jobs:
       - name: Rust format
         run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
       - name: Rust tests
-        run: ./scripts/test-rust-windows.ps1
+        run: |
+          if (Test-Path ./scripts/test-rust-windows.ps1) {
+            ./scripts/test-rust-windows.ps1
+          } else {
+            # Older source_ref tags predate the shared test entry point.
+            $env:HONGGUO_WINDOWS_TEST_RESOURCES = "1"
+            try {
+              cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
+            } finally {
+              Remove-Item Env:HONGGUO_WINDOWS_TEST_RESOURCES -ErrorAction SilentlyContinue
+            }
+          }
       - name: Rust app build
         run: cargo build --manifest-path desktop/src-tauri/Cargo.toml --bin hongguo-desktop
 
