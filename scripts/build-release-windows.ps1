@@ -22,9 +22,10 @@ if ($AIBaseWorker) {
     -Archive $FfmpegArchive -ArchiveSha256 $FfmpegArchiveSha256 -TargetTriple $TargetTriple
 npm ci --prefix (Join-Path $ProjectRoot "desktop")
 & (Join-Path $PSScriptRoot "verify-playback-windows.ps1") -Python $Python
+& $Python -m pip install --disable-pip-version-check numpy==1.26.4
 & $Python -m unittest discover -s (Join-Path $ProjectRoot "ai_worker/tests") -v
 npm test --prefix (Join-Path $ProjectRoot "desktop") -- --run
-cargo test --manifest-path (Join-Path $ProjectRoot "desktop/src-tauri/Cargo.toml") --lib
+& (Join-Path $PSScriptRoot "test-rust-windows.ps1")
 Push-Location (Join-Path $ProjectRoot "desktop")
 try {
     npx tauri build --config src-tauri/tauri.release.conf.json @AIConfig --bundles nsis

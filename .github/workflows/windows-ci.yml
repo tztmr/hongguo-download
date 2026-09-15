@@ -57,9 +57,7 @@ jobs:
       - name: Rust format
         run: cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
       - name: Rust tests
-        env:
-          HONGGUO_WINDOWS_TEST_RESOURCES: "1"
-        run: cargo test --manifest-path desktop/src-tauri/Cargo.toml --lib
+        run: ./scripts/test-rust-windows.ps1
       - name: Rust app build
         run: cargo build --manifest-path desktop/src-tauri/Cargo.toml --bin hongguo-desktop
 

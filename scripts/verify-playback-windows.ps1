@@ -17,7 +17,7 @@ try {
         & $TestPython -m unittest tests.test_playback tests.test_video_download tests.test_mp4_decrypt -v
         & $TestPython scripts/verify-playback-browser.py
         & $TestPython scripts/verify-playback-stream-browser.py
-        cargo test --manifest-path (Join-Path $ProjectRoot "desktop/src-tauri/Cargo.toml") --lib media::merge::performance_tests -- --nocapture
+        & (Join-Path $PSScriptRoot "test-rust-windows.ps1") -TestArguments @("media::merge::performance_tests", "--", "--nocapture")
     } finally { Pop-Location }
 } finally {
     Remove-Item Env:HONGGUO_TEST_PLAYBACK_TOOLS -ErrorAction SilentlyContinue
