@@ -152,6 +152,33 @@ describe("App request ordering", () => {
     expect(view.queryByText("过期发现结果")).toBeNull();
   });
 
+  it("clears the previous list and selection when a different feed returns no results", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(series("old-feed", "上一页的短剧")));
+    apiMocks.fetchCatalog.mockResolvedValue([{ itemId: "old-episode", index: 1, title: "第1集" }]);
+    apiMocks.fetchRank.mockResolvedValue({ ...rankPage, items: [] });
+    const view = render(<App />);
+    await waitFor(() => expect(view.getByRole("button", { name: "加入下载队列（已选 1 集）" })).toHaveProperty("disabled", false));
+    fireEvent.click(view.getByRole("button", { name: "榜单" }));
+    await view.findByText("没有找到短剧");
+    expect(view.queryByText("上一页的短剧")).toBeNull();
+    expect(view.queryByRole("button", { name: /加入下载队列/ })).toBeNull();
+  });
+
+  it("shows a readable retryable feed failure without marking a healthy local service offline", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(series("old-feed", "上一页的短剧")));
+    apiMocks.fetchRank.mockRejectedValue({ code: "UPSTREAM_ERROR", message: "榜单接口暂时不可用" });
+    const view = render(<App />);
+    await view.findByText("服务正常");
+    await waitFor(() => expect(view.getAllByText("上一页的短剧").length).toBeGreaterThan(0));
+    fireEvent.click(view.getByRole("button", { name: "榜单" }));
+    expect(await view.findByText("榜单接口暂时不可用")).toBeTruthy();
+    expect(view.getByText("服务正常")).toBeTruthy();
+    expect(view.queryByText("上一页的短剧")).toBeNull();
+    apiMocks.fetchRank.mockResolvedValue(rankPage);
+    fireEvent.click(view.getByRole("button", { name: "重试加载" }));
+    await waitFor(() => expect(view.getAllByText("榜单结果短剧").length).toBeGreaterThan(0));
+  });
+
   it("allows episode selection while metrics are still pending", async () => {
     apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(series("fast-catalog", "快速目录")));
     apiMocks.fetchCatalog.mockResolvedValue([{ itemId: "episode-fast", index: 1, title: "第1集" }]);

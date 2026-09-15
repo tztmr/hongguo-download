@@ -6,6 +6,7 @@ import { releaseCategoryNames, releaseCategoryOptions } from "../monitor/categor
 import { seriesHeatKey } from "../seriesPresentation";
 import { Cover } from "./Cover";
 import { VideoOrientationBadge } from "./VideoOrientationBadge";
+import { errorMessage } from "../errors";
 
 export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, selectedId, detectOrientation = true }: {
   knownHeat?: Readonly<Record<string, number>>; categoryMode: boolean; onSelect(item: SeriesItem): void; selectedId?: string; detectOrientation?: boolean;
@@ -18,16 +19,19 @@ export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, sele
   const [revision, setRevision] = useState(0);
   const pending = useRef(false);
   const request = useRef(0);
+  const seenCursors = useRef(new Set<string>());
   const selectRef = useRef(onSelect);
   selectRef.current = onSelect;
   useEffect(() => {
     const id = ++request.current;
     setLoading(true); setError(""); pending.current = true;
+    setItems([]); setPage(null); seenCursors.current.clear();
     void fetchRank({ type: "ai_playlet", board: "ranklist_hot_sc", limit: 20 }).then((result) => {
       if (id !== request.current) return;
-      setItems(result.items); setPage(result);
+      setItems([...new Map(result.items.map(item => [item.bookId, item])).values()]);
+      setPage({ ...result, hasMore: result.hasMore && !!result.nextCursor });
       if (result.items[0]) selectRef.current(result.items[0]);
-    }).catch((reason) => { if (id === request.current) setError(String(reason)); })
+    }).catch((reason) => { if (id === request.current) setError(errorMessage(reason)); })
       .finally(() => { if (id === request.current) { setLoading(false); pending.current = false; } });
     return () => { request.current += 1; };
   }, [revision]);
@@ -38,9 +42,10 @@ export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, sele
     try {
       const result = await fetchRank({ type: "ai_playlet", board: "ranklist_hot_sc", cursor: page.nextCursor, limit: 20 });
       if (id !== request.current) return;
-      setItems((current) => [...new Map([...current, ...result.items].map((item) => [item.seriesId, item])).values()]);
-      setPage(result);
-    } catch (reason) { if (id === request.current) setError(String(reason)); }
+      seenCursors.current.add(page.nextCursor);
+      setItems((current) => [...new Map([...current, ...result.items].map((item) => [item.bookId, item])).values()]);
+      setPage({ ...result, hasMore: result.hasMore && !!result.nextCursor && !seenCursors.current.has(result.nextCursor) });
+    } catch (reason) { if (id === request.current) setError(errorMessage(reason)); }
     finally { if (id === request.current) { setLoading(false); pending.current = false; } }
   }
   const visible = categoryMode && category ? items.filter((item) => releaseCategoryNames(item).includes(category)) : items;

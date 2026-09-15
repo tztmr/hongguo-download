@@ -5,12 +5,13 @@ import type { YouTubeModel } from "../youtube/types";
 import { YouTubeSettings } from "../youtube/YouTubeSettings";
 import { MediaModelsSettings } from "./MediaModelsSettings";
 
-export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; youtube?: YouTubeModel }) {
+export function SettingsPage({ model, youtube, hidden = false }: { model: UseAppSettingsResult; youtube?: YouTubeModel; hidden?: boolean }) {
   const [proxyDraft, setProxyDraft] = useState<string | undefined>(undefined);
   const [mirrorDraft, setMirrorDraft] = useState<string | undefined>(undefined);
-  if (model.loading || !model.settings) {
-    return <main className="settings-page loading-state">正在加载设置…</main>;
+  if (model.loading) {
+    return <main hidden={hidden} className="settings-page loading-state">正在加载设置…</main>;
   }
+  if (!model.settings) return <main hidden={hidden} className="settings-page"><h1>设置</h1><div className="warning-banner" role="alert">{model.warning || "设置读取失败，请重试"}</div>{model.reload && <button type="button" className="secondary-button" onClick={model.reload}>重新读取设置</button>}</main>;
   const settings = model.settings;
   const saveNetworkSettings = () => {
     void model.update({
@@ -24,12 +25,12 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
     { value: "720p", label: "720p", hint: "文件更小，下载更快" },
   ];
   const permissionCopy = {
-    granted: "已获得 macOS 通知权限",
-    prompt: "首次发送通知时将请求 macOS 权限",
-    denied: "通知权限已关闭，请在 macOS 系统设置中允许红果下载发送通知",
+    granted: "已获得系统通知权限",
+    prompt: "首次发送通知时将请求系统权限",
+    denied: "通知权限已关闭，请在系统设置中允许红果下载发送通知",
   }[model.notificationPermission];
   return (
-    <main className="settings-page">
+    <main hidden={hidden} className="settings-page">
       <header className="settings-header">
         <span>APP SETTINGS</span>
         <h1>设置</h1>
@@ -51,7 +52,7 @@ export function SettingsPage({ model, youtube }: { model: UseAppSettingsResult; 
         {youtube ? <a href="#settings-youtube"><span>06</span>YouTube<small>凭证与频道授权</small></a> : null}
       </nav>
       <div className="settings-content">
-      {model.warning ? <div className="warning-banner">{model.warning}</div> : null}
+      {model.warning ? <div className="warning-banner" role="alert">{model.warning}</div> : null}
 
       <section className="settings-section" id="settings-download">
         <div className="settings-section-title">

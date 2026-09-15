@@ -31,6 +31,21 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it("pauses polling while hidden and keeps unsaved fields when returning", async () => {
+    const view = page(); await loaded(view);
+    fireEvent.change(view.getByRole("spinbutton", { name: /^最多集数/ }), { target: { value: "123" } });
+    view.rerender(<AutomationPage saveDir="/fixture/downloads" runtimeEnabled hidden />);
+    const snapshots = () => vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_automation_snapshot").length;
+    const before = snapshots();
+    vi.useFakeTimers();
+    await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+    expect(snapshots()).toBe(before);
+    vi.useRealTimers();
+    view.rerender(<AutomationPage saveDir="/fixture/downloads" runtimeEnabled />);
+    await waitFor(() => expect(snapshots()).toBe(before + 1));
+    expect(view.getByRole("spinbutton", { name: /^最多集数/ })).toHaveProperty("value", "123");
+  });
+
   it("migrates collection sources and saves device rotation and page bounds", async () => {
     const view = page(); await loaded(view);
     expect(view.getByRole("button", { name: "推荐轮询" }).getAttribute("aria-pressed")).toBe("true");

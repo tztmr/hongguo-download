@@ -32,6 +32,38 @@ function fixture() {
 }
 
 describe("useYouTube", () => {
+  it("keeps progress and newly added jobs when an older initial snapshot arrives", async () => {
+    const commands = fixture();
+    let complete!: (value: YouTubeSnapshot) => void;
+    vi.mocked(commands.snapshot).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const { result } = renderHook(() => useYouTube(commands));
+    await waitFor(() => expect(commands.snapshot).toHaveBeenCalled());
+    act(() => {
+      commands.emit({ ...job, status: "uploading", percent: 40 });
+      commands.emit({ ...job, id: "youtube-2" });
+    });
+    await act(async () => { complete(snapshot); });
+    expect(result.current.jobs).toMatchObject([{ id: job.id, percent: 40 }, { id: "youtube-2" }]);
+    expect(result.current.activeChannelId).toBe("UC_TEST");
+  });
+
+  it("preserves progress and deleted jobs while refreshing the channel snapshot", async () => {
+    const commands = fixture();
+    const { result } = renderHook(() => useYouTube(commands));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    let complete!: (value: YouTubeSnapshot) => void;
+    vi.mocked(commands.setChannel).mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.setChannel("UC_NEW"); });
+    act(() => commands.emit({ ...job, id: "youtube-2", status: "uploading", percent: 60 }));
+    await act(async () => { await result.current.removeJob(job.id); });
+    expect(result.current.busy).toBe(true);
+    await act(async () => { complete({ ...snapshot, activeChannelId: "UC_NEW" }); await pending; });
+    expect(result.current.jobs).toMatchObject([{ id: "youtube-2", percent: 60 }]);
+    expect(result.current.activeChannelId).toBe("UC_NEW");
+    expect(result.current.busy).toBe(false);
+  });
+
   it("clears a previous callback timeout while retrying and shows the connected channel", async () => {
     const commands = fixture();
     vi.mocked(commands.authorize).mockRejectedValueOnce({ code: "OAUTH_CALLBACK_TIMEOUT", message: "YouTube 授权回调超时" });

@@ -40,30 +40,44 @@ export function useMediaJobs({
   const [error, setError] = useState<MediaCommandError | undefined>();
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
+  const revision = useRef(0);
+  const jobRevisions = useRef(new Map<string, number>());
+  const removedJobIds = useRef(new Set<string>());
+
+  const applyJob = useCallback((job: MediaJob, before = Infinity) => {
+    if (removedJobIds.current.has(job.id) || (jobRevisions.current.get(job.id) || 0) > before) return;
+    jobRevisions.current.set(job.id, ++revision.current);
+    setJobs(current => upsertJob(current, job));
+  }, []);
 
   useEffect(() => {
     if (!enabled) return;
     let active = true;
     let unlisten: (() => void) | undefined;
+    const before = revision.current;
     void (async () => {
       try {
-        const snapshot = await commandsRef.current.snapshot();
-        if (!active) return;
-        setJobs(snapshot.jobs);
-        setWarning(snapshot.warning?.message);
+        const nextUnlisten = await commandsRef.current.subscribeProgress((job) => {
+          if (active) applyJob(job);
+        });
+        if (!active) { nextUnlisten(); return; }
+        unlisten = nextUnlisten;
       } catch (nextError) {
         if (active) setError(asMediaError(nextError));
       }
+      if (!active) return;
       try {
-        const nextUnlisten = await commandsRef.current.subscribeProgress((job) => {
-          if (!active) return;
-          setJobs((current) => upsertJob(current, job));
+        const snapshot = await commandsRef.current.snapshot();
+        if (!active) return;
+        setJobs(current => {
+          let next = snapshot.jobs.filter(job => !removedJobIds.current.has(job.id));
+          // Events and actions completed during the request are newer than its snapshot.
+          for (const job of current) {
+            if (!removedJobIds.current.has(job.id) && (jobRevisions.current.get(job.id) || 0) > before) next = upsertJob(next, job);
+          }
+          return next;
         });
-        if (!active) {
-          nextUnlisten();
-          return;
-        }
-        unlisten = nextUnlisten;
+        setWarning(snapshot.warning?.message);
       } catch (nextError) {
         if (active) setError(asMediaError(nextError));
       }
@@ -72,7 +86,7 @@ export function useMediaJobs({
       active = false;
       unlisten?.();
     };
-  }, [enabled]);
+  }, [enabled, applyJob]);
 
   useEffect(() => {
     if (!enabled || !commandsRef.current.scheduling) return;
@@ -98,6 +112,7 @@ export function useMediaJobs({
         throw normalized;
       }
       const inputs = completedMergeInputs(batch);
+      const before = revision.current;
       try {
         const job = await commandsRef.current.startMerge({
           bookId: batch.bookId,
@@ -110,7 +125,7 @@ export function useMediaJobs({
           quality: options.quality,
           conflictPolicy: options.conflictPolicy,
         });
-        setJobs((current) => upsertJob(current, job));
+        applyJob(job, before);
         setError(undefined);
         return job;
       } catch (nextError) {
@@ -119,7 +134,7 @@ export function useMediaJobs({
         throw normalized;
       }
     },
-    [],
+    [applyJob],
   );
 
   const cancel = useCallback(async (jobId: string) => {
@@ -134,32 +149,35 @@ export function useMediaJobs({
   }, []);
 
   const pause = useCallback(async (jobId: string) => {
+    const before = revision.current;
     try {
       const job = await commandsRef.current.pause(jobId);
-      setJobs((current) => upsertJob(current, job));
+      applyJob(job, before);
       setError(undefined);
     } catch (nextError) {
       const normalized = asMediaError(nextError);
       setError(normalized);
       throw normalized;
     }
-  }, []);
+  }, [applyJob]);
 
   const resume = useCallback(async (jobId: string) => {
+    const before = revision.current;
     try {
       const job = await commandsRef.current.resume(jobId);
-      setJobs((current) => upsertJob(current, job));
+      applyJob(job, before);
       setError(undefined);
     } catch (nextError) {
       const normalized = asMediaError(nextError);
       setError(normalized);
       throw normalized;
     }
-  }, []);
+  }, [applyJob]);
 
   const deleteJob = useCallback(async (jobId: string) => {
     try {
       await commandsRef.current.deleteJob(jobId);
+      removedJobIds.current.add(jobId);
       setJobs((current) => current.filter((job) => job.id !== jobId));
       setError(undefined);
     } catch (nextError) {
@@ -206,6 +224,7 @@ export function useMediaJobs({
     const inputs = scope === "merged"
       ? [{ episodeIndex: 1, path: mergedPath as string }]
       : episodeInputs;
+    const before = revision.current;
     try {
       const job = await commandsRef.current[command]({
         bookId: batch.bookId,
@@ -215,7 +234,7 @@ export function useMediaJobs({
         inputs,
         model,
       });
-      setJobs((current) => upsertJob(current, job));
+      applyJob(job, before);
       setError(undefined);
       return job;
     } catch (nextError) {
@@ -223,7 +242,7 @@ export function useMediaJobs({
       setError(normalized);
       throw normalized;
     }
-  }, []);
+  }, [applyJob]);
 
   const startAudioSeparation = useCallback(
     (batch: DownloadBatch, scope: MediaJobScope, model: "htdemucs" | "htdemucs_ft", mergedPath?: string) =>
@@ -238,22 +257,24 @@ export function useMediaJobs({
   );
 
   const retry = useCallback(async (jobId: string) => {
+    const before = revision.current;
     try {
       const job = await commandsRef.current.retry(jobId);
-      setJobs((current) => upsertJob(current, job));
+      applyJob(job, before);
       setError(undefined);
     } catch (nextError) {
       const normalized = asMediaError(nextError);
       setError(normalized);
       throw normalized;
     }
-  }, []);
+  }, [applyJob]);
 
   const markNotified = useCallback(async (jobId: string, outcome: "success" | "failure") => {
     if (!commandsRef.current.markNotified) return;
+    const before = revision.current;
     const job = await commandsRef.current.markNotified(jobId, outcome);
-    setJobs((current) => upsertJob(current, job));
-  }, []);
+    applyJob(job, before);
+  }, [applyJob]);
 
   return useMemo(
     () => ({ jobs, scheduling, warning, error, startMerge, startAudioSeparation, startSubtitleExtraction, cancel, pause, resume, deleteJob, hasMergedVideo, findMergedVideo, retry, markNotified }),

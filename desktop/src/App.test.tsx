@@ -5,6 +5,27 @@ import App from "./App";
 vi.mock("./youtube/managementCommands", () => ({ managementCommands: { list: vi.fn().mockResolvedValue({ items: [], nextPageToken: null }) } }));
 
 describe("App preview workflow", () => {
+  it("retains an unsaved network draft across sidebar navigation", async () => {
+    window.history.replaceState({}, "", "/?preview=library");
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "设置" }));
+    fireEvent.change(await view.findByRole("textbox", { name: "代理地址" }), { target: { value: "http://127.0.0.1:7890" } });
+    fireEvent.click(view.getByRole("button", { name: "首页" }));
+    fireEvent.click(view.getByRole("button", { name: "设置" }));
+    expect((view.getByRole("textbox", { name: "代理地址" }) as HTMLInputElement).value).toBe("http://127.0.0.1:7890");
+  });
+
+  it("retains an unsaved automation draft across sidebar navigation", async () => {
+    window.history.replaceState({}, "", "/?preview=automation");
+    const view = render(<App />);
+    const input = view.getByRole("spinbutton", { name: /最多集数/ });
+    fireEvent.change(input, { target: { value: "123" } });
+    fireEvent.click(view.getByRole("button", { name: "设置" }));
+    expect(view.queryByRole("heading", { name: "24 小时自动追剧" })).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "自动追剧" }));
+    expect((view.getByRole("spinbutton", { name: /最多集数/ }) as HTMLInputElement).value).toBe("123");
+    expect(view.getAllByText(/有未保存/).length).toBeGreaterThan(0);
+  });
   it("opens video management and analytics from the sidebar instead of download tabs", async () => {
     window.history.replaceState({}, "", "/?preview=downloads");
     const view = render(<App />);
@@ -101,6 +122,6 @@ describe("App preview workflow", () => {
     await waitFor(() => expect(view.getByRole("heading", { name: "设置" })).toBeTruthy());
     fireEvent.click(view.getByRole("radio", { name: /720p/ }));
     fireEvent.click(view.getByRole("button", { name: "首页" }));
-    await waitFor(() => expect(view.getByText(/720p/)).toBeTruthy());
+    await waitFor(() => expect(view.getByText(/720p/, { selector: ".inspector-copy p" })).toBeTruthy());
   });
 });

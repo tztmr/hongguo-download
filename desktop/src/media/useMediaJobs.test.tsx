@@ -69,6 +69,33 @@ afterEach(() => {
 });
 
 describe("useMediaJobs", () => {
+  it("subscribes before loading and keeps progress received during the snapshot request", async () => {
+    const commands = createCommands();
+    let complete!: (value: { version: number; jobs: MediaJob[]; warning: null }) => void;
+    commands.snapshot.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    const { result } = renderHook(() => useMediaJobs({ commands }));
+    await waitFor(() => expect(commands.snapshot).toHaveBeenCalled());
+    act(() => commands.emit(completedJob));
+    await act(async () => { complete({ version: 1, jobs: [queuedJob], warning: null }); });
+    expect(result.current.jobs).toEqual([completedJob]);
+  });
+
+  it("keeps a completed pause event when an older reply arrives and ignores deleted job events", async () => {
+    const commands = createCommands();
+    const { result } = renderHook(() => useMediaJobs({ commands }));
+    await waitFor(() => expect(result.current.jobs).toHaveLength(1));
+    let complete!: (value: MediaJob) => void;
+    commands.pause.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+    let pending!: Promise<void>;
+    act(() => { pending = result.current.pause(queuedJob.id); });
+    act(() => commands.emit(pausedJob));
+    await act(async () => { complete(runningJob); await pending; });
+    expect(result.current.jobs).toEqual([pausedJob]);
+    await act(async () => { await result.current.deleteJob(queuedJob.id); });
+    act(() => commands.emit(completedJob));
+    expect(result.current.jobs).toEqual([]);
+  });
+
   it("loads the native snapshot once and replaces jobs by id from complete progress events", async () => {
     const commands = createCommands();
     const { result, unmount } = renderHook(() => useMediaJobs({ commands }));

@@ -56,7 +56,7 @@ import {
   previewYouTubeModel,
 } from "./preview";
 import { SettingsPage } from "./settings/SettingsPage";
-import { useAppSettings, type AppSettingsDependencies } from "./settings/useAppSettings";
+import { errorMessage, useAppSettings, type AppSettingsDependencies } from "./settings/useAppSettings";
 import { useYouTube } from "./youtube/useYouTube";
 import type {
   AppSettings,
@@ -158,6 +158,8 @@ export default function App() {
   const [nav, setNav] = useState<NavId>(previewMode === "automation" ? "automation" : previewMode === "downloads" ? "queue" : "discover");
   const [platformVisited, setPlatformVisited] = useState(false);
   const [analyticsVisited, setAnalyticsVisited] = useState(false);
+  const [automationVisited, setAutomationVisited] = useState(previewMode === "automation");
+  const [settingsVisited, setSettingsVisited] = useState(false);
   const [queueVisited, setQueueVisited] = useState(previewMode === "downloads");
   useEffect(() => { if (nav === "queue") setQueueVisited(true); }, [nav]);
   const [managerFocus, setManagerFocus] = useState<NotificationTarget | null>(null);
@@ -182,6 +184,8 @@ export default function App() {
   const [metricsError, setMetricsError] = useState("");
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [operationError, setOperationError] = useState("");
+  const [dismissedSettingsWarning, setDismissedSettingsWarning] = useState("");
   const [healthOk, setHealthOk] = useState(isPreview);
   const [backgroundMonitorStarted, setBackgroundMonitorStarted] = useState(isPreview);
   const [selectedCategory, setSelectedCategory] = useState("");
@@ -211,7 +215,7 @@ export default function App() {
 
   const storage = useMemo(() => (isPreview ? createMemoryStorage() : window.localStorage), [isPreview]);
   const settingsModel = useAppSettings(isPreview ? previewSettingsApi : undefined);
-  const activeSettings = settingsModel.settings || previewSettings;
+  const activeSettings = settingsModel.settings || { ...previewSettings, saveDir: isPreview ? previewSettings.saveDir : "" };
   const monitor = useNewReleaseMonitor({
     api: isPreview ? previewMonitorApi : liveMonitorApi,
     storage,
@@ -231,7 +235,7 @@ export default function App() {
     adapter,
     storage,
     initialState: isPreview ? createPreviewDownloadState() : undefined,
-    enabled: !isPreview,
+    enabled: !isPreview && !!settingsModel.settings,
     definition: activeSettings.definition,
     onBatchCompleted: async (batch) => {
       if (activeSettings.notifyDownloadComplete) {
@@ -258,6 +262,8 @@ export default function App() {
     enabled: !isPreview,
     onTarget: (target) => {
       if (target.kind === "monitor") {
+        if (target.id === "playlet" || target.id === "comic_series_rank" || target.id === "ai_playlet") monitor.setType(target.id);
+        monitor.clearUnseen();
         setNav("monitor");
       } else {
         setManagerFocus(target);
@@ -270,7 +276,17 @@ export default function App() {
 
   useEffect(() => {
     if (isPreview) return;
-    fetchHealth().then(() => setHealthOk(true)).catch(() => setHealthOk(false));
+    let active = true, checking = false;
+    async function check() {
+      if (checking) return;
+      checking = true;
+      try { const health = await fetchHealth(); if (active) setHealthOk(health.status === "ok"); }
+      catch { if (active) setHealthOk(false); }
+      finally { checking = false; }
+    }
+    void check();
+    const timer = window.setInterval(() => void check(), 30_000);
+    return () => { active = false; window.clearInterval(timer); };
   }, [isPreview]);
 
   useEffect(() => {
@@ -318,7 +334,7 @@ export default function App() {
           : current,
       );
     }).catch((reason) => {
-      if (requestId === catalogRequestRef.current) setMetricsError(reason instanceof Error ? reason.message : String(reason));
+      if (requestId === catalogRequestRef.current) setMetricsError(errorMessage(reason));
     }).finally(() => {
       if (requestId === catalogRequestRef.current) setMetricsLoading(false);
     });
@@ -327,15 +343,23 @@ export default function App() {
       setEpisodes(catalog);
       if (catalog[0]) setSelectedEpisodeIds([catalog[0].itemId]);
     }).catch((reason) => {
-      if (requestId === catalogRequestRef.current) setCatalogError(reason instanceof Error ? reason.message : String(reason));
+      if (requestId === catalogRequestRef.current) setCatalogError(errorMessage(reason));
     }).finally(() => {
       if (requestId === catalogRequestRef.current) setCatalogLoading(false);
     });
     await Promise.all([catalogRequest, metricsRequest]);
   }
 
+  function resetLibrarySelection() {
+    catalogRequestRef.current += 1;
+    setSelected(null); setEpisodes([]); setSelectedEpisodeIds([]);
+    setCatalogError(""); setMetricsError(""); setCatalogLoading(false); setMetricsLoading(false);
+  }
+
   async function loadDiscover() {
     const requestId = ++pageRequestRef.current;
+    resetLibrarySelection(); setItems([]);
+    discoveryPagingRef.current = createGroupedPagingState(null);
     setLoading(true);
     setError("");
     try {
@@ -357,11 +381,9 @@ export default function App() {
       discoveryPagingRef.current = result.state;
       setItems(result.visible);
       if (result.visible[0]) void selectSeries(result.visible[0]);
-      setHealthOk(true);
     } catch (nextError) {
       if (requestId !== pageRequestRef.current) return;
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
-      setHealthOk(false);
+      setError(errorMessage(nextError));
     } finally {
       if (requestId === pageRequestRef.current) setLoading(false);
     }
@@ -372,7 +394,7 @@ export default function App() {
     if ((!current.hasMore && current.visibleCount >= current.allItems.length) || loadMoreInFlightRef.current) return;
     loadMoreInFlightRef.current = true;
     const requestId = ++pageRequestRef.current;
-    setLoading(true);
+    setLoading(true); setError("");
     try {
       const result = await fillUniqueGroup(current, async (cursor) => {
         if (!cursor) throw new Error("发现页分页状态丢失");
@@ -386,9 +408,9 @@ export default function App() {
       setItems(result.visible);
     } catch (nextError) {
       if (requestId !== pageRequestRef.current) return;
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
+      setError(errorMessage(nextError));
     } finally {
-      loadMoreInFlightRef.current = false;
+      if (requestId === pageRequestRef.current) loadMoreInFlightRef.current = false;
       if (requestId === pageRequestRef.current) setLoading(false);
     }
   }
@@ -397,6 +419,7 @@ export default function App() {
     if (append && loadMoreInFlightRef.current) return;
     if (append) loadMoreInFlightRef.current = true;
     const requestId = ++pageRequestRef.current;
+    if (!append) { resetLibrarySelection(); setItems([]); setRankPage(null); rankPagingRef.current = createGroupedPagingState(null); }
     setLoading(true);
     setError("");
     try {
@@ -422,13 +445,11 @@ export default function App() {
       setRankPage(page ? { ...page, items: result.state.allItems } : null);
       setItems(result.visible);
       if (!append && result.visible[0]) void selectSeries(result.visible[0]);
-      setHealthOk(true);
     } catch (nextError) {
       if (requestId !== pageRequestRef.current) return;
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
-      setHealthOk(false);
+      setError(errorMessage(nextError));
     } finally {
-      if (append) loadMoreInFlightRef.current = false;
+      if (append && requestId === pageRequestRef.current) loadMoreInFlightRef.current = false;
       if (requestId === pageRequestRef.current) setLoading(false);
     }
   }
@@ -443,9 +464,8 @@ export default function App() {
     setError("");
     if (!append) {
       setItems([]);
-      setSelected(null);
-      setEpisodes([]);
-      catalogRequestRef.current += 1;
+      resetLibrarySelection();
+      searchPagingRef.current = createGroupedPagingState(null);
     }
     try {
       const load = async () => {
@@ -471,9 +491,9 @@ export default function App() {
       setItems(visible);
       if (!append && visible[0]) void selectSeries(visible[0]);
     } catch (nextError) {
-      if (requestId === pageRequestRef.current) setError(nextError instanceof Error ? nextError.message : String(nextError));
+      if (requestId === pageRequestRef.current) setError(errorMessage(nextError));
     } finally {
-      if (append) loadMoreInFlightRef.current = false;
+      if (append && requestId === pageRequestRef.current) loadMoreInFlightRef.current = false;
       if (requestId === pageRequestRef.current) setLoading(false);
     }
   }
@@ -482,11 +502,12 @@ export default function App() {
     loadMoreInFlightRef.current = false;
     setLoading(false);
     if (nav === "discover" && (webCategories || homeAI)) {
-      return () => { pageRequestRef.current += 1; };
+      resetLibrarySelection();
+      return () => { pageRequestRef.current += 1; catalogRequestRef.current += 1; };
     }
     if (nav === "search") {
       if (submittedQuery) void runSearch(submittedQuery);
-      else { setItems([]); setSelected(null); setEpisodes([]); setError(""); }
+      else { setItems([]); resetLibrarySelection(); setError(""); }
     } else if (!isPreview) {
       if (nav === "discover") void loadDiscover();
       if (nav === "rank") void loadRank();
@@ -494,7 +515,7 @@ export default function App() {
       if (nav === "discover") setItems(discoveryPagingRef.current.allItems.slice(0, discoveryPagingRef.current.visibleCount));
       if (nav === "rank") setItems(rankPagingRef.current.allItems.slice(0, rankPagingRef.current.visibleCount));
     }
-    return () => { pageRequestRef.current += 1; };
+    return () => { pageRequestRef.current += 1; catalogRequestRef.current += 1; };
     // Load from the submitted keyword, never from an unsubmitted input draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [nav, contentType, searchContentType, selectedCategory, rankBoard, rankType, isPreview, submittedQuery, searchMode, searchRevision, browseCategories, homeAI, webCategories]);
@@ -536,6 +557,7 @@ export default function App() {
 
   function enqueueSelection() {
     if (!selected) return;
+    if (!isPreview && !settingsModel.settings) { setOperationError("下载设置尚未读取成功，请前往设置重试后再加入队列"); return; }
     const chosen = episodes.filter((episode) => selectedEpisodeIds.includes(episode.itemId));
     const result = manager.enqueue(selected, chosen);
     setToast(`已加入 ${result.added} 集，跳过 ${result.skipped} 个重复项`);
@@ -548,6 +570,8 @@ export default function App() {
     setNav(next);
     if (next === "platformVideos") setPlatformVisited(true);
     if (next === "analytics") setAnalyticsVisited(true);
+    if (next === "automation") setAutomationVisited(true);
+    if (next === "settings") setSettingsVisited(true);
     if (next === "monitor") monitor.clearUnseen();
   };
 
@@ -561,7 +585,7 @@ export default function App() {
           media={media}
           saveDir={activeSettings.saveDir}
           aiConcurrency={activeSettings.aiConcurrency}
-          onAIConcurrencyChange={value => settingsModel.update({ aiConcurrency: value })}
+          onAIConcurrencyChange={value => { setDismissedSettingsWarning(""); return settingsModel.update({ aiConcurrency: value }); }}
           demucsModel={activeSettings.demucsModel}
           whisperModel={activeSettings.whisperModel}
           aiComponents={settingsModel.components}
@@ -569,24 +593,24 @@ export default function App() {
           youtube={isPreview ? previewYouTubeModel : youtube}
           focusTarget={nav === "queue" ? managerFocus : null}
           onChooseDir={() => {
+            setDismissedSettingsWarning("");
             void settingsModel.chooseDirectory();
           }}
           onOpenDir={() => {
+            setDismissedSettingsWarning("");
             void settingsModel.openDirectory();
           }}
           onRevealPath={(path) => {
-            if (!isPreview) void revealPath(path).catch((nextError) => setError(String(nextError)));
+            if (!isPreview) void revealPath(path).catch((nextError) => setOperationError(errorMessage(nextError)));
           }}
         />
       ) : null}
       {platformVisited && <PlatformVideosPage hidden={nav !== "platformVideos"} youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewManagementCommands : undefined} />}
       {analyticsVisited && <DataAnalyticsPage hidden={nav !== "analytics"} youtube={isPreview ? previewYouTubeModel : youtube} commands={isPreview ? previewAnalyticsCommands : undefined} />}
-      {nav === "queue" || nav === "platformVideos" || nav === "analytics" ? null : nav === "monitor" ? (
+      {automationVisited && <AutomationPage hidden={nav !== "automation"} aiConcurrency={activeSettings.aiConcurrency} onAIConcurrencyChange={value => { setDismissedSettingsWarning(""); return settingsModel.update({ aiConcurrency: value }); }} runtimeEnabled={!isPreview} saveDir={activeSettings.saveDir} channels={(isPreview ? previewYouTubeModel : youtube).channels} onOpenSettings={() => navigate("settings")} />}
+      {settingsVisited && <SettingsPage hidden={nav !== "settings"} model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />}
+      {nav === "queue" || nav === "platformVideos" || nav === "analytics" || nav === "automation" || nav === "settings" ? null : nav === "monitor" ? (
         <NewReleasesPage model={monitor} detectOrientation={!isPreview} onSelect={(item) => { setMonitorDetailOpen(true); void selectSeries(item); }} />
-      ) : nav === "automation" ? (
-        <AutomationPage aiConcurrency={activeSettings.aiConcurrency} onAIConcurrencyChange={value => settingsModel.update({ aiConcurrency: value })} runtimeEnabled={!isPreview} saveDir={activeSettings.saveDir} channels={(isPreview ? previewYouTubeModel : youtube).channels} onOpenSettings={() => navigate("settings")} />
-      ) : nav === "settings" ? (
-        <SettingsPage model={settingsModel} youtube={isPreview ? previewYouTubeModel : youtube} />
       ) : (
         <main className="library-page">
           <header className="library-header">
@@ -645,7 +669,7 @@ export default function App() {
                 setSelected(null); setEpisodes([]); setSelectedEpisodeIds([]);
                 setCatalogError(""); setMetricsError(""); setCatalogLoading(false); setMetricsLoading(false);
               }} /> : <>
-              {error ? <div className="inline-error">{error}</div> : null}
+              {error ? <div className="inline-error" role="alert">{error}<button type="button" className="text-action" disabled={loading} onClick={() => { const append = items.length > 0; void (nav === "rank" ? loadRank(append) : nav === "search" ? runSearch(submittedQuery, append) : append ? loadMoreDiscover() : loadDiscover()); }}>重试加载</button></div> : null}
               {nav === "rank" && rankPage?.sourceNote ? <p className="monitor-refreshed">{rankPage.sourceNote}</p> : null}
               {loading ? <div className="library-loading-overlay" role="status" aria-label="正在加载内容"><span className="loading-spinner" aria-hidden="true" />正在加载内容…</div> : null}
               {!loading && !error && !items.length ? <div className="empty-library"><h2>{nav === "search" && !submittedQuery ? "搜索你想看的剧" : "没有找到短剧"}</h2><p>{nav === "search" && !submittedQuery ? "输入剧名，默认搜索全部真人剧和漫剧" : "换一个关键词或分类试试"}</p></div> : null}
@@ -695,6 +719,7 @@ export default function App() {
         </SeriesDialog>
       ) : null}
       {toast ? <div className="toast" role="status"><span><CheckIcon size={14} /></span>{toast}<button type="button" aria-label="关闭提示" onClick={() => setToast("")}><CloseIcon size={16} /></button></div> : null}
+      {(operationError || (nav !== "settings" && settingsModel.warning !== dismissedSettingsWarning && settingsModel.warning)) && <div className="app-operation-error" role="alert"><span>{operationError || settingsModel.warning}</span><button type="button" className="text-action" onClick={() => navigate("settings")}>查看设置</button><button type="button" className="icon-button" aria-label="关闭操作错误" onClick={() => { setOperationError(""); setDismissedSettingsWarning(settingsModel.warning); }}>×</button></div>}
     </div>
   );
 }

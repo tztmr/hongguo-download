@@ -32,6 +32,15 @@ function model(overrides: Partial<UseAppSettingsResult> = {}): UseAppSettingsRes
 }
 
 describe("SettingsPage", () => {
+  it("shows a retry action after settings fail to load instead of an endless spinner", () => {
+    const reload = vi.fn();
+    const view = render(<SettingsPage model={model({ settings: null, warning: "设置文件读取失败", reload })} />);
+    expect(view.getByRole("alert").textContent).toBe("设置文件读取失败");
+    expect(view.queryByText("正在加载设置…")).toBeNull();
+    fireEvent.click(view.getByRole("button", { name: "重新读取设置" }));
+    expect(reload).toHaveBeenCalledOnce();
+  });
+
   it("renders path, resolution choices, notification switches and permission guidance", () => {
     const settings = model();
     const view = render(<SettingsPage model={settings} />);
@@ -42,7 +51,7 @@ describe("SettingsPage", () => {
     expect(view.getByRole("radio", { name: /^720p/ })).toBeTruthy();
     expect((view.getByRole("checkbox", { name: /下载完成通知/ }) as HTMLInputElement).checked).toBe(true);
     expect((view.getByRole("checkbox", { name: /新剧通知/ }) as HTMLInputElement).checked).toBe(true);
-    expect(view.getByText(/macOS 系统设置/)).toBeTruthy();
+    expect(view.getByText(/系统设置/)).toBeTruthy();
     expect(view.getByText(/上次设置文件损坏/)).toBeTruthy();
     expect((view.getByRole("radio", { name: /自动选择计算设备/ }) as HTMLInputElement).checked).toBe(true);
 
@@ -235,7 +244,7 @@ describe("SettingsPage", () => {
   });
   it("selects only missing components for current models and reports installation failures", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
-    const settings = model({ components: ["runtime", "demucs-htdemucs", "whisper-small", "whisper-medium"].map((id) => ({
+    const settings = model({ warning: "", components: ["runtime", "demucs-htdemucs", "whisper-small", "whisper-medium"].map((id) => ({
       id, version: "1", installed: id === "runtime", installedVersion: null, installedPath: null,
       downloadBytes: 1024, installedBytes: 2048, inUse: false,
     })), installComponent: vi.fn().mockRejectedValue({ code: "AI_COMPONENT_DOWNLOAD_FAILED", message: "媒体组件下载失败（HTTP 404 Not Found）" }) });

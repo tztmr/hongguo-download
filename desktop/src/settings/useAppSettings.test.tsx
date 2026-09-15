@@ -26,6 +26,55 @@ function dependencies(overrides: Partial<AppSettingsDependencies> = {}): AppSett
 }
 
 describe("useAppSettings", () => {
+  it("does not restore an earlier failed optimistic patch after consecutive failures", async () => {
+    const deps = dependencies({ updateSettings: vi.fn().mockRejectedValue(new Error("磁盘写入失败")) });
+    const { result } = renderHook(() => useAppSettings(deps));
+    await waitFor(() => expect(result.current.settings).not.toBeNull());
+    await act(async () => {
+      await Promise.all([result.current.update({ definition: "1080p" }), result.current.update({ notifyNewReleases: false })]);
+    });
+    expect(result.current.settings?.definition).toBe("auto");
+    expect(result.current.settings?.notifyNewReleases).toBe(true);
+    expect(result.current.warning).toContain("磁盘写入失败");
+  });
+
+  it("keeps later edits visible while an earlier queued save completes", async () => {
+    let finishFirst!: (value: AppSettings) => void;
+    let finishSecond!: (value: AppSettings) => void;
+    const deps = dependencies({ updateSettings: vi.fn()
+      .mockReturnValueOnce(new Promise(resolve => { finishFirst = resolve; }))
+      .mockReturnValueOnce(new Promise(resolve => { finishSecond = resolve; })) });
+    const { result } = renderHook(() => useAppSettings(deps));
+    await waitFor(() => expect(result.current.settings).not.toBeNull());
+    let first!: Promise<void>, second!: Promise<void>;
+    act(() => { first = result.current.update({ definition: "720p" }); second = result.current.update({ notifyNewReleases: false }); });
+    await act(async () => { finishFirst({ ...defaultSettings, definition: "720p" }); await first; });
+    expect(result.current.settings?.notifyNewReleases).toBe(false);
+    await act(async () => { finishSecond({ ...defaultSettings, definition: "720p", notifyNewReleases: false }); await second; });
+  });
+
+  it("loads settings independently of a slow device pool", async () => {
+    const deps = dependencies({ getDevicePool: vi.fn(() => new Promise<DevicePoolStatus>(() => {})) });
+    const { result } = renderHook(() => useAppSettings(deps));
+    await waitFor(() => expect(result.current.settings?.saveDir).toBe(defaultSettings.saveDir));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.devicesLoading).toBe(true);
+  });
+
+  it("keeps independent load errors and recovers settings through retry", async () => {
+    const deps = dependencies({
+      getSettings: vi.fn().mockRejectedValueOnce(new Error("设置读取失败")).mockResolvedValue(defaultSettings),
+      getAiComponents: vi.fn().mockRejectedValueOnce(new Error("组件暂不可用")).mockResolvedValue([]),
+    });
+    const { result } = renderHook(() => useAppSettings(deps));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.warning).toContain("设置读取失败");
+    expect(result.current.warning).toContain("组件暂不可用");
+    act(() => result.current.reload?.());
+    await waitFor(() => expect(result.current.settings).toEqual(defaultSettings));
+    expect(result.current.warning).toBe("");
+  });
+
   it("loads and refreshes the device identity pool", async () => {
     const initial: DevicePoolStatus = { devices: [], pool_size: 0, active_count: 0 };
     const refreshed: DevicePoolStatus = {

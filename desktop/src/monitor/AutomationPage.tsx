@@ -131,9 +131,9 @@ function mergeAutomationCategories(groupsByType: Array<{ contentType: ContentTyp
   return result;
 }
 
-export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcurrency, onAIConcurrencyChange, runtimeEnabled = isTauri() }: {
+export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcurrency, onAIConcurrencyChange, runtimeEnabled = isTauri(), hidden = false }: {
   aiConcurrency?: number; onAIConcurrencyChange?: (value: number) => Promise<void>;
-  saveDir: string; channels?: YouTubeChannel[]; onOpenSettings?: () => void; runtimeEnabled?: boolean;
+  saveDir: string; channels?: YouTubeChannel[]; onOpenSettings?: () => void; runtimeEnabled?: boolean; hidden?: boolean;
 }) {
   const mediaConcurrencyMax = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent) ? 10 : 5;
   const [draft, setDraft] = useState<Draft>(readDraft);
@@ -158,11 +158,11 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
   const mounted = useRef(true);
   const dirtyRef = useRef(false);
   const editRevision = useRef(0);
+  const initialized = useRef(false);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
-    mounted.current = true;
-    if (!runtimeEnabled) return;
+    if (!runtimeEnabled || hidden) return;
     let active = true;
-    let initialized = false;
     let refreshing = false;
     async function refresh() {
       if (busy.current || refreshing) return;
@@ -172,18 +172,18 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
         const state = await automationRuntime.snapshot();
         if (!active || requestRevision !== revision.current) return;
         setSnapshot(state); setPollError(""); setLoaded(true);
-        if (!initialized) {
+        if (!initialized.current) {
           if (state.config && !dirtyRef.current) setDraft(normalizeDraft(state.config));
           if (!state.config) setMessage("尚未保存后台配置；已有本地草稿可点击保存迁移。");
-          initialized = true;
+          initialized.current = true;
         }
       } catch (cause) { if (active && requestRevision === revision.current) setPollError(automationError(cause)); }
       finally { refreshing = false; }
     }
     void refresh();
     const timer = window.setInterval(() => void refresh(), 2000);
-    return () => { active = false; mounted.current = false; window.clearInterval(timer); };
-  }, [runtimeEnabled]);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [runtimeEnabled, hidden]);
   useEffect(() => {
     if (!runtimeEnabled) return;
     let active = true;
@@ -298,7 +298,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiConcu
     ["提取字幕", draft.subtitleFormat.toUpperCase(), draft.subtitles],
     ["AI 文案与封面", "按配置生成", draft.metadataSource !== "template" || draft.coverSource !== "source"], ["上传成片", "等待处理完成", true], ["首集 Shorts 引流", "正片成功后 · 独立查重", draft.firstEpisodeShorts], ["删除单集", "全部上传处理成功后", draft.deleteEpisodes], ["上传后清理", "成功后删除", draft.deleteFinal],
   ] as const;
-  return <main className="auto-page">
+  return <main hidden={hidden} className="auto-page">
     <header className="auto-header"><div><div className="auto-eyebrow">AUTOMATION <span>{runtimeEnabled ? "后台执行" : "设置预览"}</span></div><h1>24 小时自动追剧</h1><p>从发现新剧到上传完成，把每一步安排好。</p></div><div className="auto-header-actions"><span className="auto-idle">{modeText}</span><button className="primary-button" type="button" disabled={!!pending || !loaded} onClick={() => void save()}>{pending === "保存设置" ? "保存中…" : runtimeEnabled ? "保存设置" : "保存设置草稿"}</button></div></header>
     <details className="auto-pipeline" aria-label="自动化流程"><summary><span><AutomationIcon size={18} />全流程自动处理</span><small>单部按顺序 · 多部流水线并行</small></summary><ol>{stages.map(([name, hint, enabled], index) => <li key={name} className={enabled ? "" : "is-skipped"}><span className="auto-step-number">{String(index + 1).padStart(2, "0")}</span><strong>{name}</strong><small>{enabled ? hint : "已跳过"}</small></li>)}</ol></details>
     <div className="auto-preview-note"><span className="auto-note-dot" /><p>{runtimeEnabled ? "应用需保持运行，切换页面不影响后台。保存与启动分开；暂停或停止后，当前不可中断请求收尾，暂不开始新阶段。退出应用后不再监控，重开按恢复设置继续。" : "浏览器仅预览设置，不能启动、扫描或模拟后台进度。「AI 文案与封面」的手动生成会真实消耗对应服务额度。"}</p></div>

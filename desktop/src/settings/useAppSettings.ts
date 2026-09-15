@@ -13,6 +13,8 @@ import {
 } from "../api";
 import { createTauriNotificationAdapter, type NotificationStatus } from "../notifications";
 import type { AIComponentProgress, AIComponentStatus, AppSettings, DevicePoolStatus } from "../types";
+import { errorMessage } from "../errors";
+export { errorMessage } from "../errors";
 
 export type AppSettingsPatch = Partial<
   Omit<AppSettings, "version" | "warning">
@@ -46,6 +48,7 @@ export type UseAppSettingsResult = {
   installComponent(id: string): Promise<void>;
   removeComponent(id: string): Promise<void>;
   refreshDevice(): Promise<void>;
+  reload?(): void;
 };
 
 const notifications = createTauriNotificationAdapter();
@@ -63,56 +66,40 @@ const defaultDependencies: AppSettingsDependencies = {
   subscribeAiComponentProgress,
 };
 
-function readErrorMessage(error: unknown, seen = new Set<unknown>()): string | undefined {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === "string" && error) return error;
-  if (typeof error === "number" || typeof error === "boolean") return String(error);
-  if (!error || typeof error !== "object" || seen.has(error)) return undefined;
-  seen.add(error);
-  const record = error as Record<string, unknown>;
-  if (typeof record.message === "string" && record.message) return record.message;
-  for (const key of ["payload", "error", "data"]) {
-    const nested = readErrorMessage(record[key], seen);
-    if (nested) return nested;
-  }
-  return undefined;
-}
-
-export function errorMessage(error: unknown) {
-  return readErrorMessage(error) || "操作失败，请重试";
-}
-
 export function useAppSettings(
   dependencies: AppSettingsDependencies = defaultDependencies,
 ): UseAppSettingsResult {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loading, setLoading] = useState(true);
   const [warning, setWarning] = useState("");
+  const [componentWarning, setComponentWarning] = useState("");
   const [notificationPermission, setNotificationPermission] =
     useState<NotificationStatus>("prompt");
   const [components, setComponents] = useState<AIComponentStatus[]>([]);
   const [devicePool, setDevicePool] = useState<DevicePoolStatus | null>(null);
   const [devicesLoading, setDevicesLoading] = useState(true);
-  const settingsRef = useRef<AppSettings | null>(null);
+  const confirmedSettings = useRef<AppSettings | null>(null);
+  const pendingPatches = useRef<AppSettingsPatch[]>([]);
+  const batchWarning = useRef("");
+  const directoryPending = useRef(false);
   const updateQueue = useRef<Promise<void>>(Promise.resolve());
+  const [loadRevision, setLoadRevision] = useState(0);
+
+  const publishSettings = useCallback(() => {
+    if (!confirmedSettings.current) return;
+    const value = pendingPatches.current.reduce<AppSettings>((current, patch) => ({ ...current, ...patch }), confirmedSettings.current);
+    setSettings(value);
+  }, []);
 
   useEffect(() => {
     let active = true;
-    void Promise.all([
-      dependencies.getSettings(),
-      dependencies.getNotificationStatus().catch(() => "prompt" as const),
-      dependencies.getAiComponents ? dependencies.getAiComponents().catch(() => [] as AIComponentStatus[]) : Promise.resolve([] as AIComponentStatus[]),
-      dependencies.getDevicePool ? dependencies.getDevicePool().catch(() => null) : Promise.resolve(null),
-    ])
-      .then(([value, permission, nextComponents, nextDevicePool]) => {
+    setLoading(true); setDevicesLoading(true); setWarning(""); setComponentWarning("");
+    void dependencies.getSettings()
+      .then(value => {
         if (!active) return;
-        settingsRef.current = value;
-        setSettings(value);
+        confirmedSettings.current = value;
+        publishSettings();
         setWarning(value.warning || "");
-        setNotificationPermission(permission);
-        setComponents(nextComponents);
-        setDevicePool(nextDevicePool);
-        setDevicesLoading(false);
       })
       .catch((error) => {
         if (active) setWarning(errorMessage(error));
@@ -120,13 +107,17 @@ export function useAppSettings(
       .finally(() => {
         if (active) {
           setLoading(false);
-          setDevicesLoading(false);
         }
       });
+    void dependencies.getNotificationStatus().then(value => { if (active) setNotificationPermission(value); }).catch(() => undefined);
+    if (dependencies.getAiComponents) void dependencies.getAiComponents().then(value => { if (active) setComponents(value); })
+      .catch(error => { if (active) setComponentWarning(`媒体组件读取失败：${errorMessage(error)}`); });
+    void (dependencies.getDevicePool?.() ?? Promise.resolve(null)).then(value => { if (active) setDevicePool(value); })
+      .catch(() => { if (active) setDevicePool(null); }).finally(() => { if (active) setDevicesLoading(false); });
     return () => {
       active = false;
     };
-  }, [dependencies]);
+  }, [dependencies, loadRevision, publishSettings]);
 
   useEffect(() => {
     if (!dependencies.subscribeAiComponentProgress) return;
@@ -149,42 +140,44 @@ export function useAppSettings(
 
   const update = useCallback(
     async (patch: AppSettingsPatch) => {
-      const previous = settingsRef.current;
-      if (!previous) return;
-      const optimistic = { ...previous, ...patch };
-      settingsRef.current = optimistic;
-      setSettings(optimistic);
-      setWarning("");
+      if (!confirmedSettings.current) return;
+      if (!pendingPatches.current.length) { batchWarning.current = ""; setWarning(""); }
+      pendingPatches.current.push(patch);
+      publishSettings();
       const operation = updateQueue.current.then(async () => {
         try {
           const saved = await dependencies.updateSettings(patch);
-          settingsRef.current = saved;
-          setSettings(saved);
-          setWarning(saved.warning || "");
+          confirmedSettings.current = saved;
+          if (!batchWarning.current) setWarning(saved.warning || "");
         } catch (error) {
-          settingsRef.current = previous;
-          setSettings(previous);
-          setWarning(errorMessage(error));
+          batchWarning.current = errorMessage(error);
+          setWarning(batchWarning.current);
+        } finally {
+          pendingPatches.current.splice(pendingPatches.current.indexOf(patch), 1);
+          publishSettings();
         }
       });
       updateQueue.current = operation;
       await operation;
     },
-    [dependencies],
+    [dependencies, publishSettings],
   );
 
   const chooseDirectory = useCallback(async () => {
-    try {
+    if (directoryPending.current) return;
+    directoryPending.current = true;
+    const operation = updateQueue.current.then(async () => { try {
       const saveDir = await dependencies.chooseSaveDir();
-      if (!settingsRef.current) return;
-      const next = { ...settingsRef.current, saveDir };
-      settingsRef.current = next;
-      setSettings(next);
+      if (!confirmedSettings.current) return;
+      confirmedSettings.current = { ...confirmedSettings.current, saveDir };
+      publishSettings();
       setWarning("");
     } catch (error) {
       setWarning(errorMessage(error));
-    }
-  }, [dependencies]);
+    } finally { directoryPending.current = false; } });
+    updateQueue.current = operation;
+    await operation;
+  }, [dependencies, publishSettings]);
 
   const openDirectory = useCallback(async () => {
     try {
@@ -243,7 +236,7 @@ export function useAppSettings(
   return {
     settings,
     loading,
-    warning,
+    warning: [warning, componentWarning].filter(Boolean).join("；"),
     notificationPermission,
     components,
     devicePool,
@@ -254,5 +247,6 @@ export function useAppSettings(
     installComponent,
     removeComponent,
     refreshDevice,
+    reload: () => setLoadRevision(value => value + 1),
   };
 }

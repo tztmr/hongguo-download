@@ -110,7 +110,6 @@
 .auto-source-cover { margin-top: 24px; margin-bottom: 0; border: 1px solid #403037; background: #211a1e; }
 @media (max-width: 1100px) { .auto-workspace { grid-template-columns: minmax(0, 1fr) 240px; gap: 16px; } .auto-panel { padding: 20px; } .auto-tabs { padding: 0 9px; gap: 3px; } .auto-tabs button span { display: none; } .auto-summary { padding: 18px; } }
 @media (max-width: 900px) { .auto-workspace { grid-template-columns: 1fr; } .auto-pipeline { overflow: auto; } .auto-pipeline ol { min-width: 800px; } .auto-header { align-items: start; } .auto-header-actions { flex-direction: column; align-items: end; gap: 10px; } .auto-panel { min-height: 0; } }
-@media (max-height: 850px) { .primary-nav { margin-top: 22px; gap: 3px; overflow-y: auto; } .app-rail .service-health { padding-top: 15px; } }
 
 .auto-path small { color: var(--muted); font-size: 11px; line-height: 1.7; }
 .auto-path strong { font-size: 12px; font-weight: 550; }
