@@ -552,8 +552,9 @@ impl ManagementApi {
                 }),
             }
         }
-        // File metadata is owner-only and may not be available for blocked or
-        // newly uploaded videos. Failure here must not hide the restriction read.
+        // Use the same parts as the editor so metadata and its revision stay
+        // together. Owner-only file metadata may be unavailable for blocked or
+        // newly uploaded videos; that must not hide the initial restriction read.
         if !result.items.is_empty() {
             let owned_ids = result
                 .items
@@ -562,19 +563,16 @@ impl ManagementApi {
                 .collect::<Vec<_>>()
                 .join(",");
             if let Ok(details) = self
-                .get("videos", &[("part", "fileDetails"), ("id", &owned_ids)])
+                .get("videos", &[("part", VIDEO_PARTS), ("id", &owned_ids)])
                 .await
             {
                 if let Some(rows) = details["items"].as_array() {
                     for video in &mut result.items {
-                        if let (Some(original), Some(detail)) = (
-                            items(&data)?.iter().find(|v| field(v, "/id") == video.id),
-                            rows.iter().find(|v| field(v, "/id") == video.id),
-                        ) {
-                            let mut full = original.clone();
-                            full["fileDetails"] = detail["fileDetails"].clone();
-                            video.duration_seconds = duration_seconds(&full);
-                            video.video_format = video_format(&full, video.duration_seconds).into();
+                        if let Some(detail) = rows.iter().find(|v| field(v, "/id") == video.id) {
+                            owned(detail, &self.channel_id)?;
+                            if let Ok(fresh) = parse_video(detail) {
+                                *video = fresh;
+                            }
                         }
                     }
                 }
@@ -1016,13 +1014,13 @@ mod tests {
     ) {
         let mut foreign = identified("other000001");
         foreign["snippet"]["channelId"] = json!("other");
+        let mut full = identified("short000001");
+        full["etag"] = json!("full-revision");
+        full["fileDetails"] = json!({"durationMs":"90000"});
         let (api, server) = server(vec![
             (200, channel()),
             (200, json!({"items":[identified("short000001"), foreign]})),
-            (
-                200,
-                json!({"items":[{"id":"short000001","fileDetails":{"durationMs":"90000"}}]}),
-            ),
+            (200, json!({"items":[full]})),
         ])
         .await;
         let result = api
@@ -1039,8 +1037,10 @@ mod tests {
         let requests = server.await.unwrap();
         assert!(requests.iter().all(|request| request.starts_with("GET ")));
         assert!(requests[1].contains("id=short000001%2Cother000001%2Cgone0000001 "));
-        assert!(requests[2].contains("part=fileDetails&id=short000001 "));
+        assert!(requests[2]
+            .contains("part=snippet%2Cstatus%2CcontentDetails%2CfileDetails&id=short000001 "));
         assert_eq!(result.items[0].duration_seconds, Some(90.0));
+        assert_eq!(result.items[0].etag, "full-revision");
     }
     #[tokio::test]
     async fn delete_verifies_channel_and_exact_video_then_deletes_only_that_video() {
