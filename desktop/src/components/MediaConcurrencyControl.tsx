@@ -14,7 +14,7 @@ export function MediaConcurrencyControl({ value = 0, onChange, disabled = false,
         catch { setError("并发设置保存失败，请重试"); }
         finally { setBusy(false); }
       }}>
-        <option value={0}>自动（最多 {max} 个）</option>
+        <option value={0}>自动（最多 {Math.min(max, 5)} 个）</option>
         {Array.from({ length: max }, (_, i) => i + 1).map(n => <option value={n} key={n}>{n} 个任务</option>)}
       </select>
     </label>

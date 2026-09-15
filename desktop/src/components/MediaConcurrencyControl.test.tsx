@@ -9,6 +9,7 @@ it("exposes automatic and one through ten slots, persists before allowing anothe
   const view = render(<MediaConcurrencyControl value={0} onChange={save} />);
   const select = view.getByRole("combobox", { name: "AI 同时处理" });
   expect(view.getAllByRole("option")).toHaveLength(11);
+  expect(view.getByRole("option", { name: "自动（最多 5 个）" })).toHaveProperty("value", "0");
   fireEvent.change(select, { target: { value: "5" } });
   expect(save).toHaveBeenCalledWith(5);
   expect(select).toHaveProperty("disabled", true);

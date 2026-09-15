@@ -793,6 +793,35 @@ describe("bulk AI operations", () => {
   it.each([
     ["批量分离背景音乐", "startAudioSeparation", "htdemucs"],
     ["批量提取字幕", "startSubtitleExtraction", "small"],
+  ] as const)("%s submits all five checked dramas and preserves the selection", async (label, command, model) => {
+    const manager = managerFixture();
+    manager.state = { ...state, batches: Array.from({ length: 6 }, (_, index) => ({
+      ...state.batches[1], id: `five-${index}`, bookId: `book-five-${index}`, title: `并发剧目 ${index + 1}`,
+      series: { ...state.batches[1].series, bookId: `book-five-${index}`, title: `并发剧目 ${index + 1}` },
+      items: state.batches[1].items.map((item, episode) => ({ ...item, id: `five-${index}-${episode}`, status: "done" as const, path: `/Downloads/five-${index}/${episode + 1}.mp4` })),
+    })) };
+    const media = mediaFixture({ jobs: [], scheduling: { windows: true, concurrency: 5, reason: "" } });
+    const view = render(<DownloadManagerPage manager={manager} media={media} aiConcurrency={5} onAIConcurrencyChange={vi.fn().mockResolvedValue(undefined)} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);
+    for (let index = 1; index <= 5; index++) {
+      fireEvent.click(view.getByRole("checkbox", { name: `选择下载任务 并发剧目 ${index}` }));
+    }
+    fireEvent.click(view.getByRole("button", { name: label }));
+    const dialog = await view.findByRole("dialog", { name: label });
+    expect(within(dialog).getByRole("combobox", { name: "AI 同时处理" })).toHaveProperty("value", "5");
+    fireEvent.click(within(dialog).getByRole("button", { name: "开始批量处理" }));
+    await waitFor(() => expect(view.queryByRole("dialog", { name: label })).toBeNull());
+    expect(media[command]).toHaveBeenCalledTimes(5);
+    for (let index = 0; index < 5; index++) {
+      expect(media[command]).toHaveBeenNthCalledWith(index + 1, expect.objectContaining({ id: `five-${index}` }), "episodes", model, undefined);
+      expect(view.getByRole("checkbox", { name: `选择下载任务 并发剧目 ${index + 1}` })).toHaveProperty("checked", true);
+    }
+    expect(view.getByRole("checkbox", { name: "选择下载任务 并发剧目 6" })).toHaveProperty("checked", false);
+    expect(view.getByRole("tab", { name: "下载任务" }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it.each([
+    ["批量分离背景音乐", "startAudioSeparation", "htdemucs"],
+    ["批量提取字幕", "startSubtitleExtraction", "small"],
   ] as const)("%s queues completed selections only", async (label, command, model) => {
     const media = mediaFixture({ jobs: [] });
     const view = render(<DownloadManagerPage manager={managerFixture()} media={media} saveDir="/Downloads" onOpenDir={vi.fn()} onChooseDir={vi.fn()} onRevealPath={vi.fn()} />);

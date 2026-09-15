@@ -717,6 +717,26 @@ impl MediaJobService {
         probe: scheduling::ResourceProbe,
         initial_concurrency: usize,
     ) -> Self {
+        Self::with_platform_probe_and_limit(
+            manager,
+            executor,
+            ai_executor,
+            event_sink,
+            probe,
+            initial_concurrency,
+            cfg!(windows),
+        )
+    }
+
+    fn with_platform_probe_and_limit(
+        manager: Arc<MediaJobManager>,
+        executor: Arc<dyn MergeExecutor>,
+        ai_executor: Arc<dyn AIExecutor>,
+        event_sink: Arc<dyn MediaJobEventSink>,
+        probe: scheduling::ResourceProbe,
+        initial_concurrency: usize,
+        windows: bool,
+    ) -> Self {
         let resume_queued = manager
             .snapshot()
             .jobs
@@ -742,7 +762,15 @@ impl MediaJobService {
         let completion_sender = wake_sender.clone();
         let worker = thread::Builder::new()
             .name("media-job-scheduler".into())
-            .spawn(move || worker_loop(worker_context, wake_receiver, completion_sender, probe))
+            .spawn(move || {
+                worker_loop(
+                    worker_context,
+                    wake_receiver,
+                    completion_sender,
+                    probe,
+                    windows,
+                )
+            })
             .expect("media worker thread should start");
         let service = Self {
             manager,
@@ -1095,6 +1123,7 @@ fn worker_loop(
     wake_receiver: mpsc::Receiver<()>,
     completion_sender: mpsc::Sender<()>,
     mut probe: scheduling::ResourceProbe,
+    windows: bool,
 ) {
     let mut workers: HashMap<String, JoinHandle<()>> = HashMap::new();
     let (finished_sender, finished_receiver) = mpsc::channel::<String>();
@@ -1133,7 +1162,7 @@ fn worker_loop(
                 if context.shutting_down.load(AtomicOrdering::Acquire) {
                     break;
                 }
-                if !cfg!(windows)
+                if !windows
                     && running
                         .values()
                         .any(|job| !scheduling::is_parallel_kind(job.kind))
@@ -1159,8 +1188,13 @@ fn worker_loop(
                     if let Some(request) = candidate.ai_request.as_mut() {
                         request.device = context.ai_executor.scheduling_device(request);
                     }
-                    match scheduling::admit_configured(&candidate, &active, resources, concurrency)
-                    {
+                    match scheduling::admit_configured(
+                        &candidate,
+                        &active,
+                        resources,
+                        concurrency,
+                        windows,
+                    ) {
                         Ok(budget) => {
                             selected = Some((candidate.id, budget));
                             break;
@@ -1170,7 +1204,7 @@ fn worker_loop(
                                 .queue_reason
                                 .lock()
                                 .unwrap_or_else(|e| e.into_inner()) = reason.into();
-                            if !cfg!(windows) {
+                            if !windows {
                                 break;
                             }
                         }
@@ -1202,7 +1236,7 @@ fn worker_loop(
             let (job, token, budget) = claimed;
             // The probe is shared by this admission pass. Reserve only NEW launches;
             // its free-memory counters already include older workers' allocations.
-            if cfg!(windows) {
+            if windows {
                 resources.available_memory = resources
                     .available_memory
                     .map(|v| v.saturating_sub(budget.memory));
@@ -2607,6 +2641,178 @@ mod tests {
             }
             Err(AppError::new("AI_CANCELLED", "cancelled"))
         }
+    }
+
+    #[test]
+    fn windows_manual_five_auto_jobs_run_and_refill_through_the_real_queue() {
+        struct BudgetAI {
+            started: mpsc::Sender<(String, scheduling::ExecutionBudget)>,
+            completed: Arc<Mutex<HashSet<String>>>,
+        }
+        impl AIExecutor for BudgetAI {
+            fn execute(
+                &self,
+                _request: ValidatedAIJobRequest,
+                _cancellation: &CancellationToken,
+                _progress: &mut dyn FnMut(MergeProgress),
+            ) -> Result<AIExecutionResult, AppError> {
+                panic!("the scheduler must supply an execution budget");
+            }
+
+            fn execute_with_budget(
+                &self,
+                request: ValidatedAIJobRequest,
+                cancellation: &CancellationToken,
+                _progress: &mut dyn FnMut(MergeProgress),
+                budget: scheduling::ExecutionBudget,
+            ) -> Result<AIExecutionResult, AppError> {
+                self.started
+                    .send((request.book_id.clone(), budget))
+                    .unwrap();
+                loop {
+                    if cancellation.is_cancelled() {
+                        return Err(AppError::new("AI_CANCELLED", "cancelled"));
+                    }
+                    if self.completed.lock().unwrap().contains(&request.book_id) {
+                        return Ok(AIExecutionResult {
+                            output_path: request.inputs[0].path.clone(),
+                            outputs: Vec::new(),
+                        });
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        // Preload both automation/merged and manual/episode work so one real
+        // admission pass must reserve resources for five simultaneous launches.
+        let jobs: Vec<_> = (0..8)
+            .map(|index| {
+                let subtitles = index % 2 == 1;
+                manager
+                    .enqueue_ai(
+                        validate_ai_request(
+                            &StartAIJobRequest {
+                                book_id: format!("windows-five-{index}"),
+                                title: "Windows 并发回归".into(),
+                                series_root: fixture.series.clone(),
+                                scope: if subtitles {
+                                    MediaJobScope::Episodes
+                                } else {
+                                    MediaJobScope::Merged
+                                },
+                                inputs: vec![fixture
+                                    .write_input(&format!("windows-five-{index}.mp4"), b"input")],
+                                model: if subtitles { "small" } else { "htdemucs" }.into(),
+                                device: "auto".into(),
+                            },
+                            if subtitles {
+                                MediaJobKind::ExtractSubtitles
+                            } else {
+                                MediaJobKind::SeparateBackgroundMusic
+                            },
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let resources = Arc::new(Mutex::new(scheduling::Resources {
+            cores: 12,
+            cpu_usage: Some(90.0),
+            available_memory: Some(12 * scheduling::GIB),
+            gpu: Some(scheduling::GpuResources {
+                free_memory: 6 * scheduling::GIB,
+                usage: 90.0,
+                shared_memory: false,
+            }),
+        }));
+        let probe = resources.clone();
+        let (tx, rx) = mpsc::channel();
+        let completed = Arc::new(Mutex::new(HashSet::new()));
+        let service = MediaJobService::with_platform_probe_and_limit(
+            manager,
+            Arc::new(ImmediateExecutor),
+            Arc::new(BudgetAI {
+                started: tx,
+                completed: completed.clone(),
+            }),
+            Arc::new(RecordingSink::default()),
+            Box::new(move || *probe.lock().unwrap()),
+            5,
+            true,
+        );
+        let mut started: Vec<_> = (0..5)
+            .map(|_| rx.recv_timeout(Duration::from_secs(3)).unwrap())
+            .collect();
+        started.sort_by(|a, b| a.0.cmp(&b.0));
+        for (index, (id, budget)) in started.iter().enumerate() {
+            assert_eq!(id, &format!("windows-five-{index}"));
+            assert_eq!(budget.cpu_threads, 2);
+            assert_eq!(budget.force_cpu, index > 0);
+            assert_eq!(
+                service
+                    .manager
+                    .job(&jobs[index].id)
+                    .unwrap()
+                    .ai_request
+                    .unwrap()
+                    .device,
+                "auto"
+            );
+        }
+        assert_eq!(
+            service
+                .snapshot()
+                .jobs
+                .iter()
+                .filter(|j| j.status == MediaJobStatus::Running)
+                .count(),
+            5
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        service.pause(&jobs[0].id).unwrap();
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "paused workers retain their slots"
+        );
+        completed.lock().unwrap().insert("windows-five-2".into());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(3)).unwrap().0,
+            "windows-five-5"
+        );
+        wait_for_job(&service, &jobs[2].id, MediaJobStatus::Completed);
+
+        resources.lock().unwrap().available_memory = Some(3 * scheduling::GIB);
+        completed.lock().unwrap().insert("windows-five-1".into());
+        wait_for_job(&service, &jobs[1].id, MediaJobStatus::Completed);
+        assert!(
+            rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "memory headroom still gates manual refill"
+        );
+        resources.lock().unwrap().available_memory = Some(12 * scheduling::GIB);
+        service.wake_worker();
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(3)).unwrap().0,
+            "windows-five-6"
+        );
+
+        service.set_concurrency(1);
+        for index in [3, 4, 5, 6] {
+            completed
+                .lock()
+                .unwrap()
+                .insert(format!("windows-five-{index}"));
+            wait_for_job(&service, &jobs[index].id, MediaJobStatus::Completed);
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        service.resume(&jobs[0].id).unwrap();
+        completed.lock().unwrap().insert("windows-five-0".into());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(3)).unwrap().0,
+            "windows-five-7"
+        );
     }
 
     #[test]

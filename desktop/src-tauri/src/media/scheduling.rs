@@ -211,32 +211,10 @@ pub(crate) fn admit_configured(
     active: &[ExecutionBudget],
     resources: Resources,
     concurrency: usize,
-) -> Result<ExecutionBudget, &'static str> {
-    configured_for_platform(job, active, resources, concurrency, cfg!(windows))
-}
-
-fn configured_for_platform(
-    job: &MediaJob,
-    active: &[ExecutionBudget],
-    resources: Resources,
-    concurrency: usize,
     windows: bool,
 ) -> Result<ExecutionBudget, &'static str> {
     if windows && job.kind == MediaJobKind::Merge {
         return admit_merge(job, active, resources);
-    }
-    if windows
-        && active.iter().any(|b| b.merge)
-        && (resources
-            .available_memory
-            .is_none_or(|free| free < memory_reservation(job, false) + 2 * GIB)
-            || !resources.cpu_usage.is_some_and(|usage| {
-                usage.is_finite()
-                    && (0.0..85.0).contains(&usage)
-                    && resources.cores as f32 * (1.0 - usage / 100.0) >= 3.0
-            }))
-    {
-        return Err("合并运行中，等待足够的 CPU 和内存启动 AI；下载与上传继续运行");
     }
     if !parallel_kind_for_platform(job.kind, windows) && !active.is_empty() {
         return Err("合并任务等待其他媒体任务完成");
@@ -259,10 +237,26 @@ fn configured_for_platform(
             && (gpu.usage >= GPU_SATURATED_USAGE_PERCENT
                 || gpu.free_memory < gpu_reservation(job) + GIB)
     });
+    if windows && concurrency > 0 && parallel_kind_for_platform(job.kind, true) {
+        return admit_manual_windows(job, resources, limit, auto && gpu_busy);
+    }
+    if windows
+        && active.iter().any(|b| b.merge)
+        && (resources
+            .available_memory
+            .is_none_or(|free| free < memory_reservation(job, false) + 2 * GIB)
+            || !resources.cpu_usage.is_some_and(|usage| {
+                usage.is_finite()
+                    && (0.0..85.0).contains(&usage)
+                    && resources.cores as f32 * (1.0 - usage / 100.0) >= 3.0
+            }))
+    {
+        return Err("合并运行中，等待足够的 CPU 和内存启动 AI；下载与上传继续运行");
+    }
     if auto && (gpu_busy || (resources.gpu.is_none() && !active.is_empty())) {
         let mut cpu_job = job.clone();
         cpu_job.ai_request.as_mut().unwrap().device = "cpu".into();
-        // Use full model RAM/load checks even under a manual concurrency limit.
+        // Automatic concurrency retains full model RAM and CPU load checks.
         return admit_with_limit(&cpu_job, active, resources, true, limit)
             .filter(|budget| {
                 resources
@@ -281,50 +275,53 @@ fn configured_for_platform(
             })
             .ok_or("GPU 暂无余量，等待可用 CPU 或内存后继续处理");
     }
-    if windows && concurrency > 0 && parallel_kind_for_platform(job.kind, true) {
-        // A user-selected limit overrides conservative model estimates, while
-        // preserving actual OS/VRAM headroom. Unknown telemetry is shown in UI.
-        if resources.available_memory.is_some_and(|v| v < 2 * GIB) {
-            return Err("可用内存不足 2 GB，等待运行中的任务释放内存");
-        }
-        let gpu_requested = job.ai_request.as_ref().is_some_and(|r| r.device != "cpu");
-        if gpu_requested && resources.gpu.is_some_and(|g| g.free_memory < GIB) {
-            return Err("可用显存不足 1 GB，等待运行中的任务释放显存");
-        }
-        let memory = if auto {
-            memory_reservation(job, false)
-        } else {
-            2 * GIB
-        };
-        if auto
-            && resources
-                .available_memory
-                .is_some_and(|free| free < memory + 2 * GIB)
-        {
-            return Err("可用内存不足，等待运行中的任务释放模型内存");
-        }
-        return Ok(ExecutionBudget {
-            cpu_threads: (resources.cores.saturating_mul(85) / 100 / limit)
-                .clamp(1, 8)
-                .min(resources.cores.max(1)),
-            force_cpu: false,
-            merge: false,
-            memory,
-            gpu_memory: if auto {
-                gpu_reservation(job)
-            } else if gpu_requested {
-                GIB
-            } else {
-                0
-            },
-        });
-    }
     admit_for_platform(job, active, resources, windows).ok_or_else(|| {
         if job.ai_request.as_ref().is_some_and(|r| r.device != "cpu") && resources.gpu.is_none() {
             "自动模式未读取到显卡资源，暂按单任务处理；可手动指定同时处理数"
         } else {
             "自动模式等待可用 CPU、内存或显存；可调整同时处理数"
         }
+    })
+}
+
+fn admit_manual_windows(
+    job: &MediaJob,
+    resources: Resources,
+    limit: usize,
+    force_cpu: bool,
+) -> Result<ExecutionBudget, &'static str> {
+    // Manual slots use the same admission policy for auto, CUDA and CPU.
+    // Current CPU usage includes our workers; refusing admission on that load
+    // prevents Job Object rebalancing from ever sharing the CPU with new jobs.
+    // Reserve a small launch allowance per NEW worker and keep OS headroom;
+    // live probes already account for allocations of previously started jobs.
+    let memory = 2 * GIB;
+    if resources
+        .available_memory
+        .is_some_and(|free| free < memory + 2 * GIB)
+    {
+        return Err("可用内存不足，需为新任务预留 2 GB 并保留 2 GB 系统余量");
+    }
+    let gpu_requested = !force_cpu && job.ai_request.as_ref().is_some_and(|r| r.device != "cpu");
+    if gpu_requested && resources.gpu.is_some_and(|g| g.free_memory < GIB) {
+        return Err("可用显存不足 1 GB，等待运行中的任务释放显存");
+    }
+    Ok(ExecutionBudget {
+        cpu_threads: (resources.cores.saturating_mul(85) / 100 / limit)
+            .clamp(1, 8)
+            .min(resources.cores.max(1)),
+        force_cpu,
+        merge: false,
+        memory,
+        gpu_memory: if !gpu_requested {
+            0
+        } else if job.ai_request.as_ref().is_some_and(|r| r.device == "auto") {
+            // Device placement still reserves full VRAM estimates so a burst
+            // of auto jobs can use CPU slots instead of overfilling the GPU.
+            gpu_reservation(job)
+        } else {
+            GIB
+        },
     })
 }
 
@@ -456,8 +453,13 @@ fn admit_with_limit(
         } else {
             active.iter().map(|item| item.gpu_memory).sum()
         };
+        let saturated = if windows {
+            GPU_SATURATED_USAGE_PERCENT
+        } else {
+            85.0
+        };
         if !active.is_empty()
-            && (gpu.usage >= 85.0
+            && (gpu.usage >= saturated
                 || (cuda && gpu.free_memory.saturating_sub(reserved) < gpu_memory + GIB))
         {
             return None;
@@ -523,7 +525,76 @@ fn memory_reservation(job: &MediaJob, mps: bool) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::admit_configured as configured_for_platform;
     use super::*;
+
+    #[test]
+    fn windows_manual_five_auto_device_jobs_fill_slots_under_existing_cpu_load() {
+        let request = job("auto", "htdemucs");
+        let mut resources = Resources {
+            cores: 12,
+            cpu_usage: Some(90.0),
+            available_memory: Some(12 * GIB),
+            gpu: Some(GpuResources {
+                free_memory: 6 * GIB,
+                usage: 90.0,
+                shared_memory: false,
+            }),
+        };
+        let mut active = Vec::new();
+        for index in 0..5 {
+            let budget = configured_for_platform(&request, &active, resources, 5, true)
+                .unwrap_or_else(|reason| panic!("task {} was blocked: {reason}", index + 1));
+            assert_eq!(budget.cpu_threads, 2);
+            assert_eq!(budget.force_cpu, index > 0);
+            resources.available_memory = resources.available_memory.map(|v| v - budget.memory);
+            resources.gpu.as_mut().unwrap().free_memory -= budget.gpu_memory;
+            active.push(budget);
+        }
+        assert_eq!(resources.available_memory, Some(2 * GIB));
+        assert!(
+            configured_for_platform(&request, &active, resources, 5, true)
+                .unwrap_err()
+                .contains("上限")
+        );
+        assert_eq!(request.ai_request.as_ref().unwrap().device, "auto");
+    }
+
+    #[test]
+    fn windows_manual_auto_device_does_not_require_telemetry_warmup() {
+        let request = job("auto", "htdemucs");
+        let resources = Resources {
+            cores: 12,
+            cpu_usage: None,
+            available_memory: Some(12 * GIB),
+            gpu: None,
+        };
+        let first = configured_for_platform(&request, &[], resources, 5, true).unwrap();
+        let next = configured_for_platform(&request, &[first; 4], resources, 5, true)
+            .expect("manual slots must not wait for optional GPU/CPU telemetry");
+        assert!(!next.force_cpu, "the worker can still detect CUDA itself");
+        assert_eq!(next.cpu_threads, 2);
+    }
+
+    #[test]
+    fn windows_automatic_gpu_admission_has_one_saturation_threshold() {
+        let request = job("auto", "htdemucs");
+        let resources = Resources {
+            cores: 12,
+            cpu_usage: Some(10.0),
+            gpu: Some(GpuResources {
+                free_memory: 6 * GIB,
+                usage: 90.0,
+                shared_memory: false,
+            }),
+            ..idle()
+        };
+        let first = configured_for_platform(&request, &[], resources, 0, true).unwrap();
+        let next = configured_for_platform(&request, &[first], resources, 0, true)
+            .expect("90 percent GPU usage with VRAM headroom must not stall automatic admission");
+        assert!(!next.force_cpu);
+        assert!(next.gpu_memory > 0);
+    }
 
     #[test]
     fn mac_manual_limit_keeps_running_slots_until_completion() {
@@ -593,17 +664,20 @@ mod tests {
             assert_eq!(cpu.gpu_memory, 0);
             assert!(cpu.cpu_threads > 1);
             assert_eq!(request.ai_request.as_ref().unwrap().device, "auto");
-            assert!(configured_for_platform(
-                &request,
-                &[gpu],
-                Resources {
-                    cpu_usage: Some(98.0),
-                    ..busy
-                },
-                slots,
-                true
-            )
-            .is_err());
+            assert_eq!(
+                configured_for_platform(
+                    &request,
+                    &[gpu],
+                    Resources {
+                        cpu_usage: Some(98.0),
+                        ..busy
+                    },
+                    slots,
+                    true
+                )
+                .is_err(),
+                slots == 0
+            );
             assert!(configured_for_platform(
                 &request,
                 &[gpu],
