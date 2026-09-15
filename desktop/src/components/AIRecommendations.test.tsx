@@ -10,6 +10,18 @@ const rankDefaults: Pick<RankPage, "board" | "boardName" | "releaseType"> = { bo
 beforeEach(() => vi.mocked(fetchRank).mockReset());
 
 describe("AIRecommendations", () => {
+  it("selects only a visible drama when category filtering hides the previous detail", async () => {
+    const first = { ...item("都市剧"), categoryTags: ["都市"] };
+    const second = { ...item("玄幻剧"), categoryTags: ["玄幻"] };
+    vi.mocked(fetchRank).mockResolvedValue({ ...rankDefaults, items: [first, second], boards: [], hasMore: false, nextCursor: "" });
+    const onSelect = vi.fn(), reset = vi.fn();
+    const view = render(<AIRecommendations categoryMode selectedId={first.bookId} onSelect={onSelect} onResetSelection={reset} detectOrientation={false} />);
+    fireEvent.click(await view.findByRole("button", { name: "玄幻" }));
+    expect(onSelect).toHaveBeenLastCalledWith(second);
+    expect(reset).toHaveBeenCalled();
+    expect(view.queryByRole("heading", { name: first.title })).toBeNull();
+    expect(view.getByRole("button", { name: "玄幻" }).getAttribute("aria-pressed")).toBe("true");
+  });
   it("deduplicates by book and stops when pagination returns an already requested cursor", async () => {
     vi.mocked(fetchRank)
       .mockResolvedValueOnce({ ...rankDefaults, items: [item("第一部", "")], boards: [], hasMore: true, nextCursor: "page-2" })

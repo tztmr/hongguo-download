@@ -1185,6 +1185,35 @@ fn worker_loop(
                     .into_iter()
                     .filter(|j| j.status == MediaJobStatus::Queued)
                 {
+                    if let Some(request) = candidate.merge_request.as_ref() {
+                        // Main videos and Shorts can target the same series. Keep
+                        // those merges ordered while different series use both lanes.
+                        let same_series_running = running.keys().any(|id| {
+                            context
+                                .manager
+                                .job(id)
+                                .ok()
+                                .and_then(|j| j.merge_request)
+                                .is_some_and(|other| {
+                                    other.series_root == request.series_root
+                                        || windows
+                                            && other
+                                                .series_root
+                                                .to_string_lossy()
+                                                .eq_ignore_ascii_case(
+                                                    &request.series_root.to_string_lossy(),
+                                                )
+                                })
+                        });
+                        if same_series_running {
+                            *context
+                                .queue_reason
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) =
+                                "同一剧目的合并按顺序执行，等待当前输出完成".into();
+                            continue;
+                        }
+                    }
                     if let Some(request) = candidate.ai_request.as_mut() {
                         request.device = context.ai_executor.scheduling_device(request);
                     }
@@ -2641,6 +2670,200 @@ mod tests {
             }
             Err(AppError::new("AI_CANCELLED", "cancelled"))
         }
+    }
+
+    struct HoldingBudgetExecutor {
+        started: mpsc::Sender<(String, scheduling::ExecutionBudget)>,
+    }
+
+    impl HoldingBudgetExecutor {
+        fn hold(
+            &self,
+            name: String,
+            budget: scheduling::ExecutionBudget,
+            token: &CancellationToken,
+        ) {
+            self.started.send((name, budget)).unwrap();
+            while !token.is_cancelled() {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    impl AIExecutor for HoldingBudgetExecutor {
+        fn execute(
+            &self,
+            _: ValidatedAIJobRequest,
+            _: &CancellationToken,
+            _: &mut dyn FnMut(MergeProgress),
+        ) -> Result<AIExecutionResult, AppError> {
+            panic!("execution budget required");
+        }
+        fn execute_with_budget(
+            &self,
+            request: ValidatedAIJobRequest,
+            token: &CancellationToken,
+            _: &mut dyn FnMut(MergeProgress),
+            budget: scheduling::ExecutionBudget,
+        ) -> Result<AIExecutionResult, AppError> {
+            self.hold(request.book_id, budget, token);
+            Err(AppError::new("AI_CANCELLED", "cancelled"))
+        }
+    }
+
+    impl MergeExecutor for HoldingBudgetExecutor {
+        fn execute(
+            &self,
+            _: MergeRequest,
+            _: &CancellationToken,
+            _: &mut dyn FnMut(MergeProgress),
+        ) -> Result<MergeResult, AppError> {
+            panic!("execution budget required");
+        }
+        fn execute_with_budget(
+            &self,
+            request: MergeRequest,
+            token: &CancellationToken,
+            _: &mut dyn FnMut(MergeProgress),
+            budget: scheduling::ExecutionBudget,
+        ) -> Result<MergeResult, AppError> {
+            self.hold(request.output_file_name, budget, token);
+            Err(AppError::new("MERGE_CANCELLED", "cancelled"))
+        }
+    }
+
+    fn idle_windows_resources() -> scheduling::Resources {
+        scheduling::Resources {
+            cores: 20,
+            cpu_usage: Some(10.0),
+            available_memory: Some(32 * scheduling::GIB),
+            gpu: Some(scheduling::GpuResources {
+                free_memory: 24 * scheduling::GIB,
+                usage: 0.0,
+                shared_memory: false,
+            }),
+        }
+    }
+
+    #[test]
+    fn windows_automatic_separation_uses_cpu_before_every_slot_is_sent_to_gpu() {
+        let fixture = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&fixture.store).unwrap());
+        for index in 0..2 {
+            manager
+                .enqueue_ai(
+                    validate_ai_request(
+                        &StartAIJobRequest {
+                            book_id: format!("hybrid-{index}"),
+                            title: "分离并行回归".into(),
+                            series_root: fixture.series.clone(),
+                            scope: MediaJobScope::Merged,
+                            inputs: vec![
+                                fixture.write_input(&format!("hybrid-{index}.mp4"), b"input")
+                            ],
+                            model: "htdemucs".into(),
+                            device: "auto".into(),
+                        },
+                        MediaJobKind::SeparateBackgroundMusic,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let (tx, rx) = mpsc::channel();
+        let service = MediaJobService::with_platform_probe_and_limit(
+            manager,
+            Arc::new(ImmediateExecutor),
+            Arc::new(HoldingBudgetExecutor { started: tx }),
+            Arc::new(RecordingSink::default()),
+            Box::new(idle_windows_resources),
+            0,
+            true,
+        );
+        let mut started: Vec<_> = (0..2)
+            .map(|_| rx.recv_timeout(Duration::from_secs(3)).unwrap())
+            .collect();
+        started.sort_by(|a, b| a.0.cmp(&b.0));
+        assert!(!started[0].1.force_cpu);
+        assert!(started[0].1.gpu_memory > 0);
+        assert!(started[1].1.force_cpu);
+        assert_eq!(started[1].1.gpu_memory, 0);
+        assert_eq!(
+            service
+                .snapshot()
+                .jobs
+                .iter()
+                .filter(|j| j.status == MediaJobStatus::Running)
+                .count(),
+            2
+        );
+        assert!(service
+            .snapshot()
+            .jobs
+            .iter()
+            .all(|j| j.ai_request.as_ref().unwrap().device == "auto"));
+        // Both workers are held until service shutdown, proving actual overlap.
+    }
+
+    #[test]
+    fn windows_smart_merges_run_gpu_and_cpu_together_and_keep_same_series_ordered() {
+        let first = MergeFixture::new();
+        let second = MergeFixture::new();
+        let third = MergeFixture::new();
+        let manager = Arc::new(MediaJobManager::load(&first.store).unwrap());
+        let mut jobs = Vec::new();
+        for (fixture, name) in [
+            (&first, "a-main"),
+            (&first, "a-short"),
+            (&second, "b-main"),
+            (&third, "c-main"),
+        ] {
+            let mut request = fixture.request(
+                name,
+                vec![fixture.write_input(&format!("{name}.mp4"), b"input")],
+            );
+            request.mode = Some(model::MergeMode::Auto);
+            jobs.push(
+                manager
+                    .enqueue_merge(validate_merge_request(&request).unwrap())
+                    .unwrap(),
+            );
+        }
+        let (tx, rx) = mpsc::channel();
+        let service = MediaJobService::with_platform_probe_and_limit(
+            manager,
+            Arc::new(HoldingBudgetExecutor { started: tx }),
+            Arc::new(UnavailableAIExecutor),
+            Arc::new(RecordingSink::default()),
+            Box::new(idle_windows_resources),
+            1,
+            true,
+        );
+        let mut started: Vec<_> = (0..2)
+            .map(|_| rx.recv_timeout(Duration::from_secs(3)).unwrap())
+            .collect();
+        started.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(started[0].0, "a-main.mp4");
+        assert!(!started[0].1.force_cpu);
+        assert_eq!(started[1].0, "b-main.mp4");
+        assert!(started[1].1.force_cpu);
+        assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert_eq!(
+            service.manager.job(&jobs[1].id).unwrap().status,
+            MediaJobStatus::Queued
+        );
+        assert_eq!(
+            service.manager.job(&jobs[3].id).unwrap().status,
+            MediaJobStatus::Queued
+        );
+        service.cancel(&jobs[0].id).unwrap();
+        let refilled = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(refilled.0, "a-short.mp4");
+        assert!(!refilled.1.force_cpu);
+        assert_eq!(
+            service.manager.job(&jobs[2].id).unwrap().status,
+            MediaJobStatus::Running
+        );
     }
 
     #[test]

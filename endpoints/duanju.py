@@ -461,6 +461,7 @@ def _parse_bookmall_tab(upstream: dict, tab_type: str) -> dict:
         # bookstore_id/session_id/has_more 位于 tab_item 层级(每个 tab 独立)
         result['session_id'] = str(tab.get('session_id') or '')
         result['plan_id'] = str(tab.get('bookstore_id') or '')
+        result['has_more'] = bool(tab.get('has_more', True))
         for cell in tab.get('cell_data') or []:
             items = [_series_item(v) for sub in (cell.get('cell_data') or [])
                      for v in (sub.get('video_data') or []) if v]
@@ -469,6 +470,7 @@ def _parse_bookmall_tab(upstream: dict, tab_type: str) -> dict:
             result['items'] = items
             result['cell_id'] = str(cell.get('cell_id') or cell.get('cell_id_str') or '')
             result['next_offset'] = int(cell.get('next_offset') or 0)
+            result['has_more'] = bool(cell.get('has_more', result['has_more']))
             result['categories'] = _selector_categories(cell.get('cell_selector') or {})
             break
         break
@@ -1282,7 +1284,8 @@ async def duanju_discovery(
         'items': parsed['items'],
         'cell_id': parsed['cell_id'],
         'next_offset': parsed['next_offset'],
-        'has_more': True,
+        'has_more': bool(parsed['has_more'] and parsed['next_offset'] > 0
+                         and all(parsed[key] for key in ('cell_id', 'session_id', 'plan_id'))),
         'session_id': parsed['session_id'],
         'plan_id': parsed['plan_id'],
         'filter_ids': _merge_filter_ids(filter_ids, parsed['items']),
@@ -1320,8 +1323,6 @@ async def duanju_discovery_more(
     if cached is not None:
         return success(cached)
 
-    gid_list = [sid for sid in filter_ids.split(',') if sid][:6]
-
     def build_url(device_id: str) -> str:
         return _discovery_more_url(device_id, tab_type, cell_id, offset, session_id, plan_id, filter_ids, selected_items)
 
@@ -1330,16 +1331,20 @@ async def duanju_discovery_more(
         logger.error('发现页翻页失败: %s', result['msg'])
         return error(result['msg'], code=-3, status_code=502)
     parsed = _parse_bookmall_change(result['upstream'])
-    if not parsed['items']:
+    upstream_data = result['upstream'].get('data') or {}
+    terminal_page = (isinstance(upstream_data, dict)
+                     and upstream_data.get('has_more') in (False, 0)
+                     and isinstance(upstream_data.get('cell_view'), dict))
+    if not parsed['items'] and not terminal_page:
         return error('发现页翻页未返回内容', code=-4, status_code=502)
     new_filter = _merge_filter_ids(filter_ids, parsed['items'])
     data = {
         'tab_type': tab_type,
         'items': parsed['items'],
         'next_offset': parsed['next_offset'],
-        'has_more': parsed['has_more'],
+        'has_more': bool(parsed['has_more'] and parsed['next_offset'] > offset),
         'session_id': parsed['session_id'] or session_id,
-        'cell_id': cell_id,
+        'cell_id': parsed['cell_id'] or cell_id,
         'plan_id': plan_id,
         'filter_ids': new_filter,
         'selected_items': selected_items,

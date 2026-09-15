@@ -18,7 +18,7 @@ export function MediaConcurrencyControl({ value = 0, onChange, disabled = false,
         {Array.from({ length: max }, (_, i) => i + 1).map(n => <option value={n} key={n}>{n} 个任务</option>)}
       </select>
     </label>
-    <small>仅分离背景音乐与提取字幕共用名额；下载、合并和 YouTube 上传走独立队列。完成一个自动补入一个；降低上限不打断正在处理的任务，内存或显存不足时等待。</small>
+    <small>仅分离背景音乐与提取字幕共用名额；下载、合并和 YouTube 上传走独立队列。Windows 智能合并可由 GPU、CPU 各处理一个不同剧目的任务。完成一个自动补入一个；降低上限不打断正在处理的任务，资源不足时等待。</small>
     {error ? <p role="alert">{error}</p> : null}
   </div>;
 }

@@ -149,7 +149,7 @@ def _demucs_separator(
                 end = min(total, (index + 1) * step + context)
                 reader.seek(start)
                 samples = reader.read(end - start, dtype="float32", always_2d=True)
-                emit(progress(f"分离第 {index + 1}/{count} 段", 10 + 65 * index / count))
+                emit(progress(f"{_device_label(inference.device)} · 分离第 {index + 1}/{count} 段", 10 + 65 * index / count))
                 with torch.inference_mode():
                     wav = convert_audio(torch.from_numpy(samples.T.copy()), input_rate,
                                         rate, network.audio_channels)
@@ -188,12 +188,16 @@ def _demucs_separator(
                     for writer, stem in zip(writers, current):
                         writer.write(stem[:keep])
                     del stem, stems, current, wav, ref, samples
-                emit(progress(f"已分离 {index + 1}/{count} 段", 10 + 65 * (index + 1) / count))
+                emit(progress(f"{_device_label(inference.device)} · 已分离 {index + 1}/{count} 段", 10 + 65 * (index + 1) / count))
     except BaseException:
         for path in (vocals, background):
             path.unlink(missing_ok=True)
         raise
     return vocals, background
+
+
+def _device_label(device: str) -> str:
+    return "NVIDIA GPU" if device.startswith("cuda") else "Apple GPU" if device == "mps" else "CPU"
 
 
 def separate_audio(
@@ -219,7 +223,7 @@ def separate_audio(
             raise WorkerError("AI_REQUEST_INVALID", "Demucs 模型目录无效")
         validate_demucs_package(model_root, model)
     source_duration = _wav_duration(request.input_path)
-    emit(progress("preparing", 10))
+    emit(progress(f"{_device_label(device)} · 准备分离背景音乐", 10))
     try:
         if separator is None:
             vocals, background = _demucs_separator(

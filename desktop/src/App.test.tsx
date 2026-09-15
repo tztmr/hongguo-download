@@ -5,6 +5,15 @@ import App from "./App";
 vi.mock("./youtube/managementCommands", () => ({ managementCommands: { list: vi.fn().mockResolvedValue({ items: [], nextPageToken: null }) } }));
 
 describe("App preview workflow", () => {
+  it("saves CPU execution from automation and shares that choice with global settings", async () => {
+    window.history.replaceState({}, "", "/?preview=automation");
+    const view = render(<App />);
+    fireEvent.click(await view.findByRole("button", { name: /媒体处理/ }));
+    fireEvent.change(view.getByRole("combobox", { name: "AI 计算设备" }), { target: { value: "cpu" } });
+    await waitFor(() => expect(view.getByRole("combobox", { name: "AI 计算设备" })).toHaveProperty("value", "cpu"));
+    fireEvent.click(view.getByRole("button", { name: "设置" }));
+    expect(await view.findByRole("radio", { name: /仅使用 CPU/ })).toHaveProperty("checked", true);
+  });
   it("retains an unsaved network draft across sidebar navigation", async () => {
     window.history.replaceState({}, "", "/?preview=library");
     const view = render(<App />);

@@ -307,7 +307,7 @@ fn run_merge_inner(
     let expected_duration = if normalize {
         let encoder = if needs_transcode {
             if budget.is_some_and(|b| b.force_cpu) {
-                progress(event("GPU 暂忙，使用 CPU 空闲资源转码", 0.0, false));
+                progress(event("已分配 CPU 合并通道，使用空闲资源转码", 0.0, false));
                 VideoEncoder::Libx264
             } else {
                 let hardware = probe_video_hardware(tools);

@@ -19,6 +19,27 @@ def write_silence(path: Path, seconds: float = 1.0):
 
 
 class SeparationTests(unittest.TestCase):
+    def test_windows_auto_without_cuda_runs_the_cpu_separator_and_reports_cpu(self):
+        from ai_worker.devices import select_device
+        from ai_worker.tests.test_devices import fake_torch
+        with tempfile.TemporaryDirectory() as directory:
+            request = self.request(Path(directory))
+            request.options['device'] = 'auto'
+            events, used_devices = [], []
+            def backend(_source, output, _model, device):
+                used_devices.append(device)
+                paths = output / 'vocals.wav', output / 'background_music.wav'
+                for path in paths:
+                    write_silence(path)
+                return paths
+            def choose(requested):
+                return select_device(requested, torch_module=fake_torch(cuda_available=False), platform='win32')
+            with patch('ai_worker.separate._select_device', side_effect=choose):
+                result = separate_audio(request, separator=backend, emit=events.append)
+            self.assertEqual(used_devices, ['cpu'])
+            self.assertTrue(Path(result['vocalsPath']).exists())
+            self.assertIn('CPU', events[0]['stage'])
+
     def request(self, root: Path, model: str = "htdemucs"):
         source = root / "input.wav"
         write_silence(source)

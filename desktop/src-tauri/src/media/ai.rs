@@ -138,7 +138,7 @@ impl AIExecutor for NativeAIExecutor {
         let threads =
             super::scheduling::is_parallel_kind(request.kind).then_some(budget.cpu_threads);
         let mut scheduled_progress = |mut event: MergeProgress| {
-            if budget.force_cpu {
+            if budget.force_cpu && !event.stage.starts_with("CPU") {
                 event.stage = format!("CPU · {}", event.stage);
             }
             progress(event);

@@ -127,6 +127,35 @@ describe("App feed and search controls", () => {
     apiMocks.fetchSearchAll.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
   });
 
+  it("keeps healthy home sources and retries only the failed source", async () => {
+    apiMocks.fetchDiscovery.mockImplementation(async type => { if (type === "manju") throw { message: "漫剧维护中" }; return discoveryPage([series(900, "真人推荐")], 0, false); });
+    apiMocks.fetchRank.mockResolvedValue(rankPage([{ ...series(901, "AI来源推荐"), releaseType: "ai_playlet" }], 0, false));
+    const view = render(<App />);
+    const retry = await view.findByRole("button", { name: "重试失败来源" });
+    expect(view.getByRole("heading", { name: "AI来源推荐" })).toBeTruthy();
+    expect(view.getAllByRole("heading", { name: "真人推荐" }).length).toBeGreaterThan(0);
+    expect(view.getByRole("alert").textContent).toContain("漫剧维护中");
+    apiMocks.fetchDiscovery.mockResolvedValueOnce(discoveryPage([series(902, "漫剧恢复")], 0, false));
+    fireEvent.click(retry);
+    await view.findByRole("heading", { name: "漫剧恢复" });
+    expect(apiMocks.fetchDiscovery.mock.calls.map(([type]) => type)).toEqual(["drama", "manju", "manju"]);
+    expect(apiMocks.fetchRank).toHaveBeenCalledTimes(1);
+    expect(view.queryByRole("button", { name: "重试失败来源" })).toBeNull();
+  });
+
+  it("uses the recommendation category dictionary without an extra request", async () => {
+    apiMocks.fetchDiscovery.mockResolvedValue({ ...discoveryPage([series(903, "推荐漫剧")], 0, false), categories: [{ id: "cate_20", name: "玄幻", group: "题材" }] });
+    apiMocks.fetchDiscoveryByCategory.mockImplementation(async () => ({ ...discoveryPage([series(903, "推荐漫剧")], 0, false), categories: [{ id: "cate_20", name: "玄幻", group: "题材" }] }));
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "漫剧" }));
+    await view.findAllByRole("heading", { name: "推荐漫剧" });
+    fireEvent.click(view.getByRole("button", { name: "分类浏览" }));
+    fireEvent.click(await view.findByRole("button", { name: "玄幻" }));
+    await waitFor(() => expect(apiMocks.fetchDiscoveryByCategory).toHaveBeenCalledWith("manju", "cate_20"));
+    // The selected category response can fall back to a separate dictionary if empty.
+    expect(apiMocks.fetchCategoryGroups).not.toHaveBeenCalled();
+  });
+
   it("opens combined real-drama categories and switches back to the manju video feed", async () => {
     apiMocks.fetchWebCategoryGroups.mockResolvedValue([{ id: "background", name: "背景", items: [{ id: "", name: "全部" }, { id: "cate_757", name: "现代" }] }]);
     apiMocks.fetchWebCategory.mockResolvedValue({ items: [series(888, "分类真人剧")], nextPage: 2, hasMore: false });
@@ -339,7 +368,7 @@ describe("App feed and search controls", () => {
     const first = rankPage(Array.from({ length: 10 }, (_, index) => series(index + 1)), 10, true);
     const second = rankPage(Array.from({ length: 10 }, (_, index) => series(index + 11)), 20, true);
     const third = rankPage(Array.from({ length: 20 }, (_, index) => series(index + 21)), 40, false);
-    apiMocks.fetchRank.mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third);
+    apiMocks.fetchRank.mockResolvedValueOnce(rankPage([], 0, false)).mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third);
     const view = render(<App />);
     fireEvent.click(view.getByRole("button", { name: "榜单" }));
 
@@ -375,6 +404,7 @@ describe("App feed and search controls", () => {
   });
 
   it("continues rank numbering past NO.100 until upstream ends", async () => {
+    apiMocks.fetchRank.mockResolvedValueOnce(rankPage([], 0, false)); // Initial home AI recommendation.
     for (let pageIndex = 0; pageIndex < 12; pageIndex += 1) {
       const start = pageIndex * 10 + 1;
       apiMocks.fetchRank.mockResolvedValueOnce(rankPage(
@@ -402,6 +432,6 @@ describe("App feed and search controls", () => {
     for (const label of ["推荐榜", "热播榜", "臻果榜", "预约榜", "新剧榜", "热搜榜", "必看榜", "收藏榜"]) {
       expect(view.getByRole("button", { name: label })).toBeTruthy();
     }
-    expect(apiMocks.fetchRank).toHaveBeenCalledTimes(12);
+    expect(apiMocks.fetchRank.mock.calls.filter(([args]) => args.type !== "ai_playlet")).toHaveLength(12);
   });
 });

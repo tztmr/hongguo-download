@@ -3,6 +3,7 @@ import type { AIComponentStatus } from "../types";
 import { errorMessage, type UseAppSettingsResult } from "./useAppSettings";
 import { MediaConcurrencyControl } from "../components/MediaConcurrencyControl";
 import { DownloadIcon, QueueIcon } from "../components/icons";
+import { missingAiComponentIds } from "../media/aiRuntime";
 
 const componentNames: Record<string, string> = {
   runtime: "AI 运行环境", "demucs-htdemucs": "标准音频分离模型", "demucs-htdemucs_ft": "高质量音频分离模型",
@@ -30,10 +31,10 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
   const selected = model.components.filter((item) => selectedIds.includes(item.id) && !isInstalling(item) && !item.inUse);
   const totalDownload = selected.reduce((sum, item) => sum + item.downloadBytes, 0);
   const totalInstalled = selected.reduce((sum, item) => sum + item.installedBytes, 0);
-  const runtimeId = model.components.some((item) => item.id === "runtime")
-    ? "runtime"
-    : (settings.aiDevice === "cpu" ? "runtime-cpu" : "runtime-modern");
-  const recommendedIds = [runtimeId, `demucs-${settings.demucsModel || "htdemucs"}`, `whisper-${settings.whisperModel || "small"}`];
+  const recommendedIds = [...new Set([
+    ...missingAiComponentIds(model.components, `demucs-${settings.demucsModel || "htdemucs"}`, settings.aiDevice),
+    ...missingAiComponentIds(model.components, `whisper-${settings.whisperModel || "small"}`, settings.aiDevice),
+  ])];
   const missing = model.components.filter((item) => recommendedIds.includes(item.id) && !item.installed && !item.inUse && !isInstalling(item));
   async function install(items: AIComponentStatus[]) {
     if (!items.length || installLock.current) return;
@@ -58,10 +59,10 @@ export function MediaModelsSettings({ model }: { model: UseAppSettingsResult }) 
   return (
     <section className="settings-section media-model-settings" id="settings-media">
       <div className="settings-section-title settings-component-header"><div><h2>媒体处理模型</h2><p>为音频和字幕选择默认模型，新建任务时使用。</p></div><span className="model-local-badge">本机处理</span></div>
-      <fieldset className="model-choice-group"><legend>计算设备 <span>AI</span></legend><p>自动模式会优先使用通过运行测试的 NVIDIA CUDA，失败时改用 CPU。</p>
+      <fieldset className="model-choice-group"><legend>计算设备 <span>AI</span></legend><p>Windows 自动模式在资源足够时使用 GPU、CPU 并行处理不同任务。显卡不可用时仍可使用 CPU。</p>
         <div className="model-options">
           {([
-            ["auto", "自动选择计算设备", "推荐；CUDA 可用时使用显卡，否则使用 CPU"],
+            ["auto", "自动选择计算设备", "推荐；Windows 按可用资源分配 GPU + CPU，遵守同时处理上限"],
             ["cpu", "仅使用 CPU", "兼容性最好，处理速度通常较慢"],
             ["cuda", "NVIDIA GPU", "要求已安装匹配的 Windows CUDA 运行环境和驱动"],
           ] as const).map(([value, label, hint]) => <label className={(settings.aiDevice || "auto") === value ? "selected" : ""} key={value}>

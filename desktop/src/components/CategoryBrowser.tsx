@@ -6,6 +6,7 @@ import type { CategoryFilters, CategoryGroup, SeriesItem, WebCategoryPage } from
 import { CategoryFilter } from "./CategoryFilter";
 import { Cover } from "./Cover";
 import { VideoOrientationBadge } from "./VideoOrientationBadge";
+import { errorMessage } from "../errors";
 
 export const DEFAULT_CATEGORY_FILTERS: CategoryFilters = { background: "", topic: "", setting: "", gender: "2", time: "0", sort_type: "0" };
 const liveApi = { fetchWebCategory, fetchWebCategoryGroups };
@@ -33,7 +34,7 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
     setGroupError("");
     void api.fetchWebCategoryGroups("drama").then((values) => {
       if (!cancelled) setGroups(values);
-    }).catch(() => { if (!cancelled) setGroupError("分类选项加载失败"); });
+    }).catch(reason => { if (!cancelled) setGroupError(`分类选项加载失败：${errorMessage(reason)}`); });
     return () => { cancelled = true; };
   }, [api, groupRevision]);
 
@@ -52,7 +53,7 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
       setItems(unique);
       if (unique[0]) selectRef.current(unique[0]);
     }).catch((reason) => {
-      if (request.current === id) setError(reason instanceof Error ? reason.message : String(reason));
+      if (request.current === id) setError(errorMessage(reason));
     }).finally(() => { if (request.current === id) setLoading(false); });
     return () => { request.current += 1; };
   }, [api, filters, revision]);
@@ -70,7 +71,7 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
       setPage(result);
       setItems((previous) => [...new Map([...previous, ...result.items].map((item) => [item.bookId, item])).values()]);
     } catch (reason) {
-      if (request.current === id) setError(reason instanceof Error ? reason.message : String(reason));
+      if (request.current === id) setError(errorMessage(reason));
     } finally {
       if (request.current === id) { setLoading(false); morePending.current = false; }
     }

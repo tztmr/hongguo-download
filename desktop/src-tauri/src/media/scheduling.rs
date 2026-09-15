@@ -42,28 +42,48 @@ pub(crate) struct Resources {
 
 pub(crate) type ResourceProbe = Box<dyn FnMut() -> Resources + Send>;
 
+struct CpuSamplingClock {
+    refreshed: Instant,
+    sampled: bool,
+}
+
+impl CpuSamplingClock {
+    fn refresh_due(&mut self, now: Instant) -> bool {
+        let elapsed = now.duration_since(self.refreshed);
+        if elapsed < sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+            return false;
+        }
+        self.sampled = elapsed < Duration::from_secs(10);
+        self.refreshed = now;
+        true
+    }
+}
+
 pub(crate) fn native_probe() -> ResourceProbe {
     let mut system = System::new();
     system.refresh_cpu_usage();
-    let mut refreshed = Instant::now();
-    let mut sampled = false;
-    let mut cached = None;
+    let mut cpu_clock = CpuSamplingClock {
+        refreshed: Instant::now(),
+        sampled: false,
+    };
+    let mut cached: Option<(Instant, Resources)> = None;
     Box::new(move || {
-        if let Some(value) = cached {
+        if let Some((refreshed, value)) = cached {
             if !cfg!(windows) && refreshed.elapsed() < Duration::from_secs(2) {
                 return value;
             }
         }
         // CPU usage requires two observations; never treat the warmup zero as idle.
-        if refreshed.elapsed() >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL {
+        // Frequent queue wakes must not reset the CPU sampling interval. After
+        // a long idle period, take a fresh pair before admitting CPU concurrency.
+        if cpu_clock.refresh_due(Instant::now()) {
             system.refresh_cpu_usage();
-            sampled = refreshed.elapsed() < Duration::from_secs(10);
         }
         system.refresh_memory();
         let memory = system.available_memory();
         let value = Resources {
             cores: thread::available_parallelism().map_or(1, usize::from),
-            cpu_usage: sampled.then(|| system.global_cpu_usage()),
+            cpu_usage: cpu_clock.sampled.then(|| system.global_cpu_usage()),
             available_memory: (memory > 0).then_some(memory),
             gpu: if cfg!(target_os = "macos") {
                 apple_gpu_resources(memory)
@@ -71,8 +91,7 @@ pub(crate) fn native_probe() -> ResourceProbe {
                 nvidia_resources()
             },
         };
-        cached = Some(value);
-        refreshed = Instant::now();
+        cached = Some((Instant::now(), value));
         value
     })
 }
@@ -237,8 +256,17 @@ pub(crate) fn admit_configured(
             && (gpu.usage >= GPU_SATURATED_USAGE_PERCENT
                 || gpu.free_memory < gpu_reservation(job) + GIB)
     });
+    // Utilization lags new workers. Keep a CPU participant before a launch burst
+    // fills every slot with GPU work; fall back to GPU if the CPU has no headroom.
+    let balance_cpu = auto
+        && active
+            .iter()
+            .any(|b| !b.merge && b.gpu_memory > 0 && !b.force_cpu)
+        && !active
+            .iter()
+            .any(|b| !b.merge && (b.force_cpu || b.gpu_memory == 0));
     if windows && concurrency > 0 && parallel_kind_for_platform(job.kind, true) {
-        return admit_manual_windows(job, resources, limit, auto && gpu_busy);
+        return admit_manual_windows(job, resources, limit, auto && (gpu_busy || balance_cpu));
     }
     if windows
         && active.iter().any(|b| b.merge)
@@ -253,11 +281,12 @@ pub(crate) fn admit_configured(
     {
         return Err("合并运行中，等待足够的 CPU 和内存启动 AI；下载与上传继续运行");
     }
-    if auto && (gpu_busy || (resources.gpu.is_none() && !active.is_empty())) {
+    let cpu_required = auto && (gpu_busy || (resources.gpu.is_none() && !active.is_empty()));
+    if cpu_required || balance_cpu {
         let mut cpu_job = job.clone();
         cpu_job.ai_request.as_mut().unwrap().device = "cpu".into();
         // Automatic concurrency retains full model RAM and CPU load checks.
-        return admit_with_limit(&cpu_job, active, resources, true, limit)
+        let cpu_budget = admit_with_limit(&cpu_job, active, resources, true, limit)
             .filter(|budget| {
                 resources
                     .available_memory
@@ -272,8 +301,13 @@ pub(crate) fn admit_configured(
             .map(|mut budget| {
                 budget.force_cpu = true;
                 budget
-            })
-            .ok_or("GPU 暂无余量，等待可用 CPU 或内存后继续处理");
+            });
+        if let Some(budget) = cpu_budget {
+            return Ok(budget);
+        }
+        if cpu_required {
+            return Err("GPU 暂无余量，等待可用 CPU 或内存后继续处理");
+        }
     }
     admit_for_platform(job, active, resources, windows).ok_or_else(|| {
         if job.ai_request.as_ref().is_some_and(|r| r.device != "cpu") && resources.gpu.is_none() {
@@ -330,18 +364,25 @@ fn admit_merge(
     active: &[ExecutionBudget],
     resources: Resources,
 ) -> Result<ExecutionBudget, &'static str> {
-    if active.iter().any(|b| b.merge) {
-        return Err("已有合并任务运行，等待合并通道空闲；其他资源可继续处理");
+    let merges: Vec<_> = active.iter().filter(|b| b.merge).collect();
+    if merges.len() >= 2 {
+        return Err("GPU 与 CPU 合并通道已占用，完成一个后自动补位");
     }
     let copy_only = job.merge_request.as_ref().is_some_and(|r| {
         !r.square_canvas
             && (r.mode == Some(super::model::MergeMode::Copy)
                 || r.mode.is_none() && !r.transcode_h264)
     });
-    let gpu_ready = resources.gpu.is_some_and(|g| {
-        !g.shared_memory && g.usage < GPU_SATURATED_USAGE_PERCENT && g.free_memory >= 2 * GIB
-    });
+    let gpu_ready = !merges.iter().any(|b| !b.force_cpu)
+        && resources.gpu.is_some_and(|g| {
+            !g.shared_memory && g.usage < GPU_SATURATED_USAGE_PERCENT && g.free_memory >= 2 * GIB
+        });
+    // An unknown first GPU may still pass the real encoder probe. Additional
+    // merges use a separate CPU lane; never launch two CPU transcodes at once.
     let force_cpu = copy_only || !gpu_ready && (!active.is_empty() || resources.gpu.is_some());
+    if force_cpu && merges.iter().any(|b| b.force_cpu) {
+        return Err("CPU 合并通道已占用，等待 GPU 可用或当前合并完成");
+    }
     let cpu_threads = if copy_only {
         1
     } else if gpu_ready {
@@ -352,9 +393,11 @@ fn admit_merge(
     .min(resources.cores.max(1));
     let memory = if copy_only { GIB / 2 } else { GIB };
     if !active.is_empty()
-        && (resources
-            .available_memory
-            .is_none_or(|free| free < memory + 2 * GIB)
+        && (active.iter().map(|b| b.cpu_threads).sum::<usize>() + cpu_threads
+            > (resources.cores * 4 / 5).max(1)
+            || resources
+                .available_memory
+                .is_none_or(|free| free < memory + 2 * GIB)
             || !resources.cpu_usage.is_some_and(|usage| {
                 usage.is_finite()
                     && (0.0..85.0).contains(&usage)
@@ -529,6 +572,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn frequent_queue_wakes_do_not_starve_cpu_sampling_after_idle() {
+        let start = Instant::now();
+        let mut clock = CpuSamplingClock {
+            refreshed: start,
+            sampled: false,
+        };
+        let interval = sysinfo::MINIMUM_CPU_UPDATE_INTERVAL;
+        for step in 1..4 {
+            assert!(!clock.refresh_due(start + interval * step / 4));
+            assert!(!clock.sampled);
+        }
+        assert!(clock.refresh_due(start + interval));
+        assert!(clock.sampled);
+        let resumed = start + Duration::from_secs(12);
+        assert!(clock.refresh_due(resumed));
+        assert!(
+            !clock.sampled,
+            "a stale interval is not an idle CPU observation"
+        );
+        for step in 1..4 {
+            assert!(!clock.refresh_due(resumed + interval * step / 4));
+        }
+        assert!(clock.refresh_due(resumed + interval));
+        assert!(clock.sampled);
+    }
+
+    #[test]
     fn windows_manual_five_auto_device_jobs_fill_slots_under_existing_cpu_load() {
         let request = job("auto", "htdemucs");
         let mut resources = Resources {
@@ -572,12 +642,19 @@ mod tests {
         let first = configured_for_platform(&request, &[], resources, 5, true).unwrap();
         let next = configured_for_platform(&request, &[first; 4], resources, 5, true)
             .expect("manual slots must not wait for optional GPU/CPU telemetry");
-        assert!(!next.force_cpu, "the worker can still detect CUDA itself");
+        assert!(
+            !first.force_cpu,
+            "the first worker can still detect CUDA itself"
+        );
+        assert!(
+            next.force_cpu,
+            "manual slots also retain CPU participation before telemetry warms up"
+        );
         assert_eq!(next.cpu_threads, 2);
     }
 
     #[test]
-    fn windows_automatic_gpu_admission_has_one_saturation_threshold() {
+    fn windows_automatic_admission_keeps_cpu_participating_before_gpu_telemetry_catches_up() {
         let request = job("auto", "htdemucs");
         let resources = Resources {
             cores: 12,
@@ -592,8 +669,24 @@ mod tests {
         let first = configured_for_platform(&request, &[], resources, 0, true).unwrap();
         let next = configured_for_platform(&request, &[first], resources, 0, true)
             .expect("90 percent GPU usage with VRAM headroom must not stall automatic admission");
-        assert!(!next.force_cpu);
-        assert!(next.gpu_memory > 0);
+        assert!(next.force_cpu);
+        assert_eq!(next.gpu_memory, 0);
+        let third = configured_for_platform(&request, &[first, next], resources, 0, true).unwrap();
+        assert!(
+            !third.force_cpu,
+            "GPU headroom can still serve additional work"
+        );
+        assert!(third.gpu_memory > 0);
+        let cpu_busy = Resources {
+            cpu_usage: Some(70.0),
+            ..resources
+        };
+        let gpu = configured_for_platform(&request, &[first], cpu_busy, 0, true).unwrap();
+        assert!(
+            !gpu.force_cpu,
+            "no room for four CPU threads, but two GPU helper threads fit"
+        );
+        assert!(configured_for_platform(&request, &[first], resources, 1, true).is_err());
     }
 
     #[test]
@@ -777,7 +870,10 @@ mod tests {
             true
         )
         .is_err());
-        assert!(configured_for_platform(&merge, &[budget], resources, 1, true).is_err());
+        let cpu_lane = configured_for_platform(&merge, &[budget], resources, 1, true).unwrap();
+        assert!(cpu_lane.force_cpu);
+        assert_eq!(cpu_lane.gpu_memory, 0);
+        assert!(configured_for_platform(&merge, &[budget, cpu_lane], resources, 1, true).is_err());
         assert!(
             configured_for_platform(&job("cpu", "htdemucs"), &[budget], resources, 1, true).is_ok()
         );
@@ -792,6 +888,30 @@ mod tests {
         let cpu_merge = configured_for_platform(&merge, &[ai], busy_gpu, 1, true).unwrap();
         assert!(cpu_merge.force_cpu);
         assert_eq!(cpu_merge.gpu_memory, 0);
+        assert!(configured_for_platform(&merge, &[cpu_merge], busy_gpu, 1, true).is_err());
+        let gpu_after_cpu =
+            configured_for_platform(&merge, &[cpu_merge], resources, 1, true).unwrap();
+        assert!(!gpu_after_cpu.force_cpu);
+        for blocked in [
+            Resources {
+                cpu_usage: Some(98.0),
+                ..busy_gpu
+            },
+            Resources {
+                cpu_usage: None,
+                ..busy_gpu
+            },
+            Resources {
+                available_memory: Some(2 * GIB),
+                ..busy_gpu
+            },
+            Resources {
+                cores: 2,
+                ..busy_gpu
+            },
+        ] {
+            assert!(configured_for_platform(&merge, &[budget], blocked, 1, true).is_err());
+        }
         let cpu_ai =
             configured_for_platform(&job("auto", "htdemucs"), &[budget], busy_gpu, 1, true)
                 .unwrap();

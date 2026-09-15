@@ -5,7 +5,7 @@ import { missingAiComponentIds } from "../media/aiRuntime";
 import { completedMergeInputs, createPathMatcher, isCompletedBatch, pathIsWithin, sameFsPath, seriesRootFromInputs } from "../media/paths";
 import type { MediaCommandError, MediaJob, MediaJobsModel, MergeSubmitOptions } from "../media/types";
 import type { MediaJobScope } from "../media/types";
-import type { AIComponentStatus, DemucsModel, WhisperModel } from "../types";
+import type { AIComponentStatus, AIDevicePreference, DemucsModel, WhisperModel } from "../types";
 import type { NotificationTarget } from "../notifications";
 import type { YouTubeModel, YouTubeUploadIntent } from "../youtube/types";
 import { YouTubeUploadDialog } from "../youtube/YouTubeUploadDialog";
@@ -40,6 +40,7 @@ type DownloadManagerPageProps = {
   demucsModel?: DemucsModel;
   whisperModel?: WhisperModel;
   aiComponents?: AIComponentStatus[];
+  aiDevice?: AIDevicePreference;
   aiConcurrency?: number;
   onAIConcurrencyChange?: (value: number) => Promise<void>;
   onInstallComponent?: (id: string) => Promise<void>;
@@ -139,6 +140,7 @@ function DownloadManagerPageView({
   demucsModel = "htdemucs",
   whisperModel = "small",
   aiComponents,
+  aiDevice = "auto",
   aiConcurrency,
   onAIConcurrencyChange,
   onInstallComponent,
@@ -159,7 +161,7 @@ function DownloadManagerPageView({
   const [bulkUploadSources, setBulkUploadSources] = useState<YouTubeBatchUploadSource[] | null>(null);
   const [bulkMedia, setBulkMedia] = useState<{ kind: BatchMediaKind; targets: BatchMediaTarget[] } | null>(null);
   const bulkModel = bulkMedia?.kind === "audioSeparation" ? demucsModel : whisperModel;
-  const bulkMissing = bulkMedia ? missingAiComponentIds(aiComponents, `${bulkMedia.kind === "audioSeparation" ? "demucs" : "whisper"}-${bulkModel}`) : [];
+  const bulkMissing = bulkMedia ? missingAiComponentIds(aiComponents, `${bulkMedia.kind === "audioSeparation" ? "demucs" : "whisper"}-${bulkModel}`, aiDevice) : [];
   const [bulkPreparing, setBulkPreparing] = useState(false);
   const bulkPreparingRef = useRef(false);
   const [notice, setNotice] = useState<{ message: string } | null>(null);
@@ -314,7 +316,7 @@ function DownloadManagerPageView({
   async function submitAI(batchId: string, kind: "audioSeparation" | "subtitleExtraction", scope: MediaJobScope, sourcePath?: string) {
     if (submittingRef.current) return;
     const modelId = kind === "audioSeparation" ? `demucs-${demucsModel}` : `whisper-${whisperModel}`;
-    const missing = missingAiComponentIds(aiComponents, modelId);
+    const missing = missingAiComponentIds(aiComponents, modelId, aiDevice);
     if (missing.length) {
       setPendingInstall({ kind, scope, ids: missing, batchId, mergedPath: sourcePath });
       setMediaDialog(null);

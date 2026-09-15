@@ -39,6 +39,18 @@ describe("requiredRuntimeComponentId", () => {
 });
 
 describe("missingAiComponentIds", () => {
+  it("uses CPU installation for CPU requests and accepts CPU-only installations in auto mode", () => {
+    expect(missingAiComponentIds(windowsCatalog, "demucs-htdemucs", "cpu")).toEqual(["runtime-cpu", "demucs-htdemucs"]);
+    const installed = windowsCatalog.map(item => ({ ...item, installed: ["runtime-cpu", "demucs-htdemucs"].includes(item.id) }));
+    expect(missingAiComponentIds(installed, "demucs-htdemucs", "auto")).toEqual([]);
+    expect(requiredRuntimeComponentId(installed, "auto")).toBe("runtime-cpu");
+    expect(missingAiComponentIds(installed, "demucs-htdemucs", "cuda")).toEqual(["runtime-modern"]);
+  });
+
+  it("reuses an installed CUDA runtime for CPU jobs without another large download", () => {
+    const installed = windowsCatalog.map(item => ({ ...item, installed: ["runtime-legacy", "demucs-htdemucs"].includes(item.id) }));
+    expect(missingAiComponentIds(installed, "demucs-htdemucs", "cpu")).toEqual([]);
+  });
   it("skips the install gate when the component list is still loading", () => {
     expect(missingAiComponentIds(undefined, "demucs-htdemucs")).toEqual([]);
   });
