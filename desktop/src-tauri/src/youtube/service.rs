@@ -197,10 +197,25 @@ impl YouTubeService {
         channel_id: &str,
         start_date: &str,
         end_date: &str,
+        video_id: Option<&str>,
     ) -> Result<super::analytics::AnalyticsReport, AppError> {
         self.analytics_api(channel_id)
             .await?
-            .report_range(start_date, end_date)
+            .report_range(start_date, end_date, video_id)
+            .await
+    }
+
+    pub async fn channel_analytics_breakdown(
+        &self,
+        channel_id: &str,
+        start_date: &str,
+        end_date: &str,
+        kind: super::analytics::BreakdownKind,
+        video_id: Option<&str>,
+    ) -> Result<super::analytics::AnalyticsBreakdown, AppError> {
+        self.analytics_api(channel_id)
+            .await?
+            .breakdown(start_date, end_date, kind, video_id)
             .await
     }
 

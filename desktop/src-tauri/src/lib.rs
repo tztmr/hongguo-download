@@ -1473,10 +1473,32 @@ async fn get_youtube_channel_analytics_report(
     channel_id: String,
     start_date: String,
     end_date: String,
+    video_id: Option<String>,
 ) -> AppResult<youtube::analytics::AnalyticsReport> {
     state
         .youtube
-        .channel_analytics_report(&channel_id, &start_date, &end_date)
+        .channel_analytics_report(&channel_id, &start_date, &end_date, video_id.as_deref())
+        .await
+}
+
+#[tauri::command]
+async fn get_youtube_channel_analytics_breakdown(
+    state: State<'_, AppState>,
+    channel_id: String,
+    start_date: String,
+    end_date: String,
+    kind: youtube::analytics::BreakdownKind,
+    video_id: Option<String>,
+) -> AppResult<youtube::analytics::AnalyticsBreakdown> {
+    state
+        .youtube
+        .channel_analytics_breakdown(
+            &channel_id,
+            &start_date,
+            &end_date,
+            kind,
+            video_id.as_deref(),
+        )
         .await
 }
 
@@ -1885,6 +1907,7 @@ pub fn run() {
             set_youtube_video_thumbnail,
             get_youtube_channel_analytics_snapshot,
             get_youtube_channel_analytics_report,
+            get_youtube_channel_analytics_breakdown,
             check_youtube_upload,
             start_youtube_upload_job,
             cancel_youtube_upload_job,

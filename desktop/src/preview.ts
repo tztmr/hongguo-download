@@ -3,7 +3,7 @@ import type { DownloadBatch, DownloadItem, DownloadItemStatus, DownloadManagerSt
 import type { MediaCommands, MediaJob } from "./media/types";
 import type { AIComponentStatus, EpisodeItem, SeriesItem } from "./types";
 import type { YouTubeModel } from "./youtube/types";
-import type { AnalyticsCommands } from "./youtube/analyticsCommands";
+import type { AnalyticsCommands, AnalyticsMetrics, AnalyticsRow, BreakdownRow } from "./youtube/analyticsCommands";
 import type { ManagedVideo, ManagementCommands } from "./youtube/managementCommands";
 
 const names = [
@@ -268,13 +268,70 @@ export const previewManagementCommands: ManagementCommands = {
   createPlaylist: async () => ({ id: "", title: "", privacyStatus: "private", itemIds: [] }),
 };
 
+const emptyAnalytics: AnalyticsMetrics = {
+  views: null, engagedViews: null, estimatedMinutesWatched: null, averageViewDuration: null,
+  averageViewPercentage: null, likes: null, comments: null, shares: null, subscribersGained: null, subscribersLost: null,
+};
+const previewAnalyticsVideos = names.slice(0, 5).map((title, index) => ({
+  key: `demoVideo0${index}`, title: `${title}${index % 2 ? " · 首集 Shorts" : " · 全集"}`,
+  contentType: index % 2 ? "SHORTS" : "VIDEO_ON_DEMAND", thumbnailUrl: null,
+}));
+function previewDate(date: string, days: number): string {
+  return new Date(Date.parse(`${date}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
+}
+function previewDaily(startDate: string, endDate: string, videoId?: string): AnalyticsRow[] {
+  const count = Math.min(367, (Date.parse(endDate) - Date.parse(startDate)) / 86400000 + 1);
+  return Array.from({ length: Math.max(0, count) }, (_, index) => {
+    const date = previewDate(startDate, index), day = Date.parse(date) / 86400000;
+    const factor = videoId ? (Number(videoId.slice(-1)) + 1) / 15 : 1;
+    const views = Math.round((1800 + (day % 11) * 190 + Math.sin(day) * 380) * factor);
+    const engagedViews = Math.round(views * 0.7), averageViewDuration = 65 + day % 30;
+    return { date, views, engagedViews, averageViewDuration, estimatedMinutesWatched: engagedViews * averageViewDuration / 60,
+      averageViewPercentage: videoId && Number(videoId.slice(-1)) % 2 ? 108.5 : 42.8,
+      likes: Math.round(views * 0.035), comments: Math.round(views * 0.004), shares: Math.round(views * 0.008),
+      subscribersGained: Math.round((day % 7 === 0 ? 2 : views * 0.006)), subscribersLost: Math.round(views * 0.0015),
+    };
+  });
+}
+function previewTotals(rows: AnalyticsMetrics[]): AnalyticsMetrics {
+  if (!rows.length) return { ...emptyAnalytics };
+  const sum = (key: keyof AnalyticsMetrics) => rows.reduce((total, row) => total + (row[key] ?? 0), 0);
+  const engagedViews = sum("engagedViews"), minutes = sum("estimatedMinutesWatched");
+  return { views: sum("views"), engagedViews, estimatedMinutesWatched: minutes,
+    averageViewDuration: engagedViews ? minutes * 60 / engagedViews : null,
+    averageViewPercentage: engagedViews ? rows.reduce((total, row) => total + (row.averageViewPercentage ?? 0) * (row.engagedViews ?? 0), 0) / engagedViews : null,
+    likes: sum("likes"), comments: sum("comments"), shares: sum("shares"), subscribersGained: sum("subscribersGained"), subscribersLost: sum("subscribersLost"),
+  };
+}
 export const previewAnalyticsCommands: AnalyticsCommands = {
-  snapshot: async (channelId) => ({ channelId, viewCount: "123456", fetchedAt: "2026-09-10T10:00:00Z" }),
-  report: async (channelId, startDate, endDate) => ({
-    channelId, startDate, endDate, returnedEndDate: "2026-09-09", views: 3210,
-    estimatedMinutesWatched: 987.5, averageViewDuration: 42, fetchedAt: "2026-09-10T10:00:00Z",
-    timezone: "America/Los_Angeles", rows: [{ date: "2026-09-09", views: 3210, estimatedMinutesWatched: 987.5, averageViewDuration: 42 }],
-  }),
+  snapshot: async (channelId) => ({ channelId, viewCount: "123456", subscriberCount: "2340", hiddenSubscriberCount: false, videoCount: "58", fetchedAt: new Date().toISOString() }),
+  report: async (channelId, startDate, endDate, videoId) => {
+    const cutoff = previewDate(new Date().toISOString().slice(0, 10), -2);
+    const returnedEndDate = startDate <= cutoff ? (endDate < cutoff ? endDate : cutoff) : null;
+    const rows = returnedEndDate ? previewDaily(startDate, returnedEndDate, videoId) : [];
+    const previousStart = previewDate(startDate, -rows.length), previousEnd = previewDate(startDate, -1);
+    return { channelId, videoId: videoId ?? null, startDate, endDate, returnedEndDate,
+      ...previewTotals(rows), rows, warnings: [], fetchedAt: new Date().toISOString(), timezone: "America/Los_Angeles",
+      comparison: rows.length ? { startDate: previousStart, endDate: previousEnd, ...previewTotals(previewDaily(previousStart, previousEnd, videoId)) } : null,
+    };
+  },
+  breakdown: async (channelId, startDate, endDate, kind, videoId) => {
+    const total = previewTotals(previewDaily(startDate, endDate, videoId));
+    let rows: BreakdownRow[];
+    if (kind === "videos") rows = previewAnalyticsVideos.map((video) => ({ ...video, ...previewTotals(previewDaily(startDate, endDate, video.key)) }));
+    else {
+      const keys = { contentType: ["SHORTS", "VIDEO_ON_DEMAND"], traffic: ["SHORTS", "YT_SEARCH", "RELATED_VIDEO", "EXT_URL", "NOTIFICATION"],
+        country: ["TW", "US", "MY", "SG", "CA"], device: ["MOBILE", "TV", "DESKTOP", "TABLET"], subscribed: ["UNSUBSCRIBED", "SUBSCRIBED"] }[kind];
+      const weights = keys.map((_, i) => keys.length - i), denominator = weights.reduce((sum, n) => sum + n, 0);
+      rows = keys.map((key, index) => ({ ...emptyAnalytics, key, title: null, thumbnailUrl: null, contentType: kind === "contentType" ? key : null,
+        views: Math.round((total.views ?? 0) * weights[index] / denominator), engagedViews: Math.round((total.engagedViews ?? 0) * weights[index] / denominator),
+        estimatedMinutesWatched: (total.estimatedMinutesWatched ?? 0) * weights[index] / denominator,
+        averageViewDuration: kind === "traffic" || kind === "device" ? null : total.averageViewDuration,
+        averageViewPercentage: kind === "traffic" || kind === "device" ? null : total.averageViewPercentage,
+      }));
+    }
+    return { channelId, videoId: videoId ?? null, startDate, endDate, kind, rows, truncated: false, warnings: [], fetchedAt: new Date().toISOString() };
+  },
 };
 
 export const previewMediaCommands: MediaCommands = {
