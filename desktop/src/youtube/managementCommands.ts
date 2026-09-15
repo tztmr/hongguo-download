@@ -1,12 +1,23 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { YouTubePrivacy } from "./types";
 
-export type ManagedVideo = { id: string; etag: string; title: string; description: string; privacyStatus: YouTubePrivacy; thumbnailUrl: string; publishedAt: string };
+export type ManagedVideo = {
+  id: string; etag: string; title: string; description: string;
+  privacyStatus: YouTubePrivacy; thumbnailUrl: string; publishedAt: string;
+  videoFormat: "shorts" | "shortsCandidate" | "standard" | "unknown";
+  durationSeconds: number | null;
+  restriction: {
+    kind: "noneReported" | "global" | "region" | "copyright" | "unavailable";
+    reason: string; allowedRegions: string[] | null; blockedRegions: string[];
+  };
+};
 export type ManagedPlaylist = { id: string; title: string; privacyStatus: YouTubePrivacy; itemIds: string[] };
 export type VideoUpdate = Pick<ManagedVideo, "etag" | "title" | "description" | "privacyStatus"> & { channelId: string; videoId: string };
 export type ManagementCommands = {
   detail(channelId: string, videoId: string): Promise<ManagedVideo>;
   list(channelId: string, pageToken?: string): Promise<{ items: ManagedVideo[]; nextPageToken: string | null }>;
+  lookup(channelId: string, videoIds: string[]): Promise<{ items: ManagedVideo[]; failures: { videoId: string; message: string }[] }>;
+  deleteVideo(channelId: string, videoId: string): Promise<void>;
   update(request: VideoUpdate): Promise<ManagedVideo>;
   thumbnail(channelId: string, videoId: string, path: string): Promise<void>;
   playlists(channelId: string, videoId: string): Promise<ManagedPlaylist[]>;
@@ -14,6 +25,8 @@ export type ManagementCommands = {
   createPlaylist(channelId: string, title: string, privacy: YouTubePrivacy): Promise<ManagedPlaylist>;
 };
 export const managementCommands: ManagementCommands = {
+  lookup: (channelId, videoIds) => invoke("lookup_youtube_channel_videos", { channelId, videoIds }),
+  deleteVideo: (channelId, videoId) => invoke("delete_youtube_channel_video", { channelId, videoId }),
   detail: (channelId, videoId) => invoke("get_youtube_channel_video", { channelId, videoId }),
   list: (channelId, pageToken) => invoke("list_youtube_channel_videos", { channelId, pageToken: pageToken ?? null }),
   update: (request) => invoke("update_youtube_channel_video", { request }),

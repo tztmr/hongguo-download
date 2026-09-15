@@ -209,10 +209,13 @@ impl YouTubeService {
         channel_id: &str,
         video_id: &str,
     ) -> Result<super::management::ManagedVideo, AppError> {
-        self.management_api(channel_id)
+        let mut video = self
+            .management_api(channel_id)
             .await?
             .detail(video_id)
-            .await
+            .await?;
+        self.annotate_video_formats(channel_id, std::slice::from_mut(&mut video));
+        Ok(video)
     }
 
     pub async fn list_channel_videos(
@@ -220,20 +223,76 @@ impl YouTubeService {
         channel_id: &str,
         page_token: &str,
     ) -> Result<super::management::VideoPage, AppError> {
-        self.management_api(channel_id)
+        let mut page = self
+            .management_api(channel_id)
             .await?
             .list(page_token)
+            .await?;
+        self.annotate_video_formats(channel_id, &mut page.items);
+        Ok(page)
+    }
+    // Local format evidence survives clearing the completed upload queue. It is
+    // supplementary: unavailable history must not hide remotely listed videos.
+    fn annotate_video_formats(
+        &self,
+        channel_id: &str,
+        videos: &mut [super::management::ManagedVideo],
+    ) {
+        let mut known = {
+            let _guard = self
+                .history_lock
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            duplicates::read_history(&self.data_dir).unwrap_or_default()
+        };
+        known.extend(
+            self.uploads
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .iter()
+                .filter_map(|stored| {
+                    stored
+                        .job
+                        .video_id
+                        .as_deref()
+                        .map(|id| known_video(stored, id))
+                }),
+        );
+        super::management::apply_upload_formats(channel_id, videos, &known);
+    }
+    pub async fn lookup_channel_videos(
+        &self,
+        channel_id: &str,
+        video_ids: &[String],
+    ) -> Result<super::management::VideoLookup, AppError> {
+        let mut result = self
+            .management_api(channel_id)
+            .await?
+            .lookup(video_ids)
+            .await?;
+        self.annotate_video_formats(channel_id, &mut result.items);
+        Ok(result)
+    }
+    pub async fn delete_channel_video(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+    ) -> Result<(), AppError> {
+        self.management_api(channel_id)
+            .await?
+            .delete_video(video_id)
             .await
     }
     pub async fn update_channel_video(
         &self,
         request: &super::management::VideoUpdate,
     ) -> Result<super::management::ManagedVideo, AppError> {
-        let video = self
+        let mut video = self
             .management_api(&request.channel_id)
             .await?
             .update(request)
             .await?;
+        self.annotate_video_formats(&request.channel_id, std::slice::from_mut(&mut video));
         // Keep local upload rows consistent with the confirmed remote metadata.
         let mut uploads = self.uploads.lock().map_err(state_lock_error)?;
         for stored in uploads.iter_mut().filter(|u| {

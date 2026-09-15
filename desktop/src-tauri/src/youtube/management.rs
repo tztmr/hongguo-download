@@ -1,4 +1,4 @@
-//! Editing existing channel videos. Read before write to retain unrelated metadata.
+//! Manage channel videos and restrictions; verify ownership before mutations.
 use super::config::SecretString;
 use crate::AppError;
 use reqwest::{Client, Method};
@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::{collections::HashSet, time::Duration};
 
 const BASE: &str = "https://www.googleapis.com/youtube/v3";
+const VIDEO_PARTS: &str = "snippet,status,contentDetails,fileDetails";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManagedVideo {
@@ -17,6 +18,50 @@ pub struct ManagedVideo {
     pub privacy_status: String,
     pub thumbnail_url: String,
     pub published_at: String,
+    pub video_format: String,
+    pub duration_seconds: Option<f64>,
+    pub restriction: VideoRestriction,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoRestriction {
+    pub kind: String,
+    pub reason: String,
+    // None and an empty allowed list have different meanings on YouTube.
+    pub allowed_regions: Option<Vec<String>>,
+    pub blocked_regions: Vec<String>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoLookup {
+    pub items: Vec<ManagedVideo>,
+    pub failures: Vec<VideoLookupFailure>,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoLookupFailure {
+    pub video_id: String,
+    pub message: String,
+}
+pub(super) fn apply_upload_formats(
+    channel_id: &str,
+    videos: &mut [ManagedVideo],
+    known: &[super::duplicates::KnownVideo],
+) {
+    for video in videos {
+        if let Some(record) = known.iter().rev().find(|record| {
+            record.channel_id == channel_id
+                && record.video_id == video.id
+                && !record.upload_format.is_auto()
+        }) {
+            video.video_format = match record.upload_format {
+                super::format::UploadFormat::Shorts => "shorts",
+                super::format::UploadFormat::Standard => "standard",
+                super::format::UploadFormat::Auto => continue,
+            }
+            .into();
+        }
+    }
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,7 +113,112 @@ fn items(value: &Value) -> Result<&Vec<Value>, AppError> {
 fn privacy_valid(value: &str) -> bool {
     matches!(value, "private" | "public" | "unlisted")
 }
+fn duration_seconds(value: &Value) -> Option<f64> {
+    let milliseconds = &value["fileDetails"]["durationMs"];
+    if let Some(ms) = milliseconds
+        .as_f64()
+        .or_else(|| milliseconds.as_str()?.parse().ok())
+    {
+        if ms.is_finite() && ms > 0.0 {
+            return Some(ms / 1000.0);
+        }
+    }
+    // YouTube durations use the day/time subset of ISO 8601 (not calendar months).
+    let duration = value["contentDetails"]["duration"].as_str()?;
+    let mut total = 0.0;
+    let mut number = String::new();
+    let mut in_time = false;
+    for c in duration.strip_prefix('P')?.chars() {
+        if c == 'T' && number.is_empty() && !in_time {
+            in_time = true;
+        } else if c.is_ascii_digit() || c == '.' {
+            number.push(c);
+        } else {
+            let multiplier = match (in_time, c) {
+                (false, 'D') => 86400.0,
+                (true, 'H') => 3600.0,
+                (true, 'M') => 60.0,
+                (true, 'S') => 1.0,
+                _ => return None,
+            };
+            total += number.parse::<f64>().ok()? * multiplier;
+            number.clear();
+        }
+    }
+    (number.is_empty() && total.is_finite() && total > 0.0).then_some(total)
+}
+fn video_format(value: &Value, duration: Option<f64>) -> &'static str {
+    if duration.is_some_and(|seconds| seconds > 180.0) {
+        return "standard";
+    }
+    // No Shorts flag is exposed by videos.list. Dimensions indicate eligibility,
+    // not YouTube's final classification (historical uploads have different rules).
+    let Some(stream) = value["fileDetails"]["videoStreams"]
+        .as_array()
+        .and_then(|s| s.first())
+    else {
+        return "unknown";
+    };
+    let aspect = stream["aspectRatio"].as_f64().or_else(|| {
+        let width = stream["widthPixels"].as_f64()?;
+        let height = stream["heightPixels"].as_f64()?;
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        match stream["rotation"].as_str().unwrap_or("none") {
+            "none" | "upsideDown" => Some(width / height),
+            "clockwise" | "counterClockwise" => Some(height / width),
+            _ => None,
+        }
+    });
+    match aspect.filter(|a| a.is_finite() && *a > 0.0) {
+        Some(ratio) if ratio > 1.0 => "standard",
+        Some(_)
+            if duration.is_some() && field(value, "/snippet/liveBroadcastContent") == "none" =>
+        {
+            "shortsCandidate"
+        }
+        _ => "unknown",
+    }
+}
+fn restriction(value: &Value) -> VideoRestriction {
+    let regions = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter()
+                    .map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+            })
+    };
+    let allowed = regions("/contentDetails/regionRestriction/allowed");
+    let blocked = regions("/contentDetails/regionRestriction/blocked").unwrap_or_default();
+    let upload = field(value, "/status/uploadStatus");
+    let (kind, reason) = if upload == "rejected" {
+        match field(value, "/status/rejectionReason").as_str() {
+            "copyright" => ("copyright", "版权原因被拒绝"),
+            "claim" => ("copyright", "版权声明导致拒绝"),
+            _ => ("unavailable", "YouTube 已拒绝此视频，请到 Studio 核对原因"),
+        }
+    } else if upload == "failed" || upload == "deleted" {
+        ("unavailable", "视频处理失败或已不可用")
+    } else if allowed.as_ref().is_some_and(Vec::is_empty) {
+        ("global", "全球封锁")
+    } else if allowed.is_some() || !blocked.is_empty() {
+        ("region", "地区限制")
+    } else {
+        ("noneReported", "API 未返回封锁信息")
+    };
+    VideoRestriction {
+        kind: kind.into(),
+        reason: reason.into(),
+        allowed_regions: allowed,
+        blocked_regions: blocked,
+    }
+}
 fn parse_video(value: &Value) -> Result<ManagedVideo, AppError> {
+    let duration = duration_seconds(value);
     let video = ManagedVideo {
         id: field(value, "/id"),
         etag: field(value, "/etag"),
@@ -81,6 +231,9 @@ fn parse_video(value: &Value) -> Result<ManagedVideo, AppError> {
             .find(|s| !s.is_empty())
             .unwrap_or_default(),
         published_at: field(value, "/snippet/publishedAt"),
+        video_format: video_format(value, duration).into(),
+        duration_seconds: duration,
+        restriction: restriction(value),
     };
     if video.id.is_empty() || video.etag.is_empty() || !privacy_valid(&video.privacy_status) {
         return Err(response_error());
@@ -95,6 +248,12 @@ fn owned(value: &Value, channel_id: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+fn valid_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
 }
 fn copy_fields(source: &Value, keys: &[&str]) -> Value {
     let mut out = json!({});
@@ -302,7 +461,7 @@ impl ManagementApi {
         let mut videos = Vec::new();
         if !ids.is_empty() {
             let data = self
-                .get("videos", &[("part", "snippet,status"), ("id", &ids)])
+                .get("videos", &[("part", VIDEO_PARTS), ("id", &ids)])
                 .await?;
             for video in items(&data)? {
                 owned(video, &self.channel_id)?;
@@ -320,10 +479,11 @@ impl ManagementApi {
     }
     pub async fn video(&self, video_id: &str) -> Result<Value, AppError> {
         let data = self
-            .get("videos", &[("part", "snippet,status"), ("id", video_id)])
+            .get("videos", &[("part", VIDEO_PARTS), ("id", video_id)])
             .await?;
         let video = items(&data)?
-            .first()
+            .iter()
+            .find(|video| field(video, "/id") == video_id)
             .ok_or_else(|| AppError::new("YOUTUBE_VIDEO_NOT_FOUND", "视频已不存在，请刷新列表"))?
             .clone();
         owned(&video, &self.channel_id)?;
@@ -331,6 +491,111 @@ impl ManagementApi {
     }
     pub async fn detail(&self, video_id: &str) -> Result<ManagedVideo, AppError> {
         parse_video(&self.video(video_id).await?)
+    }
+
+    pub async fn lookup(&self, video_ids: &[String]) -> Result<VideoLookup, AppError> {
+        if video_ids.is_empty()
+            || video_ids.len() > 50
+            || video_ids.iter().any(|id| !valid_video_id(id))
+        {
+            return Err(AppError::new(
+                "YOUTUBE_LOOKUP_INVALID",
+                "每次可查询 1～50 个有效的视频 ID",
+            ));
+        }
+        self.channel_uploads().await?;
+        let mut seen = HashSet::new();
+        let ids: Vec<_> = video_ids
+            .iter()
+            .filter(|id| seen.insert(id.as_str()))
+            .collect();
+        // Read public parts first so one link from another channel cannot prevent
+        // querying the rest. Never return a foreign channel's video for deletion.
+        let data = self
+            .get(
+                "videos",
+                &[
+                    ("part", "snippet,status,contentDetails"),
+                    (
+                        "id",
+                        &ids.iter()
+                            .map(|id| id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                ],
+            )
+            .await?;
+        let mut result = VideoLookup {
+            items: vec![],
+            failures: vec![],
+        };
+        for id in ids {
+            let parsed = items(&data)?
+                .iter()
+                .find(|v| field(v, "/id") == *id)
+                .ok_or_else(|| {
+                    AppError::new(
+                        "YOUTUBE_VIDEO_NOT_FOUND",
+                        "视频不存在或当前授权无法读取，请到 Studio 核对",
+                    )
+                })
+                .and_then(|v| {
+                    owned(v, &self.channel_id)?;
+                    parse_video(v)
+                });
+            match parsed {
+                Ok(video) => result.items.push(video),
+                Err(error) => result.failures.push(VideoLookupFailure {
+                    video_id: id.clone(),
+                    message: error.message,
+                }),
+            }
+        }
+        // File metadata is owner-only and may not be available for blocked or
+        // newly uploaded videos. Failure here must not hide the restriction read.
+        if !result.items.is_empty() {
+            let owned_ids = result
+                .items
+                .iter()
+                .map(|video| video.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            if let Ok(details) = self
+                .get("videos", &[("part", "fileDetails"), ("id", &owned_ids)])
+                .await
+            {
+                if let Some(rows) = details["items"].as_array() {
+                    for video in &mut result.items {
+                        if let (Some(original), Some(detail)) = (
+                            items(&data)?.iter().find(|v| field(v, "/id") == video.id),
+                            rows.iter().find(|v| field(v, "/id") == video.id),
+                        ) {
+                            let mut full = original.clone();
+                            full["fileDetails"] = detail["fileDetails"].clone();
+                            video.duration_seconds = duration_seconds(&full);
+                            video.video_format = video_format(&full, video.duration_seconds).into();
+                        }
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    pub async fn delete_video(&self, video_id: &str) -> Result<(), AppError> {
+        if !valid_video_id(video_id) {
+            return Err(AppError::new(
+                "YOUTUBE_VIDEO_ID_INVALID",
+                "无效的视频 ID，请刷新后重新选择",
+            ));
+        }
+        // Verify the token's channel and this exact video's owner before DELETE.
+        self.channel_uploads().await?;
+        self.video(video_id).await?;
+        self.request(Method::DELETE, "videos", &[("id", video_id)], None, None)
+            .await?;
+        Ok(())
     }
 
     /// Upload transport completion does not establish that YouTube finished
@@ -630,6 +895,210 @@ mod tests {
     }
     fn channel() -> Value {
         json!({"items":[{"id":"c1","contentDetails":{"relatedPlaylists":{"uploads":"uploads1"}}}]})
+    }
+    fn identified(id: &str) -> Value {
+        let mut video = original();
+        video["id"] = json!(id);
+        video
+    }
+    #[test]
+    fn restriction_distinguishes_global_regional_and_no_report_without_assuming_copyright() {
+        for (region, expected) in [
+            (json!({"allowed": []}), "global"),
+            (json!({"allowed": ["US"]}), "region"),
+            (json!({"blocked": ["US", "CA"]}), "region"),
+            (json!({"blocked": []}), "noneReported"),
+            (json!({"allowed": [null]}), "noneReported"),
+            (Value::Null, "noneReported"),
+        ] {
+            let mut video = original();
+            video["contentDetails"] = json!({"regionRestriction": region, "licensedContent": true});
+            let parsed = parse_video(&video).unwrap();
+            assert_eq!(parsed.restriction.kind, expected);
+            if expected == "global" {
+                assert_eq!(parsed.restriction.allowed_regions, Some(vec![]));
+            }
+            assert_eq!(parsed.privacy_status, "private");
+        }
+    }
+    #[test]
+    fn copyright_rejection_requires_rejected_upload_and_does_not_expose_remote_reason() {
+        for (upload, reason, kind) in [
+            ("rejected", "claim", "copyright"),
+            ("rejected", "copyright", "copyright"),
+            ("processed", "copyright", "noneReported"),
+            ("rejected", "sensitive-error-body", "unavailable"),
+            ("failed", "codec", "unavailable"),
+        ] {
+            let mut video = original();
+            video["status"]["uploadStatus"] = json!(upload);
+            video["status"]["rejectionReason"] = json!(reason);
+            let parsed = parse_video(&video).unwrap();
+            assert_eq!(parsed.restriction.kind, kind);
+            assert!(!parsed.restriction.reason.contains("sensitive"));
+        }
+    }
+    #[test]
+    fn shorts_candidates_need_dimensions_and_duration_not_just_a_short_duration() {
+        for (details, duration, kind) in [
+            (
+                json!({"videoStreams":[{"widthPixels":1080,"heightPixels":1920}]}),
+                "PT3M",
+                "shortsCandidate",
+            ),
+            (
+                json!({"videoStreams":[{"widthPixels":1080,"heightPixels":1080}]}),
+                "PT1M30S",
+                "shortsCandidate",
+            ),
+            (
+                json!({"videoStreams":[{"widthPixels":1920,"heightPixels":1080}]}),
+                "PT30S",
+                "standard",
+            ),
+            (
+                json!({"videoStreams":[{"widthPixels":1920,"heightPixels":1080,"rotation":"clockwise"}]}),
+                "PT30S",
+                "shortsCandidate",
+            ),
+            (
+                json!({"videoStreams":[{"widthPixels":720,"heightPixels":720,"aspectRatio":2.0}]}),
+                "PT30S",
+                "standard",
+            ),
+            (Value::Null, "PT30S", "unknown"),
+            (Value::Null, "PT3M0.1S", "standard"),
+            (Value::Null, "P1DT2H", "standard"),
+            (
+                json!({"videoStreams":[{"widthPixels":1080,"heightPixels":1920}]}),
+                "PT0S",
+                "unknown",
+            ),
+        ] {
+            let mut video = original();
+            video["snippet"]["liveBroadcastContent"] = json!("none");
+            video["contentDetails"] = json!({"duration": duration});
+            video["fileDetails"] = details;
+            assert_eq!(parse_video(&video).unwrap().video_format, kind);
+        }
+        let mut video = original();
+        video["contentDetails"] = json!({"duration":"PT3M"});
+        video["fileDetails"] = json!({"durationMs":"180001"});
+        assert_eq!(duration_seconds(&video), Some(180.001));
+    }
+    #[test]
+    fn upload_format_evidence_is_matched_by_both_channel_and_video_id() {
+        use super::super::{duplicates::KnownVideo, format::UploadFormat};
+        let mut videos = vec![
+            parse_video(&identified("short000001")).unwrap(),
+            parse_video(&original()).unwrap(),
+        ];
+        let known = vec![
+            KnownVideo {
+                channel_id: "other".into(),
+                video_id: "v1".into(),
+                upload_format: UploadFormat::Shorts,
+                ..Default::default()
+            },
+            KnownVideo {
+                channel_id: "c1".into(),
+                video_id: "short000001".into(),
+                upload_format: UploadFormat::Shorts,
+                ..Default::default()
+            },
+        ];
+        apply_upload_formats("c1", &mut videos, &known);
+        assert_eq!(videos[0].video_format, "shorts");
+        assert_eq!(videos[1].video_format, "unknown");
+    }
+    #[tokio::test]
+    async fn notification_lookup_deduplicates_and_keeps_valid_results_when_other_links_are_missing_or_foreign(
+    ) {
+        let mut foreign = identified("other000001");
+        foreign["snippet"]["channelId"] = json!("other");
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[identified("short000001"), foreign]})),
+            (
+                200,
+                json!({"items":[{"id":"short000001","fileDetails":{"durationMs":"90000"}}]}),
+            ),
+        ])
+        .await;
+        let result = api
+            .lookup(
+                &["short000001", "other000001", "gone0000001", "short000001"].map(str::to_owned),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].id, "short000001");
+        assert_eq!(result.failures.len(), 2);
+        assert_eq!(result.failures[0].video_id, "other000001");
+        assert!(result.failures[0].message.contains("不属于"));
+        let requests = server.await.unwrap();
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+        assert!(requests[1].contains("id=short000001%2Cother000001%2Cgone0000001 "));
+        assert!(requests[2].contains("part=fileDetails&id=short000001 "));
+        assert_eq!(result.items[0].duration_seconds, Some(90.0));
+    }
+    #[tokio::test]
+    async fn delete_verifies_channel_and_exact_video_then_deletes_only_that_video() {
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[identified("short000001")]})),
+            (204, Value::Null),
+        ])
+        .await;
+        api.delete_video("short000001").await.unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /channels?"));
+        assert!(requests[1].contains("id=short000001"));
+        assert!(requests[2].starts_with("DELETE /videos?id=short000001 "));
+        assert_eq!(requests[2].split("\r\n\r\n").nth(1).unwrap(), "");
+    }
+    #[tokio::test]
+    async fn delete_never_writes_for_a_foreign_missing_or_wrong_video() {
+        let mut foreign = identified("short000001");
+        foreign["snippet"]["channelId"] = json!("other");
+        for (rows, code) in [
+            (json!([foreign]), "YOUTUBE_CHANNEL_MISMATCH"),
+            (json!([]), "YOUTUBE_VIDEO_NOT_FOUND"),
+            (
+                json!([identified("other000001")]),
+                "YOUTUBE_VIDEO_NOT_FOUND",
+            ),
+        ] {
+            let (api, server) = server(vec![(200, channel()), (200, json!({"items":rows}))]).await;
+            assert_eq!(
+                api.delete_video("short000001").await.unwrap_err().code,
+                code
+            );
+            assert!(server
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.starts_with("GET ")));
+        }
+    }
+    #[tokio::test]
+    async fn invalid_ids_and_oversize_lookup_are_rejected_before_requests() {
+        let (api, server) = server(vec![]).await;
+        for id in ["", "short000001,other000001", "bad&fields=id"] {
+            assert!(api.delete_video(id).await.is_err());
+            assert!(api.lookup(&[id.into()]).await.is_err());
+        }
+        assert!(api.lookup(&vec!["short000001".into(); 51]).await.is_err());
+        assert!(server.await.unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn delete_failure_returns_actionable_error_instead_of_success() {
+        let (api, server) = server(vec![(200, channel()), (200, json!({"items":[identified("short000001")]})),
+            (403, json!({"error":{"message":"sensitive-token","errors":[{"reason":"quotaExceeded"}]}}))]).await;
+        let error = api.delete_video("short000001").await.unwrap_err();
+        assert_eq!(error.code, "YOUTUBE_QUOTA_EXCEEDED");
+        assert!(!error.message.contains("sensitive"));
+        server.await.unwrap();
     }
     #[tokio::test]
     async fn processing_waits_until_success_and_only_reads_the_requested_video() {

@@ -13,7 +13,7 @@ describe("App preview workflow", () => {
     expect(view.getByRole("heading", { name: "视频管理" })).toBeTruthy();
     expect(view.getByRole("button", { name: "视频管理" }).getAttribute("aria-current")).toBe("page");
     expect(view.queryByRole("heading", { name: "下载管理" })).toBeNull();
-    await view.findByText("频道暂无可管理的视频");
+    await view.findByText("已加载全部频道视频与 Shorts");
     fireEvent.click(view.getByRole("button", { name: "数据分析" }));
     expect(view.getByRole("heading", { name: "数据分析" })).toBeTruthy();
     expect(view.getByText("频道累计观看次数")).toBeTruthy();
@@ -25,7 +25,7 @@ describe("App preview workflow", () => {
     window.history.replaceState({}, "", "/?preview=downloads");
     const view = render(<App />);
     fireEvent.click(view.getByRole("button", { name: "视频管理" }));
-    await view.findByText("频道暂无可管理的视频");
+    await view.findByText("已加载全部频道视频与 Shorts");
     const search = view.getByRole("searchbox", { name: "搜索频道视频" });
     fireEvent.change(search, { target: { value: "保留筛选" } });
     fireEvent.click(view.getByRole("button", { name: "数据分析" }));

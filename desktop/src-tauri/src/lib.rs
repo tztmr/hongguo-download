@@ -1382,6 +1382,28 @@ async fn list_youtube_channel_videos(
         .await
 }
 #[tauri::command]
+async fn lookup_youtube_channel_videos(
+    state: State<'_, AppState>,
+    channel_id: String,
+    video_ids: Vec<String>,
+) -> AppResult<youtube::management::VideoLookup> {
+    state
+        .youtube
+        .lookup_channel_videos(&channel_id, &video_ids)
+        .await
+}
+#[tauri::command]
+async fn delete_youtube_channel_video(
+    state: State<'_, AppState>,
+    channel_id: String,
+    video_id: String,
+) -> AppResult<()> {
+    state
+        .youtube
+        .delete_channel_video(&channel_id, &video_id)
+        .await
+}
+#[tauri::command]
 async fn update_youtube_channel_video(
     state: State<'_, AppState>,
     request: youtube::management::VideoUpdate,
@@ -1854,6 +1876,8 @@ pub fn run() {
             remove_youtube_oauth_config,
             get_youtube_channel_video,
             list_youtube_channel_videos,
+            lookup_youtube_channel_videos,
+            delete_youtube_channel_video,
             update_youtube_channel_video,
             list_youtube_video_playlists,
             set_youtube_video_playlist,

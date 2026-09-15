@@ -781,6 +781,23 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .yt-management-heading p, .yt-edit-dialog header p { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
 .yt-management-toolbar { border-block: 1px solid var(--border); padding-block: 12px; }
 .yt-management-toolbar input { flex: 1; min-width: 200px; }
+.yt-management-help { padding: 12px 22px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }
+.yt-management-help p { margin: 0 0 10px; }
+.yt-management-help summary { cursor: pointer; color: var(--accent-hover); margin-bottom: 10px; }
+.yt-management-help small { display: block; margin-top: 10px; line-height: 1.7; }
+.yt-management-help textarea { display: block; box-sizing: border-box; width: 100%; min-height: 90px; margin-bottom: 10px; resize: vertical; border: 1px solid var(--border-strong); border-radius: 7px; padding: 10px; font: inherit; color: var(--text); background: var(--surface); }
+.yt-management-selection { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; padding: 12px 22px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); }
+.yt-management-selection label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.yt-management-selection > button { margin-left: auto; }
+.youtube-management .secondary-button.danger:not(:disabled) { color: var(--danger); border-color: var(--danger); }
+.yt-video-row > input, .yt-management-selection input { width: 17px; height: 17px; flex-shrink: 0; accent-color: var(--accent); }
+.yt-video-copy p.yt-restriction { white-space: normal; line-height: 1.6; overflow-wrap: anywhere; }
+.yt-video-copy p.yt-restriction-global, .yt-video-copy p.yt-restriction-copyright, .yt-video-copy p.yt-restriction-region, .yt-video-copy p.yt-restriction-unavailable { color: var(--warning); }
+.yt-shorts-cover { object-fit: contain; }
+.yt-delete-targets { list-style: none; margin: 0; padding: 0; }
+.yt-delete-targets li { border-bottom: 1px solid var(--border); padding: 10px 0; overflow-wrap: anywhere; }
+.yt-delete-targets small { display: block; color: var(--muted); margin-top: 5px; }
+.yt-delete-targets p { margin-bottom: 0; font-size: 12px; }
 .yt-management-toolbar span, .yt-management-footer, .yt-video-meta { font-size: 12px; color: var(--muted); }
 .yt-management-toolbar input, .yt-management-toolbar select, .yt-editor-fields input, .yt-editor-fields textarea, .yt-editor-fields select { border: 1px solid var(--border-strong); border-radius: 7px; padding: 9px 11px; font: inherit; background: var(--surface); color: var(--text); }
 .yt-video-list { flex: 1; }

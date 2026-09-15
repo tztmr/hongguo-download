@@ -4,7 +4,7 @@ import type { MediaCommands, MediaJob } from "./media/types";
 import type { AIComponentStatus, EpisodeItem, SeriesItem } from "./types";
 import type { YouTubeModel } from "./youtube/types";
 import type { AnalyticsCommands } from "./youtube/analyticsCommands";
-import type { ManagementCommands } from "./youtube/managementCommands";
+import type { ManagedVideo, ManagementCommands } from "./youtube/managementCommands";
 
 const names = [
   "天下第一纨绔",
@@ -249,10 +249,19 @@ export const previewYouTubeModel: YouTubeModel = {
   markNotified: async () => undefined,
 };
 
+// Synthetic channel data for the browser preview; no remote mutation is made.
+let previewManagedVideos: ManagedVideo[] = names.slice(0, 5).map((title, index) => ({
+  id: `demoVideo0${index}`, etag: `preview-${index}`, title: `${title}${index % 2 ? " · 首集 Shorts" : " · 全集"}`,
+  description: "演示频道视频，用于检查管理界面。", privacyStatus: index === 4 ? "private" : "public", thumbnailUrl: "", publishedAt: "2026-09-15T00:00:00Z",
+  videoFormat: index % 2 ? "shorts" : "standard", durationSeconds: index % 2 ? 90 : 3600,
+  restriction: { kind: index === 1 ? "global" : index === 2 ? "region" : "noneReported", reason: index === 1 ? "全球封锁" : index === 2 ? "地区限制" : "API 未返回封锁信息", allowedRegions: index === 1 ? [] : null, blockedRegions: index === 2 ? ["US", "CA"] : [] },
+}));
 export const previewManagementCommands: ManagementCommands = {
-  detail: async () => ({ id: "", etag: "", title: "", description: "", privacyStatus: "private", thumbnailUrl: "", publishedAt: "" }),
-  list: async () => ({ items: [], nextPageToken: null }),
-  update: async () => ({ id: "", etag: "", title: "", description: "", privacyStatus: "private", thumbnailUrl: "", publishedAt: "" }),
+  detail: async (_channelId, videoId) => { const video = previewManagedVideos.find((row) => row.id === videoId); if (!video) throw new Error("演示视频不存在"); return video; },
+  list: async () => ({ items: [...previewManagedVideos], nextPageToken: null }),
+  lookup: async (_channelId, videoIds) => ({ items: previewManagedVideos.filter((video) => videoIds.includes(video.id)), failures: videoIds.filter((id) => !previewManagedVideos.some((video) => video.id === id)).map((videoId) => ({ videoId, message: "演示数据中没有此视频" })) }),
+  deleteVideo: async (_channelId, videoId) => { previewManagedVideos = previewManagedVideos.filter((video) => video.id !== videoId); },
+  update: async (request) => { const index = previewManagedVideos.findIndex((video) => video.id === request.videoId); if (index < 0) throw new Error("演示视频不存在"); previewManagedVideos[index] = { ...previewManagedVideos[index], ...request }; return previewManagedVideos[index]; },
   thumbnail: async () => undefined,
   playlists: async () => [],
   membership: async () => undefined,
