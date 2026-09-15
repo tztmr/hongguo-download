@@ -40,6 +40,12 @@ def verify(executable: Path, version: str, timeout: float = 90):
                         raise RuntimeError(f"Native app exited before API readiness: {child.returncode}")
                     time.sleep(.1)
                 raise RuntimeError("Native app API startup timed out")
+            except Exception:
+                for diagnostic in (root / "native.log", data / "data" / "api-startup.log"):
+                    if diagnostic.exists():
+                        detail = diagnostic.read_text(encoding="utf-8", errors="replace")[-12000:]
+                        print(f"{diagnostic.name}: {detail}".encode("ascii", errors="backslashreplace").decode("ascii"), flush=True)
+                raise
             finally:
                 if os.name == "nt":
                     subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"],

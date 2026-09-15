@@ -19,7 +19,10 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 #[cfg(not(debug_assertions))]
-use tauri_plugin_shell::{process::CommandChild, ShellExt};
+use tauri_plugin_shell::{
+    process::{CommandChild, CommandEvent},
+    ShellExt,
+};
 
 mod api_startup;
 use api_startup::{ensure_api_ready, ApiReadiness};
@@ -218,6 +221,7 @@ fn spawn_api(
     port: u16,
     data_dir: &Path,
     download_proxy: Option<&str>,
+    _capture_output: bool,
 ) -> AppResult<ApiChild> {
     fs::create_dir_all(data_dir).map_err(|e| err(format!("创建应用数据目录失败: {e}")))?;
 
@@ -277,7 +281,30 @@ fn spawn_api(
                 .env("NO_PROXY", "127.0.0.1,localhost,::1");
         }
         let (mut events, child) = command.spawn().map_err(sidecar_spawn_error)?;
-        tauri::async_runtime::spawn(async move { while events.recv().await.is_some() {} });
+        let mut diagnostic = _capture_output
+            .then(|| fs::File::create(data_dir.join("api-startup.log")).ok())
+            .flatten();
+        tauri::async_runtime::spawn(async move {
+            let mut remaining = 32 * 1024;
+            while let Some(event) = events.recv().await {
+                if let Some(file) = diagnostic.as_mut() {
+                    let bytes = match event {
+                        CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => bytes,
+                        CommandEvent::Error(error) => error.into_bytes(),
+                        CommandEvent::Terminated(status) => {
+                            format!("API exited: {:?}", status.code).into_bytes()
+                        }
+                        _ => Vec::new(),
+                    };
+                    let length = bytes.len().min(remaining);
+                    if length > 0 {
+                        let _ = file.write_all(&bytes[..length]);
+                        let _ = file.write_all(b"\n");
+                        remaining -= length;
+                    }
+                }
+            }
+        });
         Ok(ApiChild::Release(child))
     }
 }
@@ -1750,6 +1777,7 @@ pub fn run() {
                     port,
                     &media_jobs_path,
                     settings.download_proxy.as_deref(),
+                    probe_dir.is_some(),
                 )
                 .map_err(|e| e.to_string())?,
             );

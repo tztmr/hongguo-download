@@ -1,6 +1,14 @@
 import argparse
 import os
+import sys
 from contextlib import asynccontextmanager
+
+
+# The desktop reads UTF-8 pipes. Windows may otherwise choose a legacy code page
+# and abort lifespan startup while printing the Chinese service banner.
+for _stream in (sys.stdout, sys.stderr):
+    if callable(getattr(_stream, "reconfigure", None)):
+        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 
 def _runtime_arguments():
