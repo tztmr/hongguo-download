@@ -847,6 +847,13 @@ button:disabled { cursor: not-allowed; opacity: 0.42; }
 .yt-management-heading { justify-content: space-between; }
 .yt-management-heading h2, .yt-edit-dialog h2 { margin: 0; font-size: 18px; }
 .yt-management-heading p, .yt-edit-dialog header p { margin: 7px 0 0; color: var(--muted); font-size: 13px; }
+.yt-blocked-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 18px 22px; background: var(--surface); border-top: 1px solid var(--border); }
+.yt-blocked-actions > div:first-child { flex: 1; min-width: 240px; }
+.yt-blocked-actions strong { font-size: 14px; }
+.yt-blocked-actions p, .yt-blocked-actions small { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.yt-blocked-actions p { margin: 6px 0 2px; }
+.yt-blocked-buttons, .yt-blocked-progress { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.yt-blocked-progress { flex-basis: 100%; font-size: 13px; }
 .yt-management-toolbar { border-block: 1px solid var(--border); padding-block: 12px; }
 .yt-management-toolbar input { flex: 1; min-width: 200px; }
 .yt-management-help { padding: 12px 22px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--border); }

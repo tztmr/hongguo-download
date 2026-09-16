@@ -18,6 +18,7 @@ export type ManagementCommands = {
   list(channelId: string, pageToken?: string): Promise<{ items: ManagedVideo[]; nextPageToken: string | null }>;
   lookup(channelId: string, videoIds: string[]): Promise<{ items: ManagedVideo[]; failures: { videoId: string; message: string }[] }>;
   deleteVideo(channelId: string, videoId: string): Promise<void>;
+  makeBlockedVideoPrivate(channelId: string, videoId: string): Promise<ManagedVideo>;
   update(request: VideoUpdate): Promise<ManagedVideo>;
   thumbnail(channelId: string, videoId: string, path: string): Promise<void>;
   playlists(channelId: string, videoId: string): Promise<ManagedPlaylist[]>;
@@ -27,6 +28,7 @@ export type ManagementCommands = {
 export const managementCommands: ManagementCommands = {
   lookup: (channelId, videoIds) => invoke("lookup_youtube_channel_videos", { channelId, videoIds }),
   deleteVideo: (channelId, videoId) => invoke("delete_youtube_channel_video", { channelId, videoId }),
+  makeBlockedVideoPrivate: (channelId, videoId) => invoke("make_youtube_blocked_video_private", { channelId, videoId }),
   detail: (channelId, videoId) => invoke("get_youtube_channel_video", { channelId, videoId }),
   list: (channelId, pageToken) => invoke("list_youtube_channel_videos", { channelId, pageToken: pageToken ?? null }),
   update: (request) => invoke("update_youtube_channel_video", { request }),

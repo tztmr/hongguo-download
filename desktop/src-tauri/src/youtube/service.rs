@@ -302,17 +302,35 @@ impl YouTubeService {
         &self,
         request: &super::management::VideoUpdate,
     ) -> Result<super::management::ManagedVideo, AppError> {
-        let mut video = self
+        let video = self
             .management_api(&request.channel_id)
             .await?
             .update(request)
             .await?;
-        self.annotate_video_formats(&request.channel_id, std::slice::from_mut(&mut video));
+        self.sync_managed_video(&request.channel_id, video)
+    }
+    pub async fn make_blocked_video_private(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+    ) -> Result<super::management::ManagedVideo, AppError> {
+        let video = self
+            .management_api(channel_id)
+            .await?
+            .make_blocked_video_private(video_id)
+            .await?;
+        self.sync_managed_video(channel_id, video)
+    }
+    fn sync_managed_video(
+        &self,
+        channel_id: &str,
+        mut video: super::management::ManagedVideo,
+    ) -> Result<super::management::ManagedVideo, AppError> {
+        self.annotate_video_formats(channel_id, std::slice::from_mut(&mut video));
         // Keep local upload rows consistent with the confirmed remote metadata.
         let mut uploads = self.uploads.lock().map_err(state_lock_error)?;
         for stored in uploads.iter_mut().filter(|u| {
-            u.job.channel_id == request.channel_id
-                && u.job.video_id.as_deref() == Some(&request.video_id)
+            u.job.channel_id == channel_id && u.job.video_id.as_deref() == Some(&video.id)
         }) {
             stored.job.title = video.title.clone();
             stored.intent.title = video.title.clone();

@@ -261,6 +261,14 @@ export const previewManagementCommands: ManagementCommands = {
   list: async () => ({ items: [...previewManagedVideos], nextPageToken: null }),
   lookup: async (_channelId, videoIds) => ({ items: previewManagedVideos.filter((video) => videoIds.includes(video.id)), failures: videoIds.filter((id) => !previewManagedVideos.some((video) => video.id === id)).map((videoId) => ({ videoId, message: "演示数据中没有此视频" })) }),
   deleteVideo: async (_channelId, videoId) => { previewManagedVideos = previewManagedVideos.filter((video) => video.id !== videoId); },
+  makeBlockedVideoPrivate: async (_channelId, videoId) => {
+    const video = previewManagedVideos.find((row) => row.id === videoId);
+    if (!video) throw new Error("演示视频不存在");
+    if (!["global", "region", "copyright"].includes(video.restriction.kind)) throw new Error("此视频没有封锁信息");
+    const updated: ManagedVideo = { ...video, privacyStatus: "private", etag: `${video.etag}-private` };
+    previewManagedVideos = previewManagedVideos.map((row) => row.id === videoId ? updated : row);
+    return updated;
+  },
   update: async (request) => { const index = previewManagedVideos.findIndex((video) => video.id === request.videoId); if (index < 0) throw new Error("演示视频不存在"); previewManagedVideos[index] = { ...previewManagedVideos[index], ...request }; return previewManagedVideos[index]; },
   thumbnail: async () => undefined,
   playlists: async () => [],

@@ -1372,6 +1372,17 @@ async fn update_youtube_channel_video(
     state.youtube.update_channel_video(&request).await
 }
 #[tauri::command]
+async fn make_youtube_blocked_video_private(
+    state: State<'_, AppState>,
+    channel_id: String,
+    video_id: String,
+) -> AppResult<youtube::management::ManagedVideo> {
+    state
+        .youtube
+        .make_blocked_video_private(&channel_id, &video_id)
+        .await
+}
+#[tauri::command]
 async fn list_youtube_video_playlists(
     state: State<'_, AppState>,
     channel_id: String,
@@ -1889,6 +1900,7 @@ pub fn run() {
             lookup_youtube_channel_videos,
             delete_youtube_channel_video,
             update_youtube_channel_video,
+            make_youtube_blocked_video_private,
             list_youtube_video_playlists,
             set_youtube_video_playlist,
             create_youtube_playlist,

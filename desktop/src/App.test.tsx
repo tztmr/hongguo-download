@@ -43,7 +43,10 @@ describe("App preview workflow", () => {
     expect(view.getByRole("heading", { name: "视频管理" })).toBeTruthy();
     expect(view.getByRole("button", { name: "视频管理" }).getAttribute("aria-current")).toBe("page");
     expect(view.queryByRole("heading", { name: "下载管理" })).toBeNull();
-    await view.findByText("已加载全部频道视频与 Shorts");
+    // This sidebar page is loaded lazily; allow module loading under a full CI run.
+    await view.findByText("已加载全部频道视频与 Shorts", {}, { timeout: 5000 });
+    expect(view.getByRole("button", { name: "一键删除封锁视频" })).toHaveProperty("disabled", false);
+    expect(view.getByRole("button", { name: "一键设为私人" })).toHaveProperty("disabled", false);
     fireEvent.click(view.getByRole("button", { name: "数据分析" }));
     expect(view.getByRole("heading", { name: "数据分析" })).toBeTruthy();
     expect(await view.findByText("频道累计观看次数")).toBeTruthy();

@@ -656,6 +656,61 @@ impl ManagementApi {
         // Read back actual state, including restrictions enforced by YouTube.
         parse_video(&self.video(&request.video_id).await?)
     }
+    pub async fn make_blocked_video_private(
+        &self,
+        video_id: &str,
+    ) -> Result<ManagedVideo, AppError> {
+        if !valid_video_id(video_id) {
+            return Err(AppError::new(
+                "YOUTUBE_VIDEO_ID_INVALID",
+                "无效的视频 ID，请刷新后重新选择",
+            ));
+        }
+        self.channel_uploads().await?;
+        let current = self.video(video_id).await?;
+        let video = parse_video(&current)?;
+        // Recheck restrictions after the scan, including on retries. Never use
+        // stale frontend metadata to rewrite the video's snippet or status.
+        if !matches!(
+            video.restriction.kind.as_str(),
+            "global" | "region" | "copyright"
+        ) {
+            return Err(AppError::new(
+                "YOUTUBE_VIDEO_NOT_BLOCKED",
+                "此视频已无 API 标记的封锁信息，未修改可见性，请刷新核对",
+            ));
+        }
+        if video.privacy_status == "private" {
+            return Ok(video);
+        }
+        let mut status = copy_fields(
+            &current["status"],
+            &[
+                "license",
+                "embeddable",
+                "publicStatsViewable",
+                "selfDeclaredMadeForKids",
+                "containsSyntheticMedia",
+            ],
+        );
+        status["privacyStatus"] = json!("private");
+        self.request(
+            Method::PUT,
+            "videos",
+            &[("part", "status")],
+            Some(&json!({"id": video_id, "status": status})),
+            Some(&video.etag),
+        )
+        .await?;
+        let confirmed = self.detail(video_id).await?;
+        if confirmed.privacy_status != "private" {
+            return Err(AppError::new(
+                "YOUTUBE_PRIVACY_NOT_APPLIED",
+                "YouTube 尚未确认设为私人，请刷新核对后重试",
+            ));
+        }
+        Ok(confirmed)
+    }
     async fn all(&self, resource: &str, params: &[(&str, &str)]) -> Result<Vec<Value>, AppError> {
         let mut results = Vec::new();
         let mut page_token = String::new();
@@ -1238,6 +1293,155 @@ mod tests {
             serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(body["snippet"]["tags"], json!(["短剧"]));
         assert_eq!(body["status"]["privacyStatus"], "public");
+    }
+    #[tokio::test]
+    async fn private_blocked_video_only_updates_status_with_fresh_revision_and_reads_back() {
+        let mut current = identified("blocked0001");
+        current["snippet"]["title"] = json!("  保留空格与原简介  ");
+        current["status"]["privacyStatus"] = json!("unlisted");
+        current["contentDetails"] = json!({"regionRestriction":{"blocked":["US"]}});
+        let mut confirmed = current.clone();
+        confirmed["etag"] = json!("private-rev");
+        confirmed["status"]["privacyStatus"] = json!("private");
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[current]})),
+            (200, json!({"id":"blocked0001"})),
+            (200, json!({"items":[confirmed]})),
+        ])
+        .await;
+        let result = api.make_blocked_video_private("blocked0001").await.unwrap();
+        assert_eq!(result.privacy_status, "private");
+        assert_eq!(result.etag, "private-rev");
+        assert_eq!(result.title, "  保留空格与原简介  ");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[2].starts_with("PUT /videos?part=status "));
+        assert!(requests[2].contains("if-match: rev1"));
+        let body: Value =
+            serde_json::from_str(requests[2].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body.as_object().unwrap().len(), 2);
+        assert_eq!(body["id"], "blocked0001");
+        assert!(body.get("snippet").is_none());
+        assert_eq!(
+            body["status"],
+            json!({
+                "privacyStatus":"private", "license":"creativeCommon", "embeddable":false,
+                "publicStatsViewable":false, "selfDeclaredMadeForKids":true, "containsSyntheticMedia":true
+            })
+        );
+        assert!(requests[3].starts_with("GET /videos?"));
+    }
+    #[tokio::test]
+    async fn private_action_skips_already_private_and_rejects_resolved_restrictions() {
+        for blocked in [true, false] {
+            let mut video = identified("blocked0001");
+            if blocked {
+                video["contentDetails"] = json!({"regionRestriction":{"allowed":[]}});
+            }
+            let (api, server) =
+                server(vec![(200, channel()), (200, json!({"items":[video]}))]).await;
+            let result = api.make_blocked_video_private("blocked0001").await;
+            if blocked {
+                assert_eq!(result.unwrap().privacy_status, "private");
+            } else {
+                assert_eq!(result.unwrap_err().code, "YOUTUBE_VIDEO_NOT_BLOCKED");
+            }
+            assert!(server
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.starts_with("GET ")));
+        }
+    }
+    #[tokio::test]
+    async fn private_action_rejects_other_owners_before_mutating() {
+        let mut foreign = identified("blocked0001");
+        foreign["snippet"]["channelId"] = json!("other");
+        let (api, server) = server(vec![(200, channel()), (200, json!({"items":[foreign]}))]).await;
+        assert_eq!(
+            api.make_blocked_video_private("blocked0001")
+                .await
+                .unwrap_err()
+                .code,
+            "YOUTUBE_CHANNEL_MISMATCH"
+        );
+        assert!(server
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+    #[tokio::test]
+    async fn private_action_keeps_unconfirmed_results_as_failures_and_retry_reads_fresh_state() {
+        let mut current = identified("blocked0001");
+        current["status"]["privacyStatus"] = json!("public");
+        current["status"]["uploadStatus"] = json!("rejected");
+        current["status"]["rejectionReason"] = json!("copyright");
+        // Rejected videos may have missing snippets; privacy writes must not
+        // depend on title/category validation used by the metadata editor.
+        current["snippet"].as_object_mut().unwrap().remove("title");
+        current["snippet"]
+            .as_object_mut()
+            .unwrap()
+            .remove("categoryId");
+        let mut private = current.clone();
+        private["status"]["privacyStatus"] = json!("private");
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[current.clone()]})),
+            (200, json!({})),
+            (200, json!({"items":[current]})),
+            (200, channel()),
+            (200, json!({"items":[private]})),
+        ])
+        .await;
+        assert_eq!(
+            api.make_blocked_video_private("blocked0001")
+                .await
+                .unwrap_err()
+                .code,
+            "YOUTUBE_PRIVACY_NOT_APPLIED"
+        );
+        assert_eq!(
+            api.make_blocked_video_private("blocked0001")
+                .await
+                .unwrap()
+                .privacy_status,
+            "private"
+        );
+        assert_eq!(
+            server
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("PUT "))
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn private_action_preserves_external_edits_on_revision_conflict() {
+        let mut current = identified("blocked0001");
+        current["status"]["privacyStatus"] = json!("public");
+        current["contentDetails"] = json!({"regionRestriction":{"allowed":[]}});
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[current]})),
+            (
+                412,
+                json!({"error":{"errors":[{"reason":"conditionNotMet"}]}}),
+            ),
+        ])
+        .await;
+        assert_eq!(
+            api.make_blocked_video_private("blocked0001")
+                .await
+                .unwrap_err()
+                .code,
+            "YOUTUBE_VIDEO_CHANGED"
+        );
+        assert_eq!(server.await.unwrap().len(), 3);
     }
     #[tokio::test]
     async fn repeated_join_does_not_duplicate_playlist_item() {
