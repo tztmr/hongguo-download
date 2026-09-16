@@ -1,3 +1,4 @@
+import { SeriesHeatMetric } from "../components/SeriesHeatMetric";
 import { useEffect, useState } from "react";
 import { Cover } from "../components/Cover";
 import { VideoOrientationBadge } from "../components/VideoOrientationBadge";
@@ -93,7 +94,7 @@ export function NewReleasesPage({ model, onSelect, detectOrientation = true }: {
             <div className="monitor-cover"><Cover src={item.cover} title={item.title} /><span className="monitor-online-time">{onlineTime(item.onlineTime, model.date)}</span><VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={detectOrientation} /></div>
             <h2 title={item.title}>{item.title}</h2>
             <p title={item.category}>{typeLabels[model.type]} · {item.episodeCount || "--"} 集 · {item.category || "分类未知"}</p>
-            <div className="monitor-metrics"><span>播放 {count(item.playCount)}</span><span>🔥 热度 {count(item.hotCount)}</span><span>收藏 {count(item.collectCount)}</span><span>讨论 {count(item.commentCount)}</span></div>
+            <div className="monitor-metrics"><span>播放 {count(item.playCount)}</span><SeriesHeatMetric seriesId={item.seriesId} value={item.hotCount} enabled={detectOrientation} /><span>收藏 {count(item.collectCount)}</span><span>讨论 {count(item.commentCount)}</span></div>
           </button>
         ))}
       </section>

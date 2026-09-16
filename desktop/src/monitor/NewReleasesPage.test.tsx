@@ -57,7 +57,7 @@ describe("NewReleasesPage", () => {
     expect(view.getByText("上线 09:20")).toBeTruthy();
     expect(view.getByText("真人剧 · 20 集 · 校园")).toBeTruthy();
     expect(view.getByText("播放 0")).toBeTruthy();
-    expect(view.getByText("🔥 热度 2.5万")).toBeTruthy();
+    expect(view.container.querySelector(".heat-metric")?.textContent).toBe("🔥 热度 2.5万");
     expect(view.getByText("收藏 —")).toBeTruthy();
     expect(view.getByText("讨论 42")).toBeTruthy();
     expect(view.queryByText("点赞 8")).toBeNull();
@@ -96,7 +96,7 @@ describe("NewReleasesPage", () => {
     expect(view.getByText("上线 2026-08-30 12:00")).toBeTruthy();
     view.rerender(<NewReleasesPage model={{ ...state, filteredItems: [{ ...item, onlineTime: Number.NaN, hotCount: Number.NaN }], refreshedAt: "invalid" }} onSelect={vi.fn()} detectOrientation={false} />);
     expect(view.getByText("上线时间未知")).toBeTruthy();
-    expect(view.getByText("🔥 热度 —")).toBeTruthy();
+    expect(view.container.querySelector(".heat-metric")?.textContent).toBe("热度 暂缺");
     expect(view.getByText(/尚未完成检查/)).toBeTruthy();
   });
 

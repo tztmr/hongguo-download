@@ -1,4 +1,5 @@
 export type ContentType = "drama" | "manju";
+export type CatalogContentType = ContentType | "ai";
 export type SearchContentType = "all" | ContentType;
 export type RankReleaseType = "all" | NewReleaseType;
 export type NavId = "discover" | "search" | "rank" | "monitor" | "automation" | "queue" | "platformVideos" | "analytics" | "settings";

@@ -1,5 +1,5 @@
 import { act, fireEvent, render, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SeriesItem, WebCategoryPage } from "../types";
 import { CategoryBrowser, DEFAULT_CATEGORY_FILTERS } from "./CategoryBrowser";
 const groups = [
@@ -11,6 +11,28 @@ function page(ids: string[], nextPage = 2, hasMore = false): WebCategoryPage { r
 function api() { return { fetchWebCategoryGroups: vi.fn().mockResolvedValue(groups), fetchWebCategory: vi.fn().mockResolvedValue(page(["默认剧"])) }; }
 function deferred() { let resolve!: (value: WebCategoryPage) => void; return { promise: new Promise<WebCategoryPage>((done) => { resolve = done; }), resolve: (value: WebCategoryPage) => resolve(value) }; }
 describe("CategoryBrowser", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("loads the next page near the viewport once, but waits for explicit retry after a failure", async () => {
+    let intersect!: IntersectionObserverCallback;
+    vi.stubGlobal("IntersectionObserver", class {
+      constructor(callback: IntersectionObserverCallback) { intersect = callback; }
+      observe = vi.fn(); disconnect = vi.fn();
+    });
+    const mock = api();
+    mock.fetchWebCategory.mockResolvedValueOnce(page(["第一部"], 2, true)).mockRejectedValueOnce(new Error("稍后重试"))
+      .mockResolvedValueOnce(page(["第一部", "第二部"], 3, false));
+    const view = render(<CategoryBrowser contentType="manju" ranked api={mock} onSelect={vi.fn()} detectOrientation={false} />);
+    await view.findByText("NO.1");
+    const show = () => intersect([{ isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver);
+    await act(async () => { show(); show(); });
+    await view.findByRole("alert");
+    expect(mock.fetchWebCategory).toHaveBeenCalledTimes(2);
+    expect(mock.fetchWebCategory).toHaveBeenLastCalledWith("manju", DEFAULT_CATEGORY_FILTERS, 2);
+    fireEvent.click(view.getByRole("button", { name: "重试" }));
+    await view.findByText("NO.2");
+    expect(view.container.querySelectorAll(".poster-card")).toHaveLength(2);
+    expect(view.queryByRole("button", { name: "加载更多" })).toBeNull();
+  });
   it("combines facets, restarts at page one, and retains filters through pagination", async () => {
     const mock = api();
     mock.fetchWebCategory.mockImplementation(async (_type, _filters, number) => page(["筛选剧"], number + 1, true));

@@ -877,6 +877,28 @@ async def duanju_series_metrics(
     })
 
 
+@router.get('/duanju/series-metrics-batch')
+async def duanju_series_metrics_batch(
+    request: Request,
+    series_ids: str = Query(..., min_length=1, max_length=1000, pattern=r'^\d{1,24}(,\d{1,24})*$'),
+):
+    ids = list(dict.fromkeys(series_ids.split(',')))
+    if len(ids) > 40:
+        return error('每次最多查询 40 部剧的指标', status_code=400)
+    cached = {sid: _duanju_series_metadata_cache.get(f'batch:{sid}') for sid in ids}
+    missing = [sid for sid in ids if cached[sid] is None]
+    if missing:
+        try:
+            metrics = await _fetch_series_metrics_batch(request.app.state.client, missing)
+        except (RuntimeError, httpx.HTTPError):
+            logger.warning('批量剧目指标请求失败')
+            return error('热度暂时加载失败，请稍后重试', code=-3, status_code=502)
+        for sid in missing:
+            cached[sid] = metrics.get(sid, {})
+            _duanju_series_metadata_cache.set(f'batch:{sid}', cached[sid], ttl=300 if cached[sid] else 60)
+    return success({'items': [{'series_id': sid, **cached[sid]} for sid in ids]})
+
+
 @router.get('/duanju/new-releases')
 async def duanju_new_releases(
     request: Request,

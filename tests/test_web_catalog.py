@@ -35,9 +35,9 @@ def selector_html(rows=None):
     return '<html><script>_ROUTER_DATA = ' + json.dumps(data) + ';</script></html>'
 
 
-def modern_selector_html():
+def modern_selector_html(route="real-drama"):
     return '<script>window._ROUTER_DATA = ' + json.dumps({"loaderData": {"category_$": {
-        "isSuccess": True, "categoryRoute": {"contentType": "real-drama"},
+        "isSuccess": True, "categoryRoute": {"contentType": route},
         "selectorList": [{"row_id": 1, "items": [
             {"selector_item_id": "romance", "show_name": "爱情", "category_json_ids": ["5000"]},
             {"selector_item_id": "urban", "show_name": "都市", "category_json_ids": ["5022"]},
@@ -141,15 +141,43 @@ class WebCatalogEndpointTests(unittest.IsolatedAsyncioTestCase):
             await self.client.get('/api/duanju/web-category')
             self.assertEqual(upstream.await_count, 4)  # One dictionary and three distinct result pages.
 
-    async def test_mismatched_facet_and_unsupported_comics_are_rejected(self):
+    async def test_mismatched_facet_is_rejected(self):
         with patch.object(web_catalog, "_fetch_public", new=AsyncMock(return_value=selector_html())) as upstream:
             response = await self.client.get('/api/duanju/web-category?topic=cate_757')
             self.assertEqual(response.status_code, 400)
             self.assertIn("主题", response.json()["msg"])
-            unsupported = await self.client.get('/api/duanju/web-category?content_type=manju')
-            self.assertEqual(unsupported.status_code, 400)
-            self.assertIn("漫画", unsupported.json()["msg"])
             self.assertEqual(upstream.await_count, 1)
+
+    async def test_three_video_sources_keep_dictionaries_pages_and_cache_separate(self):
+        routes = {'drama': ('real-drama', '1', 1, 'playlet'), 'manju': ('comic-drama', '3', 1004, 'comic_series_rank'), 'ai': ('ai-drama', '4', 1004, 'ai_playlet')}
+        async def fetch(url):
+            if '/api/' not in url:
+                return modern_selector_html(url.rsplit('/', 1)[-1])
+            return category_payload(page=int(parse_qs(urlparse(url).query)['page_num'][0]), total=800)
+        with patch.object(web_catalog, '_fetch_public', new=AsyncMock(side_effect=fetch)) as upstream:
+            for kind, (slug, rpc, native, release) in routes.items():
+                groups = await self.client.get(f'/api/duanju/web-categories?content_type={kind}')
+                self.assertEqual(groups.status_code, 200)
+                self.assertTrue(groups.json()['data']['source_url'].endswith('/' + slug))
+                for page in (1, 2):
+                    path = f'/api/duanju/web-category?content_type={kind}&topic=romance&page={page}&sort_type=1'
+                    result = await self.client.get(path)
+                    self.assertEqual(result.status_code, 200)
+                    params = parse_qs(urlparse(upstream.call_args.args[0]).query)
+                    self.assertEqual(params['tab'], ['1'])
+                    self.assertEqual(params['content_type'], [rpc])
+                    self.assertEqual(params['category_json_ids'], ['5000'])
+                    item = result.json()['data']['items'][0]
+                    self.assertEqual((item['content_type'], item['release_type']), (native, release))
+                    self.assertEqual(result.json()['data']['next_page'], page + 1)
+                    await self.client.get(path)
+            self.assertEqual(upstream.await_count, 9)
+
+    async def test_wrong_route_cannot_be_labelled_as_video_manju(self):
+        for html in (selector_html(), modern_selector_html('real-drama')):
+            with patch.object(web_catalog, '_fetch_public', new=AsyncMock(return_value=html)):
+                response = await self.client.get('/api/duanju/web-categories?content_type=manju')
+                self.assertEqual(response.status_code, 502)
 
     async def test_upstream_failure_is_visible_and_not_cached_as_empty(self):
         with patch.object(web_catalog, "_fetch_public", new=AsyncMock(side_effect=[CatalogFormatError('官网返回格式已变化'), category_payload()])) as upstream:

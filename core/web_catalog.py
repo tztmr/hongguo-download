@@ -2,7 +2,7 @@
 
 The site exposes its category dictionary in JSON inside /category HTML, and
 serves result pages from /api/category/page. No external JavaScript is executed.
-Website tab=2 is comics, so it must not be labelled as the app's video manju.
+Video categories use tab=1 and separate RPC content types. tab=2 is manga.
 """
 
 import json
@@ -13,6 +13,17 @@ from urllib.parse import urlencode
 
 WEB_ORIGIN = 'https://hongguoduanju.com'
 WEB_CATEGORY_URL = f'{WEB_ORIGIN}/category/real-drama'
+CATALOG_TYPES = {
+    'drama': ('real-drama', 1, 1, 'playlet'),
+    'manju': ('comic-drama', 3, 1004, 'comic_series_rank'),
+    'ai': ('ai-drama', 4, 1004, 'ai_playlet'),
+}
+
+
+def category_source_url(content_type='drama') -> str:
+    return f'{WEB_ORIGIN}/category/{CATALOG_TYPES[content_type][0]}'
+
+
 GROUPS = (
     ('background', '背景', ''),
     ('topic', '主题', ''),
@@ -51,7 +62,7 @@ def _text(value: Any) -> str:
     return re.sub(r'[\x00-\x1f\x7f]', '', str(value if value is not None else '')).strip()
 
 
-def parse_selector_html(html: str) -> list[dict]:
+def parse_selector_html(html: str, *, content_type='drama') -> list[dict]:
     parser = _Scripts()
     parser.feed(html)
     page = None
@@ -74,7 +85,9 @@ def parse_selector_html(html: str) -> list[dict]:
     if not isinstance(rows, list):
         raise CatalogFormatError('官网分类字典缺少筛选维度')
     route = page.get('categoryRoute')
-    if isinstance(route, dict) and route.get('contentType') == 'real-drama':
+    if isinstance(route, dict):
+        if route.get('contentType') != CATALOG_TYPES[content_type][0]:
+            raise CatalogFormatError('官网返回了不匹配的剧目分类')
         # The current site exposes one topic dimension with route slugs and RPC IDs.
         # These are not the old cate_N values used by background/topic/setting.
         items = [{'id': '', 'name': '全部'}]
@@ -98,6 +111,8 @@ def parse_selector_html(html: str) -> list[dict]:
         if len(items) == 1:
             raise CatalogFormatError('官网分类字典的分类选项为空')
         return [{'id': 'topic', 'name': '分类', 'items': items}]
+    if content_type != 'drama':
+        raise CatalogFormatError('官网未返回对应的视频分类字典')
     result = []
     for row_id, (group_id, name, default) in enumerate(GROUPS, start=1):
         row = next((row for row in rows if isinstance(row, dict) and str(row.get('row_id')) == str(row_id)), None)
@@ -119,10 +134,10 @@ def parse_selector_html(html: str) -> list[dict]:
     return result
 
 
-def build_category_url(*, background='', topic='', setting='', gender='2', time='0', sort_type='0', page=1, category_json_ids=None) -> str:
+def build_category_url(*, content_type='drama', background='', topic='', setting='', gender='2', time='0', sort_type='0', page=1, category_json_ids=None) -> str:
     # min_first_visible_time is the site's 0..4 interval enum, not a timestamp.
     params = {
-        'tab': '1', 'content_type': '1', 'min_first_visible_time': time, 'gender': gender,
+        'tab': '1', 'content_type': str(CATALOG_TYPES[content_type][1]), 'min_first_visible_time': time, 'gender': gender,
         'sort_type': sort_type, 'page_num': page,
     }
     categories = [value for value in (topic, setting, background) if value]
@@ -145,7 +160,7 @@ def _integer(value: Any, label: str) -> int:
     return number
 
 
-def parse_category_page(payload: Any, *, page: int) -> dict:
+def parse_category_page(payload: Any, *, page: int, content_type='drama') -> dict:
     if not isinstance(payload, dict) or payload.get('isSuccess') is not True:
         raise CatalogFormatError('官网分类请求未成功')
     rows = payload.get('recommendList')
@@ -173,9 +188,9 @@ def parse_category_page(payload: Any, *, page: int) -> dict:
             'title': _text(row.get('series_name')) or '未命名短剧',
             'cover': _text(row.get('series_cover')), 'first_vid': first_vid,
             'episode_count': _integer(row.get('episode_cnt') or episode_info.get('episode_cnt') or 0, '集数'),
-            'content_type': 1, 'duration': 0, 'abstract': _text(row.get('series_intro')),
+            'content_type': CATALOG_TYPES[content_type][2], 'duration': 0, 'abstract': _text(row.get('series_intro')),
             'score': '', 'category_tags': tags, 'category': ' · '.join(tags),
-            'release_type': 'playlet', 'rank_tags': [],
+            'release_type': CATALOG_TYPES[content_type][3], 'rank_tags': [],
             'online_time': None, 'play_count': None, 'hot_count': None,
             'collect_count': None, 'like_count': None, 'comment_count': None,
         })
@@ -188,5 +203,5 @@ def parse_category_page(payload: Any, *, page: int) -> dict:
         'items': items, 'page': page_number, 'page_size': page_size,
         'next_page': page_number + 1 if has_more else None,
         'has_more': has_more, 'total': total,
-        'source': 'hongguo_web', 'source_url': WEB_CATEGORY_URL,
+        'source': 'hongguo_web', 'source_url': category_source_url(content_type),
     }

@@ -18,13 +18,13 @@ function api() {
   };
 }
 
-it("continues beyond 100 unique home items after the recommendation session ends", async () => {
+it.each(["drama", "manju"] as const)("continues %s beyond 100 unique home items after the recommendation session ends", async (type) => {
   const mock = api();
   let state = createGroupedPagingState<SeriesItem, Awaited<ReturnType<typeof fetchHomeDiscovery>> | null>(null);
   const counts = [];
   for (let click = 0; click < 14 && (state.hasMore || state.visibleCount < state.allItems.length); click++) {
     const result = await fillUniqueGroup(state, async cursor => {
-      const page = cursor ? await fetchHomeDiscoveryMore("drama", cursor, mock) : await fetchHomeDiscovery("drama", mock);
+      const page = cursor ? await fetchHomeDiscoveryMore(type, cursor, mock) : await fetchHomeDiscovery(type, mock);
       return { items: page.items, nextCursor: page, hasMore: page.hasMore };
     });
     state = result.state;
@@ -53,10 +53,13 @@ it("finishes genuine recommendation pages before continuing the library and retr
   expect(retried.catalogNextPage).toBe(2);
 });
 
-it("does not mix the drama library into manju recommendations", async () => {
+it("continues a nine-item manju session through the matching video library", async () => {
   const mock = api();
+  mock.fetchDiscovery.mockResolvedValueOnce({ ...recommendation(), items: Array.from({ length: 9 }, (_, i) => item(`manju-${i}`)) });
   const first = await fetchHomeDiscovery("manju", mock);
-  expect(first.hasMore).toBe(false);
-  expect(first.catalogNextPage).toBeUndefined();
-  expect(mock.fetchWebCategory).not.toHaveBeenCalled();
+  expect(first.items).toHaveLength(9);
+  expect(first.hasMore).toBe(true);
+  const next = await fetchHomeDiscoveryMore("manju", first, mock);
+  expect(next.items.length).toBeGreaterThan(9);
+  expect(mock.fetchWebCategory).toHaveBeenCalledWith("manju", expect.objectContaining({ sort_type: "1" }), 1);
 });

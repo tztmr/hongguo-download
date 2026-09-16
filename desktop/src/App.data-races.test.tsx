@@ -19,6 +19,7 @@ const apiMocks = vi.hoisted(() => ({
   fetchSearch: vi.fn(),
   fetchSearchAll: vi.fn(),
   fetchSeriesMetrics: vi.fn(),
+  fetchSeriesHeatBatch: vi.fn().mockResolvedValue({}),
   fetchNewReleases: vi.fn(),
   getAiComponents: vi.fn(),
   getSettings: vi.fn(),
@@ -118,7 +119,7 @@ describe("App request ordering", () => {
     apiMocks.fetchCatalog.mockResolvedValue([]);
     apiMocks.fetchCategoryGroups.mockResolvedValue([]);
     apiMocks.fetchWebCategoryGroups.mockResolvedValue([]);
-    apiMocks.fetchWebCategory.mockResolvedValue({ items: [], nextPage: 2, hasMore: false });
+    apiMocks.fetchWebCategory.mockResolvedValue({ items: [rankItem], nextPage: 2, hasMore: false });
     apiMocks.fetchHealth.mockResolvedValue({ status: "ok", pool_size: 1, active_count: 1 });
     apiMocks.fetchDevicePool.mockResolvedValue({ devices: [], pool_size: 0, active_count: 0 });
     apiMocks.getAiComponents.mockResolvedValue([]);
@@ -155,18 +156,18 @@ describe("App request ordering", () => {
   it("clears the previous list and selection when a different feed returns no results", async () => {
     apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(series("old-feed", "上一页的短剧")));
     apiMocks.fetchCatalog.mockResolvedValue([{ itemId: "old-episode", index: 1, title: "第1集" }]);
-    apiMocks.fetchRank.mockResolvedValue({ ...rankPage, items: [] });
+    apiMocks.fetchWebCategory.mockResolvedValue({ items: [], nextPage: 2, hasMore: false });
     const view = render(<App />);
     await waitFor(() => expect(view.getByRole("button", { name: "加入下载队列（已选 1 集）" })).toHaveProperty("disabled", false));
     fireEvent.click(view.getByRole("button", { name: "榜单" }));
-    await view.findByText("没有找到短剧");
+    await view.findByText("没有符合条件的真人剧");
     expect(view.queryByText("上一页的短剧")).toBeNull();
     expect(view.queryByRole("button", { name: /加入下载队列/ })).toBeNull();
   });
 
   it("shows a readable retryable feed failure without marking a healthy local service offline", async () => {
     apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(series("old-feed", "上一页的短剧")));
-    apiMocks.fetchRank.mockRejectedValue({ code: "UPSTREAM_ERROR", message: "榜单接口暂时不可用" });
+    apiMocks.fetchWebCategory.mockRejectedValue({ code: "UPSTREAM_ERROR", message: "榜单接口暂时不可用" });
     const view = render(<App />);
     await view.findByText("服务正常");
     await waitFor(() => expect(view.getAllByText("上一页的短剧").length).toBeGreaterThan(0));
@@ -174,8 +175,8 @@ describe("App request ordering", () => {
     expect(await view.findByText("榜单接口暂时不可用")).toBeTruthy();
     expect(view.getByText("服务正常")).toBeTruthy();
     expect(view.queryByText("上一页的短剧")).toBeNull();
-    apiMocks.fetchRank.mockResolvedValue(rankPage);
-    fireEvent.click(view.getByRole("button", { name: "重试加载" }));
+    apiMocks.fetchWebCategory.mockResolvedValue({ items: [rankItem], nextPage: 2, hasMore: false });
+    fireEvent.click(view.getByRole("button", { name: "重试" }));
     await waitFor(() => expect(view.getAllByText("榜单结果短剧").length).toBeGreaterThan(0));
   });
 

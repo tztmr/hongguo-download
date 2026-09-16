@@ -9,6 +9,7 @@ import type {
   CategoryFilters,
   WebCategoryPage,
   ContentType,
+  CatalogContentType,
   DiscoveryPage,
   EpisodeItem,
   NewReleasePage,
@@ -114,12 +115,18 @@ export async function fetchCategoryGroups(contentType: ContentType): Promise<Cat
   return data.groups || [];
 }
 
-export async function fetchWebCategoryGroups(contentType: ContentType): Promise<CategoryGroup[]> {
+export async function fetchSeriesHeatBatch(seriesIds: string[]): Promise<Record<string, number | undefined>> {
+  const query = new URLSearchParams({ series_ids: seriesIds.join(",") });
+  const data = await apiGet<{ items: Array<{ series_id: string; hot_count?: number | null }> }>(`/api/duanju/series-metrics-batch?${query}`);
+  return Object.fromEntries(data.items.map(item => [String(item.series_id), optionalNumber(item.hot_count)]));
+}
+
+export async function fetchWebCategoryGroups(contentType: CatalogContentType): Promise<CategoryGroup[]> {
   const data = await apiGet<{ groups: CategoryGroup[] }>(`/api/duanju/web-categories?content_type=${contentType}`);
   return data.groups || [];
 }
 
-export async function fetchWebCategory(contentType: ContentType, filters: CategoryFilters, page = 1): Promise<WebCategoryPage> {
+export async function fetchWebCategory(contentType: CatalogContentType, filters: CategoryFilters, page = 1): Promise<WebCategoryPage> {
   const query = new URLSearchParams({ ...filters, content_type: contentType, page: String(page) });
   const data = await apiGet<{ items?: RawSeries[]; next_page?: number; has_more?: boolean; total?: number }>(`/api/duanju/web-category?${query}`);
   return {

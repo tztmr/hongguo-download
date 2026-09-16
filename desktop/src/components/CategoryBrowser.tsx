@@ -1,18 +1,24 @@
-import { HeatMetric } from "./HeatMetric";
+import { SeriesHeatMetric } from "./SeriesHeatMetric";
 import { seriesHeatKey } from "../seriesPresentation";
 import { useEffect, useRef, useState } from "react";
 import { fetchWebCategory, fetchWebCategoryGroups } from "../api";
-import type { CategoryFilters, CategoryGroup, SeriesItem, WebCategoryPage } from "../types";
+import type { CatalogContentType, CategoryFilters, CategoryGroup, SeriesItem, WebCategoryPage } from "../types";
 import { CategoryFilter } from "./CategoryFilter";
 import { Cover } from "./Cover";
 import { VideoOrientationBadge } from "./VideoOrientationBadge";
 import { errorMessage } from "../errors";
 
-export const DEFAULT_CATEGORY_FILTERS: CategoryFilters = { background: "", topic: "", setting: "", gender: "2", time: "0", sort_type: "0" };
+export const DEFAULT_CATEGORY_FILTERS: CategoryFilters = { background: "", topic: "", setting: "", gender: "2", time: "0", sort_type: "1" };
 const liveApi = { fetchWebCategory, fetchWebCategoryGroups };
-type Props = { knownHeat?: Readonly<Record<string, number>>; onSelect(item: SeriesItem): void; onResetSelection?(): void; selectedId?: string; api?: typeof liveApi; detectOrientation?: boolean };
+type Props = { contentType?: CatalogContentType; ranked?: boolean; knownHeat?: Readonly<Record<string, number>>; onSelect(item: SeriesItem): void; onResetSelection?(): void; selectedId?: string; api?: typeof liveApi; detectOrientation?: boolean };
 
-export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, selectedId, api = liveApi, detectOrientation = true }: Props) {
+export function CategoryBrowser(props: Props) {
+  return <CategoryResults key={props.contentType || "drama"} {...props} />;
+}
+
+function CategoryResults({ contentType = "drama", ranked = false, knownHeat = {}, onSelect, onResetSelection, selectedId, api = liveApi, detectOrientation = true }: Props) {
+  const typeName = { drama: "真人剧", manju: "漫剧", ai: "AI剧" }[contentType];
+  const moreTarget = useRef<HTMLDivElement>(null);
   const [groups, setGroups] = useState<CategoryGroup[]>([]);
   const [filters, setFilters] = useState<CategoryFilters>(DEFAULT_CATEGORY_FILTERS);
   const [page, setPage] = useState<WebCategoryPage | null>(null);
@@ -32,11 +38,13 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
   useEffect(() => {
     let cancelled = false;
     setGroupError("");
-    void api.fetchWebCategoryGroups("drama").then((values) => {
-      if (!cancelled) setGroups(values);
+    void api.fetchWebCategoryGroups(contentType).then((values) => {
+      if (!cancelled) setGroups(values.some(group => group.id === "sort_type") ? values : [...values, {
+        id: "sort_type", name: "排序", items: [{ id: "1", name: "最热" }, { id: "2", name: "最新" }],
+      }]);
     }).catch(reason => { if (!cancelled) setGroupError(`分类选项加载失败：${errorMessage(reason)}`); });
     return () => { cancelled = true; };
-  }, [api, groupRevision]);
+  }, [api, groupRevision, contentType]);
 
   useEffect(() => {
     const id = ++request.current;
@@ -46,7 +54,7 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
     setLoading(true);
     setError("");
     resetRef.current?.();
-    void api.fetchWebCategory("drama", filters, 1).then((result) => {
+    void api.fetchWebCategory(contentType, filters, 1).then((result) => {
       if (request.current !== id) return;
       setPage(result);
       const unique = [...new Map(result.items.map((item) => [item.bookId, item])).values()];
@@ -56,7 +64,7 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
       if (request.current === id) setError(errorMessage(reason));
     }).finally(() => { if (request.current === id) setLoading(false); });
     return () => { request.current += 1; };
-  }, [api, filters, revision]);
+  }, [api, filters, revision, contentType]);
 
   async function loadMore() {
     if (!page?.hasMore || loading || morePending.current) return;
@@ -65,7 +73,7 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
     setLoading(true);
     setError("");
     try {
-      const result = await api.fetchWebCategory("drama", filters, page.nextPage);
+      const result = await api.fetchWebCategory(contentType, filters, page.nextPage);
       if (request.current !== id) return;
       if (result.hasMore && result.nextPage <= page.nextPage) throw new Error("分类分页未前进，请重试");
       setPage(result);
@@ -76,6 +84,17 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
       if (request.current === id) { setLoading(false); morePending.current = false; }
     }
   }
+
+  const moreRef = useRef(loadMore);
+  moreRef.current = loadMore;
+  useEffect(() => {
+    if (!page?.hasMore || loading || error || typeof IntersectionObserver === "undefined" || !moreTarget.current) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) void moreRef.current();
+    }, { root: moreTarget.current.closest(".library-main"), rootMargin: "160px" });
+    observer.observe(moreTarget.current);
+    return () => observer.disconnect();
+  }, [page, loading, error]);
 
   const chosen = groups.flatMap((group) => {
     const key = group.id as keyof CategoryFilters;
@@ -88,19 +107,19 @@ export function CategoryBrowser({ knownHeat = {}, onSelect, onResetSelection, se
       {groupError ? <div className="inline-error" role="alert">{groupError}<button type="button" className="text-action" onClick={() => setGroupRevision((value) => value + 1)}>重试分类选项</button></div> : null}
       <CategoryFilter groups={groups} values={filters} onChange={(group, id) => setFilters((state) => ({ ...state, [group]: id }))} />
       <div className="category-summary">
-        <strong>{chosen.length ? chosen.join(" · ") : "全部真人剧"}</strong>
-        <span>已显示 {items.length} 部{page?.total !== undefined ? ` / 共 ${page.total} 部` : ""}</span>
+        <strong>{chosen.length ? chosen.join(" · ") : `全部${typeName}`}</strong>
+        <span>{ranked ? `官网${filters.sort_type === "2" ? "最新" : "最热"}排序 · ` : ""}已显示 {items.length} 部{page?.total !== undefined ? ` / 共 ${page.total} 部` : ""}</span>
         {chosen.length ? <button type="button" className="text-action" onClick={() => setFilters(DEFAULT_CATEGORY_FILTERS)}>清空筛选</button> : null}
       </div>
       {error ? <div className="inline-error" role="alert">{error}<button type="button" className="text-action" disabled={loading} onClick={() => page ? void loadMore() : setRevision((value) => value + 1)}>重试</button></div> : null}
-      {!loading && !error && !items.length ? <div className="empty-library"><h2>没有符合条件的真人剧</h2><p>试试减少筛选条件，或清空筛选</p></div> : null}
+      {!loading && !error && !items.length ? <div className="empty-library"><h2>没有符合条件的{typeName}</h2><p>试试减少筛选条件，或清空筛选</p></div> : null}
       <div className="poster-grid category-result-grid">
-        {items.map((item) => <button type="button" key={item.bookId} className={`poster-card ${selectedId === item.bookId ? "selected" : ""}`} onClick={() => onSelect(item)}>
-          <div className="poster-image"><Cover src={item.cover} title={item.title} /><div className="poster-badges"><VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={detectOrientation} /></div></div>
-          <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || "真人剧"}{item.score ? ` · ${item.score}分` : ""}</p><HeatMetric value={item.hotCount ?? knownHeat[seriesHeatKey(item)]} /></div>
+        {items.map((item, index) => <button type="button" key={item.bookId} className={`poster-card ${selectedId === item.bookId ? "selected" : ""}`} onClick={() => onSelect(item)}>
+          <div className="poster-image"><Cover src={item.cover} title={item.title} /><div className="poster-badges">{ranked ? <span className="rank-index">NO.{index + 1}</span> : null}<VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={detectOrientation} /></div></div>
+          <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {item.category || typeName}{item.score ? ` · ${item.score}分` : ""}</p><SeriesHeatMetric seriesId={item.seriesId} value={item.hotCount ?? knownHeat[seriesHeatKey(item)]} enabled={detectOrientation} /></div>
         </button>)}
       </div>
-      {loading ? <div className="category-loading" role="status"><span className="loading-spinner" />正在加载分类剧目…</div> : page?.hasMore ? <div className="load-more-row"><button type="button" className="secondary-button" onClick={() => void loadMore()}>加载更多</button></div> : items.length ? <p className="monitor-refreshed">当前条件的剧目已显示完毕</p> : null}
+      {loading ? <div className="category-loading" role="status"><span className="loading-spinner" />正在加载分类剧目…</div> : page?.hasMore ? <div className="load-more-row" ref={moreTarget}><button type="button" className="secondary-button" onClick={() => void loadMore()}>加载更多</button></div> : items.length ? <p className="monitor-refreshed">当前条件的剧目已显示完毕</p> : null}
     </div>
   );
 }

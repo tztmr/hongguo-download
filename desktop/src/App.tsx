@@ -1,4 +1,4 @@
-import { HeatMetric } from "./components/HeatMetric";
+import { SeriesHeatMetric } from "./components/SeriesHeatMetric";
 import { seriesTypeLabel, seriesHeatKey } from "./seriesPresentation";
 import { AIRecommendations } from "./components/AIRecommendations";
 import { listen } from "@tauri-apps/api/event";
@@ -61,8 +61,7 @@ import type {
   DiscoveryPage,
   EpisodeItem,
   NavId,
-  RankPage,
-  RankReleaseType,
+  CatalogContentType,
   SearchContentType,
   SearchPage,
   SeriesItem,
@@ -82,16 +81,6 @@ const AutomationPage = deferPage<ComponentProps<typeof import("./monitor/Automat
 const SettingsPage = deferPage<ComponentProps<typeof import("./settings/SettingsPage").SettingsPage>>("设置", () => import("./settings/SettingsPage").then(module => ({ default: module.SettingsPage })));
 
 const appNotifications = createTauriNotificationAdapter();
-const DEFAULT_RANK_BOARDS = [
-  { id: "ranklist_hot_sc", name: "推荐榜" },
-  { id: "ranklist_hot_play_sc", name: "热播榜" },
-  { id: "ranklist_prestige", name: "臻果榜" },
-  { id: "ranklist_subscribe", name: "预约榜" },
-  { id: "ranklist_new_rank_sc", name: "新剧榜" },
-  { id: "ranklist_hot_search_sc", name: "热搜榜" },
-  { id: "ranklist_must_watch", name: "必看榜" },
-  { id: "ranklist_followed", name: "收藏榜" },
-];
 const liveMonitorApi = { fetchNewReleases };
 const previewSettings: AppSettings = {
   version: 4,
@@ -197,19 +186,12 @@ export default function App() {
   const [browseCategories, setBrowseCategories] = useState(false);
   const [homeAI, setHomeAI] = useState(false);
   const webCategories = browseCategories && searchContentType === "drama" && !homeAI;
-  const [rankPage, setRankPage] = useState<RankPage | null>(null);
-  const [rankBoard, setRankBoard] = useState("ranklist_hot_sc");
-  const [rankType, setRankType] = useState<RankReleaseType>("all");
+  const [rankType, setRankType] = useState<CatalogContentType>("drama");
   const pageRequestRef = useRef(0);
   const catalogRequestRef = useRef(0);
   const categoryRequestRef = useRef(0);
   const loadMoreInFlightRef = useRef(false);
   const discoveryPagingRef = useRef<GroupedPagingState<SeriesItem, DiscoveryPage | null>>(
-    isPreview
-      ? { allItems: previewSeries, visibleCount: 20, cursor: null, hasMore: false }
-      : createGroupedPagingState(null),
-  );
-  const rankPagingRef = useRef<GroupedPagingState<SeriesItem, RankPage | null>>(
     isPreview
       ? { allItems: previewSeries, visibleCount: 20, cursor: null, hasMore: false }
       : createGroupedPagingState(null),
@@ -449,45 +431,6 @@ export default function App() {
     }
   }
 
-  async function loadRank(append = false) {
-    if (append && loadMoreInFlightRef.current) return;
-    if (append) loadMoreInFlightRef.current = true;
-    const requestId = ++pageRequestRef.current;
-    if (!append) { resetLibrarySelection(); setItems([]); setRankPage(null); rankPagingRef.current = createGroupedPagingState(null); }
-    setLoading(true);
-    setError("");
-    try {
-      const initial = append
-        ? rankPagingRef.current
-        : createGroupedPagingState<SeriesItem, RankPage | null>(null);
-      const result = await fillUniqueGroup(initial, async (cursor) => {
-        const page = await fetchRank({
-          board: rankBoard,
-          type: rankType,
-          cursor: cursor?.nextCursor || "",
-          limit: 20,
-        });
-        const mergedPage = cursor ? {
-          ...page,
-          boards: page.boards.length ? page.boards : cursor.boards,
-        } : page;
-        return { items: page.items, nextCursor: mergedPage, hasMore: page.hasMore };
-      });
-      if (requestId !== pageRequestRef.current) return;
-      rankPagingRef.current = result.state;
-      const page = result.state.cursor;
-      setRankPage(page ? { ...page, items: result.state.allItems } : null);
-      setItems(result.visible);
-      if (!append && result.visible[0]) void selectSeries(result.visible[0]);
-    } catch (nextError) {
-      if (requestId !== pageRequestRef.current) return;
-      setError(errorMessage(nextError));
-    } finally {
-      if (append && requestId === pageRequestRef.current) loadMoreInFlightRef.current = false;
-      if (requestId === pageRequestRef.current) setLoading(false);
-    }
-  }
-
   async function runSearch(key: string, append = false) {
     const keyword = key.trim().replace(/\s+/g, " ");
     if (!keyword || (append && loadMoreInFlightRef.current)) return;
@@ -535,7 +478,7 @@ export default function App() {
   useEffect(() => {
     loadMoreInFlightRef.current = false;
     setLoading(false);
-    if (nav === "discover" && (webCategories || homeAI)) {
+    if (nav === "rank" || (nav === "discover" && (webCategories || homeAI))) {
       resetLibrarySelection();
       return () => { pageRequestRef.current += 1; catalogRequestRef.current += 1; categoryRequestRef.current += 1; };
     }
@@ -544,15 +487,13 @@ export default function App() {
       else { setItems([]); resetLibrarySelection(); setError(""); }
     } else if (!isPreview) {
       if (nav === "discover") void loadDiscover();
-      if (nav === "rank") void loadRank();
     } else {
       if (nav === "discover") setItems(discoveryPagingRef.current.allItems.slice(0, discoveryPagingRef.current.visibleCount));
-      if (nav === "rank") setItems(rankPagingRef.current.allItems.slice(0, rankPagingRef.current.visibleCount));
     }
     return () => { pageRequestRef.current += 1; catalogRequestRef.current += 1; categoryRequestRef.current += 1; };
     // Load from the submitted keyword, never from an unsubmitted input draft.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nav, contentType, searchContentType, selectedCategory, rankBoard, rankType, isPreview, submittedQuery, searchMode, searchRevision, browseCategories, homeAI, webCategories]);
+  }, [nav, contentType, searchContentType, selectedCategory, rankType, isPreview, submittedQuery, searchMode, searchRevision, browseCategories, homeAI, webCategories]);
 
   useEffect(() => {
     if (nav === "search") searchInput.current?.focus();
@@ -582,10 +523,8 @@ export default function App() {
     const scroller = event.currentTarget;
     if (scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 160) return;
     const discoveryState = discoveryPagingRef.current;
-    const rankState = rankPagingRef.current;
     const searchState = searchPagingRef.current;
     if (nav === "discover" && (discoveryState.hasMore || discoveryState.visibleCount < discoveryState.allItems.length)) void loadMoreDiscover();
-    if (nav === "rank" && (rankState.hasMore || rankState.visibleCount < rankState.allItems.length)) void loadRank(true);
     if (nav === "search" && (searchState.hasMore || searchState.visibleCount < searchState.allItems.length)) void runSearch(submittedQuery, true);
   }
 
@@ -662,10 +601,7 @@ export default function App() {
             <div className="content-segment" aria-label="内容类型">
               {nav === "rank" ? (
                 <>
-                  <button type="button" className={rankType === "all" ? "active" : ""} onClick={() => setRankType("all")}>全部</button>
-                  <button type="button" className={rankType === "playlet" ? "active" : ""} onClick={() => setRankType("playlet")}>真人剧</button>
-                  <button type="button" className={rankType === "comic_series_rank" ? "active" : ""} onClick={() => setRankType("comic_series_rank")}>漫剧</button>
-                  <button type="button" className={rankType === "ai_playlet" ? "active" : ""} onClick={() => setRankType("ai_playlet")}>AI剧</button>
+                  {([['drama', '真人剧'], ['manju', '漫剧'], ['ai', 'AI剧']] as const).map(([type, label]) => <button type="button" key={type} className={rankType === type ? "active" : ""} aria-pressed={rankType === type} onClick={() => setRankType(type)}>{label}</button>)}
                 </>
               ) : (
                 <>
@@ -691,38 +627,30 @@ export default function App() {
             </section>
           ) : null}
 
-          {nav === "rank" ? (
-            <section className="filter-strip">
-              <div className="filter-row"><span>榜单</span>{(rankPage?.boards.length ? rankPage.boards : DEFAULT_RANK_BOARDS).map((board) => <button type="button" className={`filter-chip ${rankBoard === board.id ? "active" : ""}`} key={board.id} onClick={() => setRankBoard(board.id)}>{board.name}</button>)}</div>
-            </section>
-          ) : null}
-
           <section className="library-workspace">
-            <div className="library-main" onScroll={nav === "discover" && (webCategories || homeAI) ? undefined : onLibraryScroll}>
+            <div className="library-main" onScroll={nav === "rank" || (nav === "discover" && (webCategories || homeAI)) ? undefined : onLibraryScroll}>
               {catalogError ? <div className="inline-error">{catalogError}</div> : null}
               {nav === "discover" && !webCategories && !homeAI ? <div className="home-result-summary"><span>已显示 {items.length} 部{searchContentType === "all" ? " · 真人剧 / 漫剧 / AI剧" : ""}</span><button type="button" className="text-action" disabled={loading} onClick={() => void loadDiscover()}>重新加载推荐</button></div> : null}
               {nav === "discover" && !homeAI && searchContentType === "all" && Object.keys((discoveryPagingRef.current.cursor as CombinedDiscoveryPage | null)?.sourceErrors || {}).length ? <div className="home-source-warning" role="alert"><div>{Object.entries((discoveryPagingRef.current.cursor as CombinedDiscoveryPage).sourceErrors!).map(([type, reason]) => <p key={type}>{homeSourceNames[type as HomeSource]}暂不可用：{reason}</p>)}<small>已加载内容保留，其他来源可继续浏览。</small></div><button type="button" className="secondary-button" disabled={loading} onClick={() => void retryDiscoverySources()}>重试失败来源</button></div> : null}
-              {nav === "discover" && homeAI ? <AIRecommendations onResetSelection={resetLibrarySelection} knownHeat={knownHeat} categoryMode={browseCategories} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} /> : nav === "discover" && webCategories ? <CategoryBrowser knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
+              {nav === "rank" ? <CategoryBrowser key="rank-catalog" contentType={rankType} ranked knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={resetLibrarySelection} /> : nav === "discover" && homeAI ? <AIRecommendations onResetSelection={resetLibrarySelection} knownHeat={knownHeat} categoryMode={browseCategories} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} /> : nav === "discover" && webCategories ? <CategoryBrowser key="home-catalog" knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
                 catalogRequestRef.current += 1;
                 setSelected(null); setEpisodes([]); setSelectedEpisodeIds([]);
                 setCatalogError(""); setMetricsError(""); setCatalogLoading(false); setMetricsLoading(false);
               }} /> : <>
-              {error ? <div className="inline-error" role="alert">{error}<button type="button" className="text-action" disabled={loading} onClick={() => { const append = items.length > 0; void (nav === "rank" ? loadRank(append) : nav === "search" ? runSearch(submittedQuery, append) : append ? loadMoreDiscover() : loadDiscover()); }}>重试加载</button></div> : null}
-              {nav === "rank" && rankPage?.sourceNote ? <p className="monitor-refreshed">{rankPage.sourceNote}</p> : null}
+              {error ? <div className="inline-error" role="alert">{error}<button type="button" className="text-action" disabled={loading} onClick={() => { const append = items.length > 0; void (nav === "search" ? runSearch(submittedQuery, append) : append ? loadMoreDiscover() : loadDiscover()); }}>重试加载</button></div> : null}
               {loading ? <div className="library-loading-overlay" role="status" aria-label="正在加载内容"><span className="loading-spinner" aria-hidden="true" />正在加载内容…</div> : null}
               {!loading && !error && !items.length && !(nav === "discover" && searchContentType === "all" && Object.keys((discoveryPagingRef.current.cursor as CombinedDiscoveryPage | null)?.sourceErrors || {}).length) ? <div className="empty-library"><h2>{nav === "search" && !submittedQuery ? "搜索你想看的剧" : "没有找到短剧"}</h2><p>{nav === "search" && !submittedQuery ? "输入剧名，默认搜索全部真人剧和漫剧" : "换一个关键词或分类试试"}</p></div> : null}
               <div className="poster-grid">
-                {items.map((item, index) => (
+                {items.map((item) => (
                   <button type="button" className={`poster-card ${selected?.bookId === item.bookId ? "selected" : ""}`} key={item.bookId} onClick={() => void selectSeries(item)}>
                     <div className="poster-image">
                       <Cover src={item.cover} title={item.title} />
                       <div className="poster-badges">
-                        {nav === "rank" ? <span className="rank-index">NO.{index + 1}</span> : null}
                         <VideoOrientationBadge seriesId={item.seriesId} firstVid={item.firstVid} enabled={!isPreview} />
                       </div>
                       {item.rankTags[0]?.label ? <span className="rank-label">{item.rankTags[0].label}</span> : null}
                     </div>
-                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {seriesTypeLabel(item)}{item.category && !["真人剧", "漫剧", "AI剧"].includes(item.category) ? ` · ${item.category}` : ""}{item.score ? ` · ${item.score}分` : ""}</p><HeatMetric value={item.hotCount ?? knownHeat[seriesHeatKey(item)]} /></div>
+                    <div className="poster-copy"><h2>{item.title}</h2><p>{item.episodeCount || "--"} 集 · {seriesTypeLabel(item)}{item.category && !["真人剧", "漫剧", "AI剧"].includes(item.category) ? ` · ${item.category}` : ""}{item.score ? ` · ${item.score}分` : ""}</p><SeriesHeatMetric seriesId={item.seriesId} value={item.hotCount ?? knownHeat[seriesHeatKey(item)]} enabled={!isPreview} /></div>
                   </button>
                 ))}
               </div>
@@ -730,7 +658,7 @@ export default function App() {
                 ? discoveryPagingRef.current.hasMore || discoveryPagingRef.current.visibleCount < discoveryPagingRef.current.allItems.length
                 : nav === "search"
                   ? Boolean(submittedQuery) && (searchPagingRef.current.hasMore || searchPagingRef.current.visibleCount < searchPagingRef.current.allItems.length)
-                  : rankPagingRef.current.hasMore || rankPagingRef.current.visibleCount < rankPagingRef.current.allItems.length) ? (
+                  : false) ? (
                 <div className="load-more-row">{nav === "search" || nav === "discover" ? <button type="button" className="secondary-button" onClick={() => void (nav === "discover" ? loadMoreDiscover() : runSearch(submittedQuery, true))} disabled={loading}>{loading ? "加载中…" : "加载更多"}</button> : <span role="status">{loading ? "正在加载更多…" : "继续下拉加载更多"}</span>}</div>
               ) : null}
               </>}

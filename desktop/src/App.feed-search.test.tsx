@@ -19,6 +19,7 @@ const apiMocks = vi.hoisted(() => ({
   fetchSearch: vi.fn(),
   fetchSearchAll: vi.fn(),
   fetchSeriesMetrics: vi.fn(),
+  fetchSeriesHeatBatch: vi.fn().mockResolvedValue({}),
   fetchNewReleases: vi.fn(),
   getAiComponents: vi.fn(),
   getSettings: vi.fn(),
@@ -127,7 +128,7 @@ describe("App feed and search controls", () => {
     apiMocks.fetchSearchAll.mockResolvedValue({ items: [], hasMore: false, nextOffset: 0, nextPassback: "" });
   });
 
-  it.each(["全部", "真人剧"])("keeps scrolling %s home results past 100 through the paginated library", async (type) => {
+  it.each(["全部", "真人剧", "漫剧"])("keeps scrolling %s home results past 100 through the paginated library", async (type) => {
     apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage(Array.from({ length: 6 }, (_, i) => series(i)), 6, false));
     apiMocks.fetchRank.mockResolvedValue(rankPage([], 0, false));
     apiMocks.fetchWebCategory.mockImplementation(async (_type, _filters, number) => ({
@@ -135,7 +136,7 @@ describe("App feed and search controls", () => {
       nextPage: number + 1, hasMore: number < 10, total: 240,
     }));
     const view = render(<App />);
-    if (type === "真人剧") fireEvent.click(view.getByRole("button", { name: "真人剧" }));
+    if (type !== "全部") fireEvent.click(view.getByRole("button", { name: type }));
     await view.findByRole("button", { name: "加载更多" });
     const scroller = view.container.querySelector(".library-main") as HTMLElement;
     for (let count = 0; count < 6; count++) {
@@ -145,8 +146,10 @@ describe("App feed and search controls", () => {
     }
     expect(view.container.querySelectorAll(".poster-card").length).toBeGreaterThan(100);
     expect(apiMocks.fetchDiscoveryMore).not.toHaveBeenCalled();
-    const pages = apiMocks.fetchWebCategory.mock.calls.map(call => call[2]);
-    expect(pages).toEqual(Array.from({ length: pages.length }, (_, i) => i + 1));
+    for (const kind of ["drama", "manju"]) {
+      const pages = apiMocks.fetchWebCategory.mock.calls.filter(call => call[0] === kind).map(call => call[2]);
+      expect(pages).toEqual(Array.from({ length: pages.length }, (_, i) => i + 1));
+    }
     expect(view.getByRole("button", { name: "加载更多" })).toBeTruthy();
   });
 
@@ -296,7 +299,7 @@ describe("App feed and search controls", () => {
     const view = render(<App />);
     const navigation = within(view.getByRole("navigation", { name: "主导航" }));
     fireEvent.click(navigation.getByRole("button", { name: "榜单" }));
-    await waitFor(() => expect(apiMocks.fetchRank).toHaveBeenCalledWith(expect.objectContaining({ type: "all" })));
+    await waitFor(() => expect(apiMocks.fetchWebCategory).toHaveBeenCalledWith("drama", expect.objectContaining({ sort_type: "1" }), 1));
     const input = view.getByRole("textbox", { name: "搜索短剧或漫剧" });
     fireEvent.change(input, { target: { value: "缓存剧" } });
     fireEvent.submit(input.closest("form")!);
@@ -400,74 +403,48 @@ describe("App feed and search controls", () => {
     expect(view.getAllByText("资讯 26").length).toBeGreaterThan(0);
   });
 
-  it("numbers twenty initial rank items and auto-loads the next page near the bottom", async () => {
-    const first = rankPage(Array.from({ length: 10 }, (_, index) => series(index + 1)), 10, true);
-    const second = rankPage(Array.from({ length: 10 }, (_, index) => series(index + 11)), 20, true);
-    const third = rankPage(Array.from({ length: 20 }, (_, index) => series(index + 21)), 40, false);
-    apiMocks.fetchRank.mockResolvedValueOnce(rankPage([], 0, false)).mockResolvedValueOnce(first).mockResolvedValueOnce(second).mockResolvedValueOnce(third);
+  it("continues website rank numbering beyond 100 and retains the selected source on each page", async () => {
     const view = render(<App />);
-    fireEvent.click(view.getByRole("button", { name: "榜单" }));
-
-    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(20));
-    expect(view.getByText("NO.1")).toBeTruthy();
-    expect(view.getByText("NO.20")).toBeTruthy();
-
-    const scroller = view.container.querySelector(".library-main") as HTMLElement;
-    Object.defineProperties(scroller, {
-      clientHeight: { configurable: true, value: 400 },
-      scrollHeight: { configurable: true, value: 1200 },
-      scrollTop: { configurable: true, value: 760 },
-    });
-    fireEvent.scroll(scroller);
-
-    await waitFor(() => expect(view.container.querySelectorAll(".poster-card")).toHaveLength(40));
-    expect(view.getByText("NO.40")).toBeTruthy();
-  });
-
-  it("requests the selected hot-search board for the manju rank", async () => {
-    const view = render(<App />);
-    fireEvent.click(view.getByRole("button", { name: "榜单" }));
-    await waitFor(() => expect(apiMocks.fetchRank).toHaveBeenCalled());
-
-    fireEvent.click(view.getByRole("button", { name: "漫剧" }));
-    await waitFor(() => expect(apiMocks.fetchRank.mock.lastCall?.[0]).toMatchObject({ type: "comic_series_rank" }));
-
-    fireEvent.click(view.getByRole("button", { name: "热搜榜" }));
-    await waitFor(() => expect(apiMocks.fetchRank.mock.lastCall?.[0]).toMatchObject({
-      board: "ranklist_hot_search_sc",
-      type: "comic_series_rank",
+    await view.findByRole("button", { name: "重新加载推荐" });
+    apiMocks.fetchWebCategory.mockImplementation(async (_type, _filters, page) => ({
+      items: Array.from({ length: 24 }, (_, i) => series((page - 1) * 24 + i + 1)),
+      nextPage: page + 1, hasMore: page < 5, total: 120,
     }));
-  });
-
-  it("continues rank numbering past NO.100 until upstream ends", async () => {
-    apiMocks.fetchRank.mockResolvedValueOnce(rankPage([], 0, false)); // Initial home AI recommendation.
-    for (let pageIndex = 0; pageIndex < 12; pageIndex += 1) {
-      const start = pageIndex * 10 + 1;
-      apiMocks.fetchRank.mockResolvedValueOnce(rankPage(
-        Array.from({ length: 10 }, (_, index) => series(start + index)),
-        start + 9,
-        pageIndex < 11,
-      ));
-    }
-    const view = render(<App />);
     fireEvent.click(view.getByRole("button", { name: "榜单" }));
-    await waitFor(() => expect(view.getByText("NO.20")).toBeTruthy());
-
-    const scroller = view.container.querySelector(".library-main") as HTMLElement;
-    Object.defineProperties(scroller, {
-      clientHeight: { configurable: true, value: 400 },
-      scrollHeight: { configurable: true, value: 1200 },
-      scrollTop: { configurable: true, value: 760 },
-    });
-    for (const count of [40, 60, 80, 100, 120]) {
-      fireEvent.scroll(scroller);
-      await waitFor(() => expect(view.getByText(`NO.${count}`)).toBeTruthy());
+    await view.findByText("NO.24");
+    for (const count of [48, 72, 96, 120]) {
+      fireEvent.click(view.getByRole("button", { name: "加载更多" }));
+      await view.findByText(`NO.${count}`);
     }
     expect(view.getByText("NO.101")).toBeTruthy();
-    expect(view.queryByText("范围")).toBeNull();
-    for (const label of ["推荐榜", "热播榜", "臻果榜", "预约榜", "新剧榜", "热搜榜", "必看榜", "收藏榜"]) {
-      expect(view.getByRole("button", { name: label })).toBeTruthy();
+    expect(view.queryByRole("button", { name: "加载更多" })).toBeNull();
+    expect(view.queryByRole("button", { name: "热搜榜" })).toBeNull();
+    for (const page of [1, 2, 3, 4, 5]) expect(apiMocks.fetchWebCategory).toHaveBeenCalledWith("drama", expect.objectContaining({ sort_type: "1" }), page);
+  });
+
+  it("switches the three official video sources and resets the selected topic", async () => {
+    apiMocks.fetchWebCategoryGroups.mockResolvedValue([{ id: "topic", name: "分类", items: [{ id: "", name: "全部" }, { id: "fantasy", name: "玄幻" }] }]);
+    const view = render(<App />);
+    fireEvent.click(view.getByRole("button", { name: "榜单" }));
+    await waitFor(() => expect(apiMocks.fetchWebCategory).toHaveBeenLastCalledWith("drama", expect.objectContaining({ sort_type: "1" }), 1));
+    fireEvent.click(await view.findByRole("button", { name: "玄幻" }));
+    await waitFor(() => expect(apiMocks.fetchWebCategory).toHaveBeenLastCalledWith("drama", expect.objectContaining({ topic: "fantasy" }), 1));
+    for (const [label, type] of [["漫剧", "manju"], ["AI剧", "ai"], ["真人剧", "drama"]]) {
+      fireEvent.click(view.getByRole("button", { name: label }));
+      await waitFor(() => expect(apiMocks.fetchWebCategory).toHaveBeenLastCalledWith(type, expect.objectContaining({ topic: "", sort_type: "1" }), 1));
+      expect(apiMocks.fetchWebCategoryGroups).toHaveBeenCalledWith(type);
     }
-    expect(apiMocks.fetchRank.mock.calls.filter(([args]) => args.type !== "ai_playlet")).toHaveLength(12);
+  });
+
+  it("fills missing card heat automatically without selecting the card", async () => {
+    const untouched = { ...series(9981, "无需点击补全热度"), seriesId: "9981001", bookId: "9981001" };
+    apiMocks.fetchDiscovery.mockResolvedValue(discoveryPage([series(1), untouched], 0, false));
+    apiMocks.fetchRank.mockResolvedValue(rankPage([], 0, false));
+    apiMocks.fetchSeriesHeatBatch.mockResolvedValue({ "9981001": 1230000 });
+    const view = render(<App />);
+    const card = await view.findByRole("button", { name: /无需点击补全热度/ });
+    await waitFor(() => expect(card.textContent).toContain("🔥 热度 123万"));
+    expect(apiMocks.fetchSeriesMetrics).not.toHaveBeenCalledWith("9981001", expect.anything());
+    expect(apiMocks.fetchSeriesHeatBatch).toHaveBeenCalledWith(["9981001"]);
   });
 });
