@@ -1345,10 +1345,13 @@ async fn upload(
         task.metadata.as_ref()
     }
     .ok_or_else(|| AppError::new("AUTOMATION_METADATA_MISSING", "发布文案缺失"))?;
-    let mut description = text(m, "description").to_owned();
-    if is_short && !task.main_video_url.is_empty() {
-        description = format!("{}\n\n正片：{}", description, task.main_video_url);
-    }
+    let description_suffix = if is_short && !task.main_video_url.is_empty() {
+        format!("正片：{}", task.main_video_url)
+    } else {
+        String::new()
+    };
+    let description =
+        super::metadata::upload_description(text(m, "description"), &description_suffix);
     let request = UploadIntent {
         job_id: id,
         upload_format: if is_short {
@@ -1374,7 +1377,7 @@ async fn upload(
             })
         },
         title: text(m, "title").chars().take(100).collect(),
-        description: description.chars().take(5000).collect(),
+        description,
         tags: m["tags"]
             .as_array()
             .map(|a| {

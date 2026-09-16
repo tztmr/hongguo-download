@@ -5,7 +5,7 @@ use super::{
 use crate::{platform_fs::replace_file, AppError};
 use bytes::Bytes;
 use reqwest::{
-    header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE},
+    header::{CONTENT_LENGTH, CONTENT_RANGE, LOCATION, RANGE, RETRY_AFTER},
     Client, Response, StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,7 @@ use url::Url;
 
 const UPLOAD_ENDPOINT: &str = "https://www.googleapis.com/upload/youtube/v3/videos";
 pub const CHUNK_SIZE: u64 = 64 * 1024 * 1024;
+const MAX_SESSION_RETRIES: u32 = 3;
 
 #[derive(Default)]
 struct UploadStopState {
@@ -138,6 +139,127 @@ fn session_expired() -> AppError {
         "YouTube 上传会话已过期，需要重新创建上传任务",
     )
 }
+
+fn session_network_error(error: reqwest::Error) -> AppError {
+    // reqwest errors can contain URLs with credentials or a private upload ID.
+    if error.is_timeout() {
+        AppError::new(
+            "UPLOAD_SESSION_TIMEOUT",
+            "创建 YouTube 上传会话超时，请检查网络或系统代理后重试",
+        )
+    } else {
+        AppError::new(
+            "UPLOAD_SESSION_NETWORK_FAILED",
+            "无法连接 YouTube 上传服务，请检查网络、系统代理或证书后重试",
+        )
+    }
+}
+
+async fn upload_response_error(response: Response, fallback_code: &str) -> AppError {
+    let status = response.status();
+    let body = response.json::<Value>().await.unwrap_or(Value::Null);
+    // Translate only documented identifiers. Never persist an upstream message,
+    // HTML proxy error, request URL, or arbitrary reason string in the job.
+    let reasons = ["errors", "details"].into_iter().flat_map(|key| {
+        body["error"][key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value["reason"].as_str())
+    });
+    for reason in reasons {
+        let (code, message) = match reason {
+            "quotaExceeded" | "dailyLimitExceeded" => (
+                "YOUTUBE_QUOTA_EXCEEDED",
+                "YouTube API 配额已用完，请等待配额恢复后重试",
+            ),
+            "uploadLimitExceeded" => (
+                "YOUTUBE_UPLOAD_LIMIT_EXCEEDED",
+                "此频道已达到 YouTube 上传数量限制，请稍后重试",
+            ),
+            "rateLimitExceeded" | "userRateLimitExceeded" => (
+                "YOUTUBE_RATE_LIMITED",
+                "YouTube 上传请求过于频繁，请稍后重试",
+            ),
+            "accessNotConfigured" | "serviceDisabled" | "SERVICE_DISABLED" => (
+                "YOUTUBE_API_NOT_ENABLED",
+                "请在 OAuth 凭证所属的 Google Cloud 项目中启用 YouTube Data API v3 后重试",
+            ),
+            "insufficientPermissions" | "authError" => (
+                "AUTH_REQUIRED",
+                "YouTube 上传授权失效或缺少上传权限，请在设置中重新授权频道",
+            ),
+            "youtubeSignupRequired" => (
+                "YOUTUBE_CHANNEL_REQUIRED",
+                "此 Google 账号尚未创建 YouTube 频道，请创建频道后重新授权",
+            ),
+            "invalidTitle" => (
+                "UPLOAD_METADATA_INVALID",
+                "YouTube 标题无效，请检查标题非空、不超过 100 个字符且不含 < 或 >",
+            ),
+            "invalidDescription" => (
+                "UPLOAD_METADATA_INVALID",
+                "YouTube 简介无效，请检查简介不超过 5000 字节且不含 < 或 >",
+            ),
+            "invalidTags" => (
+                "UPLOAD_METADATA_INVALID",
+                "YouTube 标签无效，请删除空标签并缩短标签总长度后重新提交",
+            ),
+            "invalidCategoryId" => (
+                "UPLOAD_METADATA_INVALID",
+                "YouTube 视频分类无效，请选择有效分类后重新提交",
+            ),
+            "invalidVideoMetadata" => (
+                "UPLOAD_METADATA_INVALID",
+                "YouTube 视频资料无效，请检查标题、简介、标签和分类后重新提交",
+            ),
+            "forbiddenPrivacySetting" => (
+                "UPLOAD_PRIVACY_INVALID",
+                "YouTube 拒绝了视频可见性设置，请检查频道权限和发布设置",
+            ),
+            _ => continue,
+        };
+        return AppError::new(
+            code,
+            format!("{message}（HTTP {} / {reason}）", status.as_u16()),
+        );
+    }
+    let (code, message) = match status {
+        StatusCode::UNAUTHORIZED => (
+            "AUTH_REQUIRED",
+            "YouTube 上传授权失效，请在设置中重新授权频道",
+        ),
+        StatusCode::FORBIDDEN => (
+            "UPLOAD_FORBIDDEN",
+            "YouTube 拒绝上传，请检查频道权限、API 配额及代理设置",
+        ),
+        StatusCode::TOO_MANY_REQUESTS => (
+            "YOUTUBE_RATE_LIMITED",
+            "YouTube 上传请求过于频繁，请稍后重试",
+        ),
+        status if status.is_server_error() => (
+            "UPLOAD_SERVICE_UNAVAILABLE",
+            "YouTube 上传服务暂时不可用，请稍后重试",
+        ),
+        _ => (
+            fallback_code,
+            "YouTube 上传请求失败，请检查上传资料和网络代理后重试",
+        ),
+    };
+    AppError::new(code, format!("{message}（HTTP {}）", status.as_u16()))
+}
+
+fn retry_after(response: &Response) -> Option<Duration> {
+    let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
+    if let Ok(seconds) = value.parse::<u64>() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let deadline = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    (deadline.with_timezone(&chrono::Utc) - chrono::Utc::now())
+        .to_std()
+        .ok()
+}
+
 async fn response_result(response: Response) -> Result<UploadResult, AppError> {
     let bytes = response.bytes().await.map_err(|_| {
         AppError::new(
@@ -219,7 +341,15 @@ impl ResumableUploader {
                 // Finish saving a newly created session before honouring pause;
                 // dropping this POST can lose the session URL.
                 let session = self
-                    .create_session(intent, &source, &mut token, &refresh, &mut refreshed)
+                    .create_session(
+                        intent,
+                        &source,
+                        &mut token,
+                        &refresh,
+                        &mut refreshed,
+                        &cancellation,
+                        &progress,
+                    )
                     .await?;
                 let value = UploadCheckpoint {
                     file_path: source.path.clone(),
@@ -334,10 +464,9 @@ impl ResumableUploader {
                     if !value.status().is_server_error()
                         && value.status() != StatusCode::TOO_MANY_REQUESTS =>
                 {
-                    return Err(AppError::new(
-                        "UPLOAD_REQUEST_FAILED",
-                        "YouTube 上传请求失败",
-                    ));
+                    return Err(cancellation
+                        .interruptible(upload_response_error(value, "UPLOAD_REQUEST_FAILED"))
+                        .await?);
                 }
                 _ => {
                     failures += 1;
@@ -361,6 +490,7 @@ impl ResumableUploader {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_session(
         &self,
         intent: &UploadIntent,
@@ -368,6 +498,8 @@ impl ResumableUploader {
         token: &mut SecretString,
         refresh: &RefreshCallback,
         refreshed: &mut bool,
+        cancellation: &UploadCancellationToken,
+        progress: &Arc<dyn Fn(UploadProgressEvent) + Send + Sync>,
     ) -> Result<Url, AppError> {
         let body = json!({
             "snippet": {
@@ -386,25 +518,12 @@ impl ResumableUploader {
                 "hasPaidProductPlacement": intent.has_paid_product_placement,
             }
         });
-        let mut response = self
-            .client
-            .post(self.endpoint.clone())
-            .timeout(Duration::from_secs(30))
-            .query(&[
-                ("uploadType", "resumable"),
-                ("part", "snippet,status,paidProductPlacementDetails"),
-            ])
-            .bearer_auth(token.expose_secret())
-            .header("X-Upload-Content-Type", "video/*")
-            .header("X-Upload-Content-Length", source.size)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| AppError::new("UPLOAD_SESSION_FAILED", "无法创建 YouTube 上传会话"))?;
-        if response.status() == StatusCode::UNAUTHORIZED && !*refreshed {
-            *token = refresh().await?;
-            *refreshed = true;
-            response = self
+        let mut failures = 0;
+        loop {
+            ensure_not_cancelled(cancellation)?;
+            // Let each POST finish so a successful Location is saved by upload()
+            // before pause/cancel takes effect. Retry waits remain interruptible.
+            let response = self
                 .client
                 .post(self.endpoint.clone())
                 .timeout(Duration::from_secs(30))
@@ -417,21 +536,61 @@ impl ResumableUploader {
                 .header("X-Upload-Content-Length", source.size)
                 .json(&body)
                 .send()
-                .await
-                .map_err(|_| AppError::new("UPLOAD_SESSION_FAILED", "无法创建 YouTube 上传会话"))?;
+                .await;
+            let (error, server_delay) = match response {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let location = response
+                            .headers()
+                            .get(LOCATION)
+                            .and_then(|value| value.to_str().ok())
+                            .ok_or_else(|| {
+                                AppError::new(
+                                    "UPLOAD_SESSION_FAILED",
+                                    "YouTube 上传会话响应缺少有效的 Location，请检查网络代理后重试",
+                                )
+                            })?;
+                        return validate_session_url(location);
+                    }
+                    if response.status() == StatusCode::UNAUTHORIZED && !*refreshed {
+                        *token = cancellation.interruptible(refresh()).await??;
+                        *refreshed = true;
+                        continue;
+                    }
+                    let delay = retry_after(&response);
+                    let error = cancellation
+                        .interruptible(upload_response_error(response, "UPLOAD_SESSION_FAILED"))
+                        .await?;
+                    if !matches!(
+                        error.code.as_str(),
+                        "YOUTUBE_RATE_LIMITED" | "UPLOAD_SERVICE_UNAVAILABLE"
+                    ) {
+                        return Err(error);
+                    }
+                    (error, delay)
+                }
+                Err(error) => {
+                    let retryable = !error.is_builder() && !error.is_redirect();
+                    let error = session_network_error(error);
+                    if !retryable {
+                        return Err(error);
+                    }
+                    (error, None)
+                }
+            };
+            failures += 1;
+            // Long throttling windows need a later user retry; never retry sooner
+            // than Retry-After or leave a queue slot sleeping for hours.
+            if failures > MAX_SESSION_RETRIES
+                || server_delay.is_some_and(|delay| delay > Duration::from_secs(60))
+            {
+                return Err(error);
+            }
+            emit(progress, YouTubeJobStatus::WaitingToRetry, 0, source.size);
+            let delay = retry_delay(failures).max(server_delay.unwrap_or_default());
+            cancellation.interruptible(sleep(delay)).await?;
+            emit(progress, YouTubeJobStatus::CreatingSession, 0, source.size);
         }
-        if !response.status().is_success() {
-            return Err(AppError::new(
-                "UPLOAD_SESSION_FAILED",
-                "无法创建 YouTube 上传会话",
-            ));
-        }
-        let location = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|value| value.to_str().ok())
-            .ok_or_else(|| AppError::new("UPLOAD_SESSION_FAILED", "YouTube 上传会话响应无效"))?;
-        validate_session_url(location)
     }
 
     async fn send_chunk(
@@ -489,10 +648,7 @@ impl ResumableUploader {
             status if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS => {
                 Err(network_failed())
             }
-            _ => Err(AppError::new(
-                "UPLOAD_REQUEST_FAILED",
-                "无法恢复 YouTube 上传，请检查账号权限",
-            )),
+            _ => Err(upload_response_error(response, "UPLOAD_REQUEST_FAILED").await),
         }
     }
 
@@ -881,6 +1037,10 @@ mod tests {
                             json: capture_json
                                 .then(|| serde_json::from_slice(&bytes[header_end..]).unwrap()),
                         });
+                        if reply.status.is_empty() {
+                            // Simulate a connection dropped before response headers.
+                            continue;
+                        }
                         let mut response = format!(
                             "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n",
                             reply.status,
@@ -959,6 +1119,340 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_reports_permanent_rejections_without_retry_or_exposing_raw_response() {
+        let root = temp_path("session-rejections");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "rejected-job");
+        for (status, body, code, hint) in [
+            (
+                "403 Forbidden",
+                r#"{"error":{"message":"secret-token","errors":[{"reason":"quotaExceeded"}]}}"#,
+                "YOUTUBE_QUOTA_EXCEEDED",
+                "配额",
+            ),
+            (
+                "400 Bad Request",
+                r#"{"error":{"errors":[{"reason":"uploadLimitExceeded"}]}}"#,
+                "YOUTUBE_UPLOAD_LIMIT_EXCEEDED",
+                "上传数量",
+            ),
+            (
+                "400 Bad Request",
+                r#"{"error":{"errors":[{"reason":"invalidDescription"}]}}"#,
+                "UPLOAD_METADATA_INVALID",
+                "简介",
+            ),
+            (
+                "403 Forbidden",
+                r#"{"error":{"errors":[{"reason":"insufficientPermissions"}]}}"#,
+                "AUTH_REQUIRED",
+                "重新授权",
+            ),
+            (
+                "403 Forbidden",
+                r#"{"error":{"details":[{"reason":"SERVICE_DISABLED","metadata":{"secret":"secret-token"}}]}}"#,
+                "YOUTUBE_API_NOT_ENABLED",
+                "启用",
+            ),
+            (
+                "403 Forbidden",
+                "<html>proxy secret-token</html>",
+                "UPLOAD_FORBIDDEN",
+                "HTTP 403",
+            ),
+        ] {
+            let server = MockUploadServer::serve(|_| {
+                vec![MockReply {
+                    status,
+                    headers: vec![],
+                    body,
+                }]
+            });
+            let checkpoints = root.join("checkpoints");
+            let error = server
+                .uploader(checkpoints.clone())
+                .upload(
+                    &intent,
+                    "UC_CHANNEL",
+                    SecretString::new("secret-token"),
+                    no_refresh(),
+                    UploadCancellationToken::default(),
+                    Arc::new(|_| {}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, code);
+            assert!(error.message.contains(hint), "{}", error.message);
+            assert!(!format!("{error:?}").contains("secret-token"));
+            assert_eq!(server.requests().len(), 1);
+            assert!(!checkpoints.join("rejected-job.json").exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_retries_transient_failures_then_uploads_video_once() {
+        let root = temp_path("session-retry");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "retry-job");
+        let server = MockUploadServer::serve(|session| {
+            vec![
+                MockReply {
+                    status: "503 Service Unavailable",
+                    headers: vec![],
+                    body: "",
+                },
+                MockReply {
+                    status: "429 Too Many Requests",
+                    headers: vec![("Retry-After", "0".into())],
+                    body: "",
+                },
+                MockReply {
+                    status: "200 OK",
+                    headers: vec![("Location", session.into())],
+                    body: "",
+                },
+                MockReply {
+                    status: "201 Created",
+                    headers: vec![],
+                    body: r#"{"id":"retry-success"}"#,
+                },
+            ]
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let result = server
+            .uploader(root.join("checkpoints"))
+            .upload(
+                &intent,
+                "UC_CHANNEL",
+                SecretString::new("token"),
+                no_refresh(),
+                UploadCancellationToken::default(),
+                Arc::new(move |event| captured.lock().unwrap().push(event.status)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.video_id, "retry-success");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[..3]
+            .iter()
+            .all(|r| r.line.starts_with("POST /videos?")));
+        assert!(requests[3].line.starts_with("PUT /session"));
+        assert_eq!(requests[3].body_bytes, 16);
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&&s| s == YouTubeJobStatus::WaitingToRetry)
+                .count(),
+            2
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_recovers_when_connection_drops_before_response_headers() {
+        let root = temp_path("session-disconnect");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "disconnect-job");
+        let server = MockUploadServer::serve(|session| {
+            vec![
+                MockReply {
+                    status: "",
+                    headers: vec![],
+                    body: "",
+                },
+                MockReply {
+                    status: "200 OK",
+                    headers: vec![("Location", session.into())],
+                    body: "",
+                },
+                MockReply {
+                    status: "201 Created",
+                    headers: vec![],
+                    body: r#"{"id":"reconnected"}"#,
+                },
+            ]
+        });
+        let result = server
+            .uploader(root.join("checkpoints"))
+            .upload(
+                &intent,
+                "UC_CHANNEL",
+                SecretString::new("token"),
+                no_refresh(),
+                UploadCancellationToken::default(),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.video_id, "reconnected");
+        assert_eq!(server.requests().len(), 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_retries_are_bounded_and_long_retry_after_is_not_ignored() {
+        let root = temp_path("session-retry-limit");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "limit-job");
+        for long_delay in [false, true] {
+            let server = MockUploadServer::serve(|_| {
+                vec![
+                    MockReply {
+                        status: "503 Service Unavailable",
+                        headers: if long_delay {
+                            vec![("Retry-After", u64::MAX.to_string())]
+                        } else {
+                            vec![]
+                        },
+                        body: "<html>secret-proxy</html>",
+                    };
+                    if long_delay { 1 } else { 4 }
+                ]
+            });
+            let error = tokio::time::timeout(
+                Duration::from_secs(12),
+                server.uploader(root.join("checkpoints")).upload(
+                    &intent,
+                    "UC_CHANNEL",
+                    SecretString::new("token"),
+                    no_refresh(),
+                    UploadCancellationToken::default(),
+                    Arc::new(|_| {}),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(error.code, "UPLOAD_SERVICE_UNAVAILABLE");
+            assert!(error.message.contains("HTTP 503"));
+            assert!(!format!("{error:?}").contains("secret-proxy"));
+            assert_eq!(server.requests().len(), if long_delay { 1 } else { 4 });
+            assert!(!root.join("checkpoints/limit-job.json").exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_retry_wait_can_be_paused_or_cancelled_before_another_post() {
+        for pause in [false, true] {
+            let root = temp_path("session-stop");
+            fs::create_dir_all(&root).unwrap();
+            let intent = upload_intent(&root, 16, "stop-job");
+            let server = MockUploadServer::serve(|_| {
+                vec![MockReply {
+                    status: "503 Service Unavailable",
+                    headers: vec![("Retry-After", "60".into())],
+                    body: "",
+                }]
+            });
+            let stop = UploadCancellationToken::default();
+            let control = stop.clone();
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                server.uploader(root.join("checkpoints")).upload(
+                    &intent,
+                    "UC_CHANNEL",
+                    SecretString::new("token"),
+                    no_refresh(),
+                    stop,
+                    Arc::new(move |event| {
+                        if event.status == YouTubeJobStatus::WaitingToRetry {
+                            if pause {
+                                control.pause();
+                            } else {
+                                control.cancel();
+                            }
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(
+                error.code,
+                if pause {
+                    "UPLOAD_PAUSED"
+                } else {
+                    "UPLOAD_CANCELLED"
+                }
+            );
+            assert_eq!(server.requests().len(), 1);
+            assert!(!root.join("checkpoints/stop-job.json").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn session_repeated_unauthorized_response_requires_reauthorization() {
+        let root = temp_path("session-unauthorized");
+        fs::create_dir_all(&root).unwrap();
+        let intent = upload_intent(&root, 16, "auth-job");
+        let server = MockUploadServer::serve(|_| {
+            vec![
+                MockReply {
+                    status: "401 Unauthorized",
+                    headers: vec![],
+                    body: "",
+                };
+                2
+            ]
+        });
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let counter = refreshes.clone();
+        let refresh: RefreshCallback = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(SecretString::new("fresh-token")) })
+        });
+        let error = server
+            .uploader(root.join("checkpoints"))
+            .upload(
+                &intent,
+                "UC_CHANNEL",
+                SecretString::new("old-token"),
+                refresh,
+                UploadCancellationToken::default(),
+                Arc::new(|_| {}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "AUTH_REQUIRED");
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        assert_eq!(server.requests().len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upload_metadata_matches_youtube_limits_before_creating_a_session() {
+        let root = temp_path("metadata-limits");
+        fs::create_dir_all(&root).unwrap();
+        let mut intent = upload_intent(&root, 16, "metadata-job");
+        intent.description = format!("{}ab", "中".repeat(1666));
+        intent.validate().unwrap();
+        intent.description.push('c');
+        assert!(intent.validate().unwrap_err().message.contains("5000"));
+        intent.description = "合法简介".into();
+        for title in ["<测试剧>", &format!(" {}", "中".repeat(100))] {
+            intent.title = title.into();
+            assert!(intent.validate().unwrap_err().message.contains("标题"));
+        }
+        intent.title = "测试剧".into();
+        intent.description = "简介带 > 符号".into();
+        assert!(intent.validate().unwrap_err().message.contains("简介"));
+        intent.description = "合法简介".into();
+        intent.tags = vec![format!("a {}", "b".repeat(496))];
+        intent.validate().unwrap();
+        intent.tags[0].push('c');
+        assert!(intent.validate().unwrap_err().message.contains("标签"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn session_sends_paid_promotion_default_and_override_even_after_token_refresh() {
         let root = temp_path("paid-promotion");
         fs::create_dir_all(&root).unwrap();
@@ -998,6 +1492,8 @@ mod tests {
                     &mut SecretString::new("old-token"),
                     &refresh,
                     &mut false,
+                    &UploadCancellationToken::default(),
+                    &(Arc::new(|_| {}) as Arc<dyn Fn(UploadProgressEvent) + Send + Sync>),
                 )
                 .await
                 .unwrap();

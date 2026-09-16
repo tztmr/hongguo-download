@@ -61,21 +61,40 @@ impl UploadIntent {
                 "季数须为 1～999，留空则自动识别",
             ));
         }
-        let title_chars = self.title.trim().chars().count();
-        if title_chars == 0 || title_chars > 100 || self.description.chars().count() > 5_000 {
+        if self.title.trim().is_empty()
+            || self.title.chars().count() > 100
+            || self.title.contains(['<', '>'])
+        {
             return Err(AppError::new(
                 "UPLOAD_METADATA_INVALID",
-                "YouTube 标题或简介无效",
+                "YouTube 标题不能为空、不能超过 100 个字符，且不能包含 < 或 >",
+            ));
+        }
+        if self.description.len() > 5_000 || self.description.contains(['<', '>']) {
+            return Err(AppError::new(
+                "UPLOAD_METADATA_INVALID",
+                "YouTube 简介不能超过 5000 字节，且不能包含 < 或 >，请缩短或修改简介",
             ));
         }
         if self.category_id.is_empty()
             || !self.category_id.chars().all(|value| value.is_ascii_digit())
-            || self.tags.iter().any(|tag| tag.trim().is_empty())
-            || self.tags.join(",").chars().count() > 500
         {
             return Err(AppError::new(
                 "UPLOAD_METADATA_INVALID",
-                "YouTube 分类或标签无效",
+                "YouTube 分类无效，请选择有效的视频分类",
+            ));
+        }
+        // YouTube counts separators and adds two quotes around tags with spaces.
+        let tag_length = self
+            .tags
+            .iter()
+            .map(|tag| tag.chars().count() + if tag.contains(' ') { 2 } else { 0 })
+            .sum::<usize>()
+            + self.tags.len().saturating_sub(1);
+        if self.tags.iter().any(|tag| tag.trim().is_empty()) || tag_length > 500 {
+            return Err(AppError::new(
+                "UPLOAD_METADATA_INVALID",
+                "YouTube 标签不能为空，总长度不能超过 500 个字符（含逗号及带空格标签的引号）",
             ));
         }
         validate_regular_file(&self.file_path, "UPLOAD_SOURCE_INVALID", "上传源文件无效")?;

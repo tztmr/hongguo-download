@@ -51,6 +51,28 @@ fn fixed_prompt(source: &str) -> &str {
 fn clamp(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
+fn clamp_bytes(value: &str, limit: usize) -> &str {
+    let mut end = value.len().min(limit);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+pub(super) fn upload_description(value: &str, suffix: &str) -> String {
+    // Reserve UTF-8 bytes for hashtags or the Shorts main-video link before
+    // truncating the description. Cached metadata also passes through here.
+    if suffix.is_empty() {
+        return clamp_bytes(value, 5000).to_owned();
+    }
+    let suffix = clamp_bytes(suffix, 4998);
+    format!(
+        "{}\n\n{}",
+        clamp_bytes(value, 5000 - suffix.len() - 2),
+        suffix
+    )
+}
+
 fn category(value: &Value, fallback: &str) -> String {
     let v = value
         .as_str()
@@ -157,7 +179,7 @@ fn fallback(task: &Task) -> Value {
         task,
     );
     json!({"title":clamp(if title.trim().is_empty() { &task.source.title } else { title.trim() },100),
-        "description":clamp(&description,5000),"tags":tags(tag_text.split([',','，']).map(str::to_owned)),
+        "description":upload_description(&description,""),"tags":tags(tag_text.split([',','，']).map(str::to_owned)),
         "categoryId":category(&task.config["category"],"24")})
 }
 
@@ -196,18 +218,7 @@ fn generated(result: &Value, task: &Task) -> Option<Value> {
         .filter(|tag| !description.contains(tag))
         .collect();
     let suffix = hashtags.join(" ");
-    let description = if suffix.is_empty() {
-        clamp(description, 5000)
-    } else {
-        format!(
-            "{}\n\n{}",
-            clamp(
-                description,
-                5000usize.saturating_sub(suffix.chars().count() + 2)
-            ),
-            suffix
-        )
-    };
+    let description = upload_description(description, &suffix);
     Some(
         json!({"title":clamp(title,100),"description":description,"tags":generated_tags,
         "categoryId":category(&task.config["category"],"24")}),
@@ -740,8 +751,28 @@ mod tests {
         assert_eq!(value["categoryId"], "24");
         assert_eq!(value["title"].as_str().unwrap().chars().count(), 100);
         let description = value["description"].as_str().unwrap();
-        assert!(description.chars().count() <= 5000);
+        assert!(description.len() <= 5000);
         assert!(description.ends_with("#都市 #重生"));
+    }
+    #[test]
+    fn source_description_is_bounded_in_utf8_bytes() {
+        let mut task = task();
+        task.source.summary = "中文剧情🎬".repeat(1000);
+        let value = fallback(&task);
+        let description = value["description"].as_str().unwrap();
+        assert!(description.len() <= 5000);
+        assert!(task.source.summary.starts_with(description));
+    }
+    #[test]
+    fn upload_description_preserves_short_link_when_cached_text_is_too_long() {
+        let source = "中文剧情🎬".repeat(1000);
+        let suffix = "正片：https://www.youtube.com/watch?v=abcdefghijk";
+        let description = upload_description(&source, suffix);
+        assert!(description.len() <= 5000);
+        let (prefix, link) = description.rsplit_once("\n\n").unwrap();
+        assert!(source.starts_with(prefix));
+        assert_eq!(link, suffix);
+        assert_eq!(upload_description("正常简介", ""), "正常简介");
     }
     #[test]
     fn cache_roundtrip_contains_results_only() {
