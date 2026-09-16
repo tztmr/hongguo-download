@@ -23,6 +23,9 @@ describe("CategoryBrowser", () => {
       .mockResolvedValueOnce(page(["第一部", "第二部"], 3, false));
     const view = render(<CategoryBrowser contentType="manju" ranked api={mock} onSelect={vi.fn()} detectOrientation={false} />);
     await view.findByText("NO.1");
+    // Rows may render before the request's finally handler clears loading and
+    // the pagination observer effect is installed, especially on Windows CI.
+    await waitFor(() => expect(intersect).toEqual(expect.any(Function)));
     const show = () => intersect([{ isIntersecting: true }] as IntersectionObserverEntry[], {} as IntersectionObserver);
     await act(async () => { show(); show(); });
     await view.findByRole("alert");
