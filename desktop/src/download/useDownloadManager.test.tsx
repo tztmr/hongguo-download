@@ -149,8 +149,10 @@ describe("useDownloadManager", () => {
     for (const index of [3, 1, 2, 0]) {
       const count = fake.started.length;
       act(() => fake.resolve(initial[index]));
-      await waitFor(() => expect(fake.started).toHaveLength(count + 1));
-      expect(result.current.stats.running).toBe(5);
+      await waitFor(() => {
+        expect(fake.started).toHaveLength(count + 1);
+        expect(result.current.stats.running).toBe(5);
+      });
     }
     expect(result.current.stats.done).toBe(4);
     expect(result.current.state.batches[0].items.find(item => item.id === initial[4])?.status).toBe("running");
