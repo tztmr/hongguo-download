@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 import httpx
-from core.video_download import download_video
+from core.video_download import FIRST_BYTE_WAIT, download_video
 
 
 class VideoDownloadTests(unittest.IsolatedAsyncioTestCase):
@@ -152,6 +152,7 @@ class VideoDownloadPoolTests(unittest.IsolatedAsyncioTestCase):
         self.handlers = set()
         self.release = asyncio.Event()
         self.requested = []
+        self.primary_delay = 0
 
         async def serve(reader, writer):
             task = asyncio.current_task()
@@ -160,6 +161,8 @@ class VideoDownloadPoolTests(unittest.IsolatedAsyncioTestCase):
                 header = await reader.readuntil(b'\r\n\r\n')
                 path = header.split(b' ')[1].decode()
                 self.requested.append(path)
+                if path == '/primary' and self.primary_delay:
+                    await asyncio.sleep(self.primary_delay)
                 writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n')
                 await writer.drain()
                 if path == '/hold':
@@ -197,6 +200,7 @@ class VideoDownloadPoolTests(unittest.IsolatedAsyncioTestCase):
     async def test_pool_timeout_retries_same_source_after_connection_releases(self):
         attempts = []
         retried = asyncio.Event()
+        self.primary_delay = .05
 
         async def request_hook(request):
             if request.url.path != '/hold':
@@ -212,8 +216,14 @@ class VideoDownloadPoolTests(unittest.IsolatedAsyncioTestCase):
                     ))
                     try:
                         await asyncio.wait_for(retried.wait(), 2)
-                        await occupied.aclose()
-                        self.assertEqual(await asyncio.wait_for(task, 2), b'v' * 4096)
+                        self.assertEqual(attempts, ['/primary', '/primary'])
+                        self.assertEqual(self.requested, ['/hold'])
+                        # The 10 ms deadline only stresses connection admission.
+                        # Once admitted, a healthy real socket (especially on
+                        # Windows) may need longer; use the production allowance.
+                        with patch('core.video_download.FIRST_BYTE_WAIT', FIRST_BYTE_WAIT):
+                            await occupied.aclose()
+                            self.assertEqual(await asyncio.wait_for(task, 2), b'v' * 4096)
                     finally:
                         task.cancel()
                         await asyncio.gather(task, return_exceptions=True)
