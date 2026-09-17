@@ -3,12 +3,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
 from fastapi import FastAPI
-from endpoints.duanju import router
+from endpoints.duanju import duanju_download, router
 from core.response import error
+from core.video_download import VideoPoolBusy
 
 
 class DownloadRecoveryTest(unittest.IsolatedAsyncioTestCase):
@@ -59,3 +61,90 @@ class DownloadRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(peak, 3)
         self.assertGreater(peak, 1)
         self.assertTrue(all(r.status_code == 200 for r in responses))
+
+    async def test_pool_busy_returns_retryable_503_without_refreshing_playback_urls(self):
+        app = FastAPI(); app.include_router(router, prefix='/api')
+        app.state.download_slots = asyncio.Semaphore(1)
+        source = {'urls': ['https://invalid.test/video?token=secret'], 'spade_a': 'key', 'definition': '720p'}
+        model = AsyncMock(return_value={'sources': [source]})
+        download = AsyncMock(side_effect=VideoPoolBusy())
+        with patch('endpoints.duanju._fetch_video_model', model), \
+                patch('endpoints.duanju.derive_key_from_spade_a', return_value='key'), \
+                patch('endpoints.duanju._download_encrypted', download), \
+                patch('endpoints.duanju._duanju_video_cache.delete') as delete:
+            response = await self.request(app)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()['code'], -11)
+        self.assertEqual(response.headers['retry-after'], '5')
+        self.assertIn('下载连接繁忙', response.json()['msg'])
+        self.assertNotIn('secret', response.text)
+        model.assert_awaited_once()
+        download.assert_awaited_once()
+        delete.assert_not_called()
+        await asyncio.wait_for(app.state.download_slots.acquire(), .5)
+        app.state.download_slots.release()
+
+    async def test_disconnected_waiter_does_not_start_downloading_or_consume_slot(self):
+        disconnected = asyncio.Event()
+        app = FastAPI()
+        app.state.download_slots = asyncio.Semaphore(0)
+
+        async def is_disconnected():
+            return disconnected.is_set()
+
+        request = SimpleNamespace(app=app, state=SimpleNamespace(), is_disconnected=is_disconnected)
+        run = AsyncMock()
+        with patch('endpoints.duanju._duanju_download_once', run):
+            task = asyncio.create_task(duanju_download(request, 'episode', 'auto', False, False))
+            try:
+                await asyncio.sleep(.01)
+                disconnected.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 1)
+                run.assert_not_awaited()
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        app.state.download_slots.release()
+        await asyncio.wait_for(app.state.download_slots.acquire(), .5)
+        app.state.download_slots.release()
+
+    async def test_regular_download_disconnect_cancels_cdn_and_next_episode_can_run(self):
+        from fastapi.responses import Response
+        disconnected = asyncio.Event()
+        started = asyncio.Event()
+        closed = asyncio.Event()
+        app = FastAPI()
+        app.state.download_slots = asyncio.Semaphore(1)
+
+        async def is_disconnected():
+            return disconnected.is_set()
+
+        async def download(*args):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        request = SimpleNamespace(app=app, state=SimpleNamespace(), is_disconnected=is_disconnected)
+        source = {'urls': ['https://invalid.test/video'], 'spade_a': 'key', 'definition': '720p'}
+        with patch('endpoints.duanju._fetch_video_model', AsyncMock(return_value={'sources': [source]})), \
+                patch('endpoints.duanju.derive_key_from_spade_a', return_value='key'), \
+                patch('endpoints.duanju._download_encrypted', download), \
+                patch('endpoints.duanju.decrypt_mp4') as decrypt:
+            task = asyncio.create_task(duanju_download(request, 'episode', 'auto', False, False))
+            try:
+                await asyncio.wait_for(started.wait(), 1)
+                disconnected.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 1)
+                self.assertTrue(closed.is_set())
+                decrypt.assert_not_called()
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        disconnected.clear()
+        with patch('endpoints.duanju._duanju_download_once', AsyncMock(return_value=Response(b'next'))):
+            response = await asyncio.wait_for(duanju_download(request, 'next', 'auto', False, False), 1)
+            self.assertEqual(response.body, b'next')

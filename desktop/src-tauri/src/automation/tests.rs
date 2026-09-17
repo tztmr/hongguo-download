@@ -34,6 +34,17 @@ fn temporary() -> PathBuf {
 }
 
 #[test]
+fn missing_privacy_defaults_private_while_explicit_visibility_is_preserved() {
+    let mut missing = config();
+    missing.as_object_mut().unwrap().remove("privacy");
+    assert_eq!(validate_config(missing).unwrap()["privacy"], "private");
+    for privacy in ["private", "unlisted", "public"] {
+        let mut saved = config();
+        saved["privacy"] = json!(privacy);
+        assert_eq!(validate_config(saved).unwrap()["privacy"], privacy);
+    }
+}
+#[test]
 fn legacy_download_receipt_reviews_resume_without_bypassing_duplicate_checks() {
     let path = temporary();
     let mut blocked = task();

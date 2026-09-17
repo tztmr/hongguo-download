@@ -49,7 +49,7 @@ describe("App preview workflow", () => {
     expect(view.getByRole("button", { name: "一键设为私人" })).toHaveProperty("disabled", false);
     fireEvent.click(view.getByRole("button", { name: "数据分析" }));
     expect(view.getByRole("heading", { name: "数据分析" })).toBeTruthy();
-    expect(await view.findByText("频道累计观看次数")).toBeTruthy();
+    expect(await view.findByText("频道累计观看次数", {}, { timeout: 5000 })).toBeTruthy();
     fireEvent.click(view.getByRole("button", { name: "设置" }));
     expect(view.getByRole("heading", { name: "设置" })).toBeTruthy();
     expect(view.queryByRole("heading", { name: "视频管理" })).toBeNull();

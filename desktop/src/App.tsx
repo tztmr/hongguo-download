@@ -49,6 +49,9 @@ import {
   previewManagementCommands,
   previewAnalyticsCommands,
   previewSeries,
+  previewCatalogItems,
+  previewCategoryApi,
+  previewAiRank,
   previewYouTubeModel,
 } from "./preview";
 import { errorMessage, useAppSettings, type AppSettingsDependencies } from "./settings/useAppSettings";
@@ -344,6 +347,7 @@ export default function App() {
   }
 
   async function loadCategoryOptions() {
+    if (isPreview) { setCategoryGroups([]); setCategoryError(""); return; }
     const requestId = ++categoryRequestRef.current;
     setCategoryError("");
     try { const groups = await fetchCategoryGroups(contentType); if (requestId === categoryRequestRef.current) setCategoryGroups(groups); }
@@ -351,6 +355,13 @@ export default function App() {
   }
 
   async function loadDiscover() {
+    if (isPreview) {
+      const allItems = searchContentType === "all" ? previewSeries : previewCatalogItems(contentType);
+      discoveryPagingRef.current = { allItems, visibleCount: 20, cursor: null, hasMore: false };
+      setItems(allItems.slice(0, 20)); setError(""); setCategoryError(""); setCategoryGroups([]);
+      if (allItems[0]) void selectSeries(allItems[0]);
+      return;
+    }
     categoryRequestRef.current += 1;
     const requestId = ++pageRequestRef.current;
     resetLibrarySelection(); setItems([]);
@@ -488,7 +499,7 @@ export default function App() {
     } else if (!isPreview) {
       if (nav === "discover") void loadDiscover();
     } else {
-      if (nav === "discover") setItems(discoveryPagingRef.current.allItems.slice(0, discoveryPagingRef.current.visibleCount));
+      if (nav === "discover") void loadDiscover();
     }
     return () => { pageRequestRef.current += 1; catalogRequestRef.current += 1; categoryRequestRef.current += 1; };
     // Load from the submitted keyword, never from an unsubmitted input draft.
@@ -632,7 +643,7 @@ export default function App() {
               {catalogError ? <div className="inline-error">{catalogError}</div> : null}
               {nav === "discover" && !webCategories && !homeAI ? <div className="home-result-summary"><span>已显示 {items.length} 部{searchContentType === "all" ? " · 真人剧 / 漫剧 / AI剧" : ""}</span><button type="button" className="text-action" disabled={loading} onClick={() => void loadDiscover()}>重新加载推荐</button></div> : null}
               {nav === "discover" && !homeAI && searchContentType === "all" && Object.keys((discoveryPagingRef.current.cursor as CombinedDiscoveryPage | null)?.sourceErrors || {}).length ? <div className="home-source-warning" role="alert"><div>{Object.entries((discoveryPagingRef.current.cursor as CombinedDiscoveryPage).sourceErrors!).map(([type, reason]) => <p key={type}>{homeSourceNames[type as HomeSource]}暂不可用：{reason}</p>)}<small>已加载内容保留，其他来源可继续浏览。</small></div><button type="button" className="secondary-button" disabled={loading} onClick={() => void retryDiscoverySources()}>重试失败来源</button></div> : null}
-              {nav === "rank" ? <CategoryBrowser key="rank-catalog" contentType={rankType} ranked knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={resetLibrarySelection} /> : nav === "discover" && homeAI ? <AIRecommendations onResetSelection={resetLibrarySelection} knownHeat={knownHeat} categoryMode={browseCategories} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} /> : nav === "discover" && webCategories ? <CategoryBrowser key="home-catalog" knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
+              {nav === "rank" ? <CategoryBrowser api={isPreview ? previewCategoryApi : undefined} key="rank-catalog" contentType={rankType} ranked knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={resetLibrarySelection} /> : nav === "discover" && homeAI ? <AIRecommendations fetchPage={isPreview ? previewAiRank : undefined} onResetSelection={resetLibrarySelection} knownHeat={knownHeat} categoryMode={browseCategories} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} /> : nav === "discover" && webCategories ? <CategoryBrowser api={isPreview ? previewCategoryApi : undefined} key="home-catalog" knownHeat={knownHeat} selectedId={selected?.bookId} detectOrientation={!isPreview} onSelect={(item) => void selectSeries(item)} onResetSelection={() => {
                 catalogRequestRef.current += 1;
                 setSelected(null); setEpisodes([]); setSelectedEpisodeIds([]);
                 setCatalogError(""); setMetricsError(""); setCatalogLoading(false); setMetricsLoading(false);

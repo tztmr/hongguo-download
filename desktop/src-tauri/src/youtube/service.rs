@@ -321,6 +321,20 @@ impl YouTubeService {
             .await?;
         self.sync_managed_video(channel_id, video)
     }
+    pub async fn set_channel_video_privacy(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+        privacy: &str,
+    ) -> Result<super::management::ManagedVideo, AppError> {
+        let video = self
+            .management_api(channel_id)
+            .await?
+            .set_video_privacy(video_id, privacy)
+            .await?;
+        self.sync_managed_video(channel_id, video)
+    }
+
     fn sync_managed_video(
         &self,
         channel_id: &str,
@@ -377,6 +391,22 @@ impl YouTubeService {
             .create_playlist(title, privacy)
             .await
     }
+    pub async fn set_channel_video_thumbnail_bytes(
+        &self,
+        channel_id: &str,
+        video_id: &str,
+        bytes: &[u8],
+    ) -> Result<(), AppError> {
+        let ext = crate::cover_extension(bytes)
+            .filter(|_| bytes.len() <= 20 * 1024 * 1024)
+            .ok_or_else(|| AppError::new("AI_INVALID_IMAGE", "生成封面格式或大小无效"))?;
+        let temp = ThumbnailWorkspace::create(&self.data_dir)?;
+        let source = temp.0.join(format!("generated.{ext}"));
+        std::fs::write(&source, bytes).map_err(service_io)?;
+        self.set_channel_video_thumbnail(channel_id, video_id, &source)
+            .await
+    }
+
     pub async fn set_channel_video_thumbnail(
         &self,
         channel_id: &str,

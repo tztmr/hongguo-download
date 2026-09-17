@@ -20,6 +20,8 @@ function commands(items = rows): ManagementCommands {
     list: vi.fn().mockResolvedValue({ items, nextPageToken: null }),
     detail: vi.fn(), update: vi.fn(), thumbnail: vi.fn(), playlists: vi.fn(), membership: vi.fn(), createPlaylist: vi.fn(),
     lookup: vi.fn().mockResolvedValue({ items: [], failures: [] }), deleteVideo: vi.fn().mockResolvedValue(undefined),
+    setPrivacy: vi.fn().mockImplementation(async (_channel, id, privacyStatus) => ({ ...items.find(row => row.id === id)!, privacyStatus, etag: "status-rev" })),
+    generateAi: vi.fn(), generatedThumbnail: vi.fn(),
     makeBlockedVideoPrivate: vi.fn().mockImplementation(async (_channel, id) => ({ ...rows.find((row) => row.id === id)!, privacyStatus: "private", etag: "private-rev" })),
   };
 }
@@ -29,6 +31,34 @@ async function ready() {
 function mount(api: ManagementCommands) { return render(<YouTubeManagement channelId="c1" channelTitle="测试频道" commands={api} />); }
 
 describe("channel-wide blocked video actions", () => {
+  it.each(["private", "unlisted", "public"] as const)("changes selected video and Shorts visibility to %s without requiring a restriction", async privacy => {
+    const api = commands([normal, regional]); mount(api); await ready();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前筛选结果" }));
+    fireEvent.click(screen.getByRole("button", { name: "更改视频状态（2）" }));
+    const dialog = await screen.findByRole("dialog", { name: "批量更改视频状态" });
+    fireEvent.change(within(dialog).getByLabelText("批量目标可见性"), { target: { value: privacy } });
+    const label = { private: "私人", unlisted: "不公开", public: "公开" }[privacy];
+    expect(api.setPrivacy).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: `确认设为${label} 2 个` }));
+    await screen.findByText(`所选视频已全部设为${label}`);
+    expect(vi.mocked(api.setPrivacy).mock.calls).toEqual([["c1", normal.id, privacy], ["c1", regional.id, privacy]]);
+    expect(api.makeBlockedVideoPrivate).not.toHaveBeenCalled(); expect(api.update).not.toHaveBeenCalled();
+  });
+  it("retries only unfinished visibility changes and supports the per-video state button", async () => {
+    const api = commands([normal, regional]); mount(api); await ready();
+    fireEvent.click(screen.getByRole("checkbox", { name: "全选当前筛选结果" }));
+    fireEvent.click(screen.getByRole("button", { name: "更改视频状态（2）" }));
+    vi.mocked(api.setPrivacy).mockResolvedValueOnce({ ...normal, privacyStatus: "private" })
+      .mockRejectedValueOnce({ code: "YOUTUBE_MANAGEMENT_NETWORK", message: "网络断开" });
+    fireEvent.click(screen.getByRole("button", { name: "确认设为私人 2 个" }));
+    await screen.findByText("网络断开");
+    fireEvent.click(screen.getByRole("button", { name: "重试剩余 1 个" }));
+    await screen.findByText("所选视频已全部设为私人");
+    expect(vi.mocked(api.setPrivacy).mock.calls.map(([, id]) => id)).toEqual([normal.id, regional.id, regional.id]);
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+    fireEvent.click(screen.getByRole("button", { name: "更改状态 正常视频" }));
+    expect(within(screen.getByRole("dialog")).getAllByRole("listitem")).toHaveLength(1);
+  });
   it("rescans every page, deduplicates, and deletes blocked videos and Shorts after reviewing the full channel", async () => {
     const api = commands();
     const firstPage = Array.from({ length: 50 }, (_, i) => ({ ...normal, id: `normal${i}`, title: `普通视频 ${i}` }));

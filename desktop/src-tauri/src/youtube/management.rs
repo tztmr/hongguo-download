@@ -680,8 +680,38 @@ impl ManagementApi {
                 "此视频已无 API 标记的封锁信息，未修改可见性，请刷新核对",
             ));
         }
-        if video.privacy_status == "private" {
+        self.write_privacy(video_id, &current, "private").await
+    }
+
+    pub async fn set_video_privacy(
+        &self,
+        video_id: &str,
+        privacy: &str,
+    ) -> Result<ManagedVideo, AppError> {
+        if !valid_video_id(video_id) || !privacy_valid(privacy) {
+            return Err(invalid());
+        }
+        self.channel_uploads().await?;
+        let current = self.video(video_id).await?;
+        self.write_privacy(video_id, &current, privacy).await
+    }
+
+    async fn write_privacy(
+        &self,
+        video_id: &str,
+        current: &Value,
+        privacy: &str,
+    ) -> Result<ManagedVideo, AppError> {
+        let video = parse_video(current)?;
+        let scheduled = !field(current, "/status/publishAt").is_empty();
+        if video.privacy_status == privacy && !(scheduled && privacy == "private") {
             return Ok(video);
+        }
+        if scheduled && privacy != "private" {
+            return Err(AppError::new(
+                "YOUTUBE_SCHEDULED_VIDEO",
+                "视频已设置定时发布，请先在 YouTube Studio 调整发布时间后再修改可见性",
+            ));
         }
         let mut status = copy_fields(
             &current["status"],
@@ -693,7 +723,7 @@ impl ManagementApi {
                 "containsSyntheticMedia",
             ],
         );
-        status["privacyStatus"] = json!("private");
+        status["privacyStatus"] = json!(privacy);
         self.request(
             Method::PUT,
             "videos",
@@ -702,11 +732,14 @@ impl ManagementApi {
             Some(&video.etag),
         )
         .await?;
-        let confirmed = self.detail(video_id).await?;
-        if confirmed.privacy_status != "private" {
+        let confirmed_raw = self.video(video_id).await?;
+        let confirmed = parse_video(&confirmed_raw)?;
+        if confirmed.privacy_status != privacy
+            || (privacy == "private" && !field(&confirmed_raw, "/status/publishAt").is_empty())
+        {
             return Err(AppError::new(
                 "YOUTUBE_PRIVACY_NOT_APPLIED",
-                "YouTube 尚未确认设为私人，请刷新核对后重试",
+                "YouTube 尚未确认目标可见性，请刷新核对后重试",
             ));
         }
         Ok(confirmed)
@@ -1293,6 +1326,155 @@ mod tests {
             serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
         assert_eq!(body["snippet"]["tags"], json!(["短剧"]));
         assert_eq!(body["status"]["privacyStatus"], "public");
+    }
+    #[tokio::test]
+    async fn visibility_changes_preserve_metadata_and_other_status_fields() {
+        for privacy in ["private", "unlisted", "public"] {
+            let mut current = identified("normal00001");
+            current["status"]["privacyStatus"] = json!(if privacy == "private" {
+                "public"
+            } else {
+                "private"
+            });
+            let mut confirmed = current.clone();
+            confirmed["etag"] = json!("confirmed");
+            confirmed["status"]["privacyStatus"] = json!(privacy);
+            let (api, server) = server(vec![
+                (200, channel()),
+                (200, json!({"items":[current]})),
+                (200, json!({})),
+                (200, json!({"items":[confirmed]})),
+            ])
+            .await;
+            assert_eq!(
+                api.set_video_privacy("normal00001", privacy)
+                    .await
+                    .unwrap()
+                    .privacy_status,
+                privacy
+            );
+            let requests = server.await.unwrap();
+            assert!(requests[2].starts_with("PUT /videos?part=status "));
+            assert!(requests[2].contains("if-match: rev1"));
+            let body: Value =
+                serde_json::from_str(requests[2].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            assert!(body.get("snippet").is_none());
+            assert_eq!(body["status"]["privacyStatus"], privacy);
+            assert_eq!(body["status"]["containsSyntheticMedia"], true);
+            assert_eq!(body["status"]["selfDeclaredMadeForKids"], true);
+            assert_eq!(body["status"]["license"], "creativeCommon");
+        }
+    }
+    #[tokio::test]
+    async fn setting_private_cancels_schedule_even_when_already_private() {
+        let mut current = identified("normal00001");
+        current["status"]["publishAt"] = json!("2027-01-01T00:00:00Z");
+        let mut confirmed = current.clone();
+        confirmed["status"]
+            .as_object_mut()
+            .unwrap()
+            .remove("publishAt");
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[current]})),
+            (200, json!({})),
+            (200, json!({"items":[confirmed]})),
+        ])
+        .await;
+        api.set_video_privacy("normal00001", "private")
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+        let body: Value =
+            serde_json::from_str(requests[2].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert!(body["status"].get("publishAt").is_none());
+    }
+    #[tokio::test]
+    async fn private_status_is_not_confirmed_while_a_publish_schedule_remains() {
+        let mut current = identified("normal00001");
+        current["status"]["publishAt"] = json!("2027-01-01T00:00:00Z");
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[current.clone()]})),
+            (200, json!({})),
+            (200, json!({"items":[current]})),
+        ])
+        .await;
+        assert_eq!(
+            api.set_video_privacy("normal00001", "private")
+                .await
+                .unwrap_err()
+                .code,
+            "YOUTUBE_PRIVACY_NOT_APPLIED"
+        );
+        assert_eq!(server.await.unwrap().len(), 4);
+    }
+    #[tokio::test]
+    async fn visibility_rejects_foreign_owners_and_publishing_scheduled_videos() {
+        for foreign in [true, false] {
+            let mut current = identified("normal00001");
+            if foreign {
+                current["snippet"]["channelId"] = json!("other");
+            } else {
+                current["status"]["publishAt"] = json!("2027-01-01T00:00:00Z");
+            }
+            let (api, server) =
+                server(vec![(200, channel()), (200, json!({"items":[current]}))]).await;
+            assert_eq!(
+                api.set_video_privacy("normal00001", "public")
+                    .await
+                    .unwrap_err()
+                    .code,
+                if foreign {
+                    "YOUTUBE_CHANNEL_MISMATCH"
+                } else {
+                    "YOUTUBE_SCHEDULED_VIDEO"
+                }
+            );
+            assert!(server
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.starts_with("GET ")));
+        }
+    }
+    #[tokio::test]
+    async fn visibility_requires_confirmed_target_and_retries_without_duplicate_write() {
+        let current = identified("normal00001");
+        let mut confirmed = current.clone();
+        confirmed["status"]["privacyStatus"] = json!("public");
+        let (api, server) = server(vec![
+            (200, channel()),
+            (200, json!({"items":[current.clone()]})),
+            (200, json!({})),
+            (200, json!({"items":[current]})),
+            (200, channel()),
+            (200, json!({"items":[confirmed]})),
+        ])
+        .await;
+        assert_eq!(
+            api.set_video_privacy("normal00001", "public")
+                .await
+                .unwrap_err()
+                .code,
+            "YOUTUBE_PRIVACY_NOT_APPLIED"
+        );
+        assert_eq!(
+            api.set_video_privacy("normal00001", "public")
+                .await
+                .unwrap()
+                .privacy_status,
+            "public"
+        );
+        assert_eq!(
+            server
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("PUT "))
+                .count(),
+            1
+        );
     }
     #[tokio::test]
     async fn private_blocked_video_only_updates_status_with_fresh_revision_and_reads_back() {

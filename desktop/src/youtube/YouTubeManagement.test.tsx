@@ -12,6 +12,7 @@ function commands(): ManagementCommands {
   return { detail: vi.fn().mockResolvedValue(video), list: vi.fn().mockResolvedValue({ items: [video], nextPageToken: "page2" }),
     lookup: vi.fn().mockResolvedValue({ items: [], failures: [] }), deleteVideo: vi.fn().mockResolvedValue(undefined),
     makeBlockedVideoPrivate: vi.fn().mockResolvedValue(video),
+    setPrivacy: vi.fn(), generateAi: vi.fn(), generatedThumbnail: vi.fn(),
     update: vi.fn().mockImplementation(async (request) => ({ ...video, ...request, id: video.id, etag: "v2" })),
     thumbnail: vi.fn().mockResolvedValue(undefined), playlists: vi.fn().mockResolvedValue([{ id: "pl1", title: "短剧合集", privacyStatus: "public", itemIds: [] }]),
     membership: vi.fn().mockResolvedValue(undefined), createPlaylist: vi.fn().mockResolvedValue({ id: "pl2", title: "新清单", privacyStatus: "private", itemIds: [] }) };

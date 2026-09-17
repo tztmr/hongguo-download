@@ -18,6 +18,7 @@ class VideoDownloadTests(unittest.IsolatedAsyncioTestCase):
     async def test_stalled_primary_hedges_and_is_cancelled_when_backup_finishes(self):
         cancelled = asyncio.Event()
         async def handle(request):
+            await request.extensions['trace']('http11.send_request_headers.started', {})
             if request.url.host == 'a.test':
                 try:
                     await asyncio.Event().wait()
@@ -42,6 +43,7 @@ class VideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         closed = 0
         ready = asyncio.Event()
         async def handle(request):
+            await request.extensions['trace']('http11.send_request_headers.started', {})
             nonlocal started, closed
             started += 1
             if started == 2: ready.set()
@@ -141,3 +143,126 @@ class VideoDownloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(peak, 2)
         self.assertEqual(active, 0)
         self.assertEqual(requested, ['a.test', 'b.test', 'c.test'])
+
+
+class VideoDownloadPoolTests(unittest.IsolatedAsyncioTestCase):
+    """Exercise connection admission/cleanup with real sockets, not mocked pools."""
+
+    async def asyncSetUp(self):
+        self.handlers = set()
+        self.release = asyncio.Event()
+        self.requested = []
+
+        async def serve(reader, writer):
+            task = asyncio.current_task()
+            self.handlers.add(task)
+            try:
+                header = await reader.readuntil(b'\r\n\r\n')
+                path = header.split(b' ')[1].decode()
+                self.requested.append(path)
+                writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 4096\r\nConnection: close\r\n\r\n')
+                await writer.drain()
+                if path == '/hold':
+                    await self.release.wait()
+                writer.write(b'v' * 4096)
+                await writer.drain()
+            except (ConnectionError, asyncio.IncompleteReadError, asyncio.CancelledError):
+                pass
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except ConnectionError:
+                    pass
+                self.handlers.discard(task)
+
+        self.server = await asyncio.start_server(serve, '127.0.0.1', 0)
+        self.base = f'http://127.0.0.1:{self.server.sockets[0].getsockname()[1]}'
+
+    async def asyncTearDown(self):
+        self.release.set()
+        self.server.close()
+        await self.server.wait_closed()
+        pending = list(self.handlers)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    def client(self, **kwargs):
+        return httpx.AsyncClient(
+            trust_env=False, limits=httpx.Limits(max_connections=1),
+            timeout=httpx.Timeout(1, pool=.06), **kwargs,
+        )
+
+    async def test_pool_timeout_retries_same_source_after_connection_releases(self):
+        attempts = []
+        retried = asyncio.Event()
+
+        async def request_hook(request):
+            if request.url.path != '/hold':
+                attempts.append(request.url.path)
+                if len(attempts) >= 2:
+                    retried.set()
+
+        with patch('core.video_download.FIRST_BYTE_WAIT', .01):
+            async with self.client(event_hooks={'request': [request_hook]}) as client:
+                async with client.stream('GET', self.base + '/hold') as occupied:
+                    task = asyncio.create_task(download_video(
+                        [self.base + '/primary', self.base + '/backup'], client,
+                    ))
+                    try:
+                        await asyncio.wait_for(retried.wait(), 2)
+                        await occupied.aclose()
+                        self.assertEqual(await asyncio.wait_for(task, 2), b'v' * 4096)
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+        self.assertEqual(attempts, ['/primary', '/primary'])
+        self.assertEqual(self.requested, ['/hold', '/primary'])
+
+    async def test_persistent_pool_pressure_is_bounded_and_not_a_cdn_failure(self):
+        async with self.client() as client:
+            async with client.stream('GET', self.base + '/hold'):
+                with self.assertRaisesRegex(RuntimeError, '下载连接繁忙') as raised:
+                    await asyncio.wait_for(download_video(
+                        [self.base + '/primary?token=secret', self.base + '/backup'], client,
+                    ), 3)
+                self.assertNotIn('secret', str(raised.exception))
+            # Failed queued attempts must not leave a connection/queue entry behind.
+            self.assertEqual(await download_video([self.base + '/next'], client), b'v' * 4096)
+
+    async def test_cancel_waiting_download_never_starts_a_backup_or_holds_a_connection(self):
+        attempted = asyncio.Event()
+        attempts = []
+
+        async def request_hook(request):
+            if request.url.path != '/hold':
+                attempts.append(request.url.path)
+                attempted.set()
+
+        async with self.client(event_hooks={'request': [request_hook]}) as client:
+            async with client.stream('GET', self.base + '/hold'):
+                task = asyncio.create_task(download_video(
+                    [self.base + '/primary', self.base + '/backup'], client,
+                ))
+                await asyncio.wait_for(attempted.wait(), 1)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            self.assertEqual(await download_video([self.base + '/next'], client), b'v' * 4096)
+        self.assertEqual(attempts, ['/primary', '/next'])
+
+    async def test_cancel_active_stream_releases_its_connection_for_next_download(self):
+        async with self.client() as client:
+            task = asyncio.create_task(download_video([self.base + '/hold'], client))
+            try:
+                async with asyncio.timeout(1):
+                    while '/hold' not in self.requested:
+                        await asyncio.sleep(.005)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                self.assertEqual(await download_video([self.base + '/next'], client), b'v' * 4096)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)

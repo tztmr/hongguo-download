@@ -8,8 +8,8 @@ import { Cover } from "./Cover";
 import { VideoOrientationBadge } from "./VideoOrientationBadge";
 import { errorMessage } from "../errors";
 
-export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, onResetSelection, selectedId, detectOrientation = true }: {
-  knownHeat?: Readonly<Record<string, number>>; categoryMode: boolean; onSelect(item: SeriesItem): void; onResetSelection?(): void; selectedId?: string; detectOrientation?: boolean;
+export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, onResetSelection, selectedId, detectOrientation = true, fetchPage = fetchRank }: {
+  knownHeat?: Readonly<Record<string, number>>; categoryMode: boolean; onSelect(item: SeriesItem): void; onResetSelection?(): void; selectedId?: string; detectOrientation?: boolean; fetchPage?: typeof fetchRank;
 }) {
   const [items, setItems] = useState<SeriesItem[]>([]);
   const [page, setPage] = useState<RankPage | null>(null);
@@ -35,7 +35,7 @@ export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, onRe
     const id = ++request.current;
     setLoading(true); setError(""); pending.current = true;
     setItems([]); setPage(null); seenCursors.current.clear();
-    void fetchRank({ type: "ai_playlet", board: "ranklist_hot_sc", limit: 20 }).then((result) => {
+    void fetchPage({ type: "ai_playlet", board: "ranklist_hot_sc", limit: 20 }).then((result) => {
       if (id !== request.current) return;
       setItems([...new Map(result.items.map(item => [item.bookId, item])).values()]);
       setPage({ ...result, hasMore: result.hasMore && !!result.nextCursor });
@@ -46,13 +46,13 @@ export function AIRecommendations({ knownHeat = {}, categoryMode, onSelect, onRe
     }).catch((reason) => { if (id === request.current) setError(errorMessage(reason)); })
       .finally(() => { if (id === request.current) { setLoading(false); pending.current = false; } });
     return () => { request.current += 1; };
-  }, [revision]);
+  }, [revision, fetchPage]);
   async function more() {
     if (!page?.hasMore || pending.current) return;
     const id = request.current;
     pending.current = true; setLoading(true); setError("");
     try {
-      const result = await fetchRank({ type: "ai_playlet", board: "ranklist_hot_sc", cursor: page.nextCursor, limit: 20 });
+      const result = await fetchPage({ type: "ai_playlet", board: "ranklist_hot_sc", cursor: page.nextCursor, limit: 20 });
       if (id !== request.current) return;
       seenCursors.current.add(page.nextCursor);
       setItems((current) => [...new Map([...current, ...result.items].map((item) => [item.bookId, item])).values()]);

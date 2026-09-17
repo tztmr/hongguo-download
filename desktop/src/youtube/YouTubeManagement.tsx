@@ -6,6 +6,7 @@ import { managementCommands, type ManagedPlaylist, type ManagedVideo, type Manag
 import type { YouTubePrivacy } from "./types";
 import { notificationVideoIds } from "./managementVideoInput";
 import { VideoBulkActionDialog, type VideoBulkAction } from "./VideoBulkActionDialog";
+import { VideoAiDialog } from "./VideoAiDialog";
 
 const privacyLabels = { private: "私人", unlisted: "不公开", public: "公开" };
 function message(error: unknown) { return error && typeof error === "object" && "message" in error ? String(error.message) : typeof error === "string" ? error : "操作失败，请重试"; }
@@ -38,6 +39,7 @@ function ChannelManagement({ channelId, channelTitle, commands }: { channelId: s
   const [restriction, setRestriction] = useState("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<ManagedVideo>();
+  const [aiVideos, setAiVideos] = useState<ManagedVideo[]>();
   const [bulk, setBulk] = useState<{ action: VideoBulkAction; videos: ManagedVideo[]; skippedPrivate?: number }>();
   const [notificationText, setNotificationText] = useState("");
   const [lookupIds, setLookupIds] = useState<Set<string>>();
@@ -47,7 +49,7 @@ function ChannelManagement({ channelId, channelTitle, commands }: { channelId: s
   const stopScan = useRef(false);
   const pageTokens = useRef(new Set<string>());
   const allCheckbox = useRef<HTMLInputElement>(null);
-  const locked = loading || !!editing || !!bulk;
+  const locked = loading || !!editing || !!bulk || !!aiVideos;
   async function load(more = false, all = false, action?: VideoBulkAction) {
     if (loadingRef.current) return;
     loadingRef.current = true; stopScan.current = false;
@@ -112,7 +114,7 @@ function ChannelManagement({ channelId, channelTitle, commands }: { channelId: s
   function filter(change: () => void) { change(); setSelected(new Set()); }
   function updated(video: ManagedVideo) { setVideos((rows) => rows.map((row) => row.id === video.id ? video : row)); }
   return <section className="youtube-management" aria-label="视频管理">
-    <div inert={!!editing || !!bulk}>
+    <div inert={!!editing || !!bulk || !!aiVideos}>
       <div className="yt-management-heading"><div><h2>频道视频</h2><p>{channelTitle || channelId} · 管理视频与 Shorts</p></div><button type="button" className="secondary-button" disabled={locked} onClick={() => void load()}>刷新频道视频</button></div>
       <div className="yt-blocked-actions">
         <div><strong>封锁视频处理</strong><p>自动扫描当前频道的全部视频与 Shorts，处理全球封锁、地区限制和版权拒绝的视频。</p><small>扫描完成后核对清单；设为私人会跳过已经私人的视频。</small></div>
@@ -141,7 +143,11 @@ function ChannelManagement({ channelId, channelTitle, commands }: { channelId: s
       <div className="yt-management-selection">
         <label><input ref={allCheckbox} type="checkbox" aria-label="全选当前筛选结果" checked={allSelected} disabled={locked || !visible.length} onChange={() => setSelected(new Set(allSelected ? [] : visible.map((video) => video.id)))} />全选当前结果</label>
         <span>已加载 {videos.length} 个 · 显示 {visible.length} 个 · 已选 {selectedVideos.length} 个{next ? " · 还有更多" : ""}</span>
-        <button type="button" className="secondary-button danger" disabled={locked || !selectedVideos.length} onClick={() => setBulk({ action: "delete", videos: [...selectedVideos] })}>批量删除（{selectedVideos.length}）</button>
+        <div className="yt-selection-actions">
+          <button type="button" className="secondary-button" disabled={locked || !selectedVideos.length} onClick={() => setAiVideos([...selectedVideos])}>AI 一键优化（{selectedVideos.length}）</button>
+          <button type="button" className="secondary-button" disabled={locked || !selectedVideos.length} onClick={() => setBulk({ action: "visibility", videos: [...selectedVideos] })}>更改视频状态（{selectedVideos.length}）</button>
+          <button type="button" className="secondary-button danger" disabled={locked || !selectedVideos.length} onClick={() => setBulk({ action: "delete", videos: [...selectedVideos] })}>批量删除（{selectedVideos.length}）</button>
+        </div>
       </div>
       <div className="yt-video-list">
         {visible.map((video) => <article className="yt-video-row" key={video.id}>
@@ -152,7 +158,11 @@ function ChannelManagement({ channelId, channelTitle, commands }: { channelId: s
             <p className={`yt-restriction yt-restriction-${video.restriction.kind}`} title={restrictionDetails(video)}>{restrictionDetails(video)}</p>
             <div className="yt-video-meta"><YouTubeVideoLink url={video.videoFormat === "shorts" ? `https://www.youtube.com/shorts/${encodeURIComponent(video.id)}` : `https://www.youtube.com/watch?v=${encodeURIComponent(video.id)}`} /><YouTubeVideoLink url={`https://studio.youtube.com/video/${encodeURIComponent(video.id)}/edit`} label="Studio 核对限制 ↗" /></div>
           </div>
-          <button type="button" className="secondary-button" disabled={locked} aria-label={`编辑 ${video.title}`} onClick={() => setEditing(video)}>编辑资料</button>
+          <div className="yt-video-actions">
+            <button type="button" className="secondary-button" disabled={locked} aria-label={`AI 优化 ${video.title}`} onClick={() => setAiVideos([video])}>AI 一键优化</button>
+            <button type="button" className="secondary-button" disabled={locked} aria-label={`更改状态 ${video.title}`} onClick={() => setBulk({ action: "visibility", videos: [video] })}>更改状态</button>
+            <button type="button" className="secondary-button" disabled={locked} aria-label={`编辑 ${video.title}`} onClick={() => setEditing(video)}>编辑资料</button>
+          </div>
         </article>)}
         {!loading && !visible.length && <div className="download-empty"><h3>{error ? "未能读取频道视频" : videos.length || next || lookupIds ? "没有匹配的视频" : "频道暂无可管理的视频"}</h3><p>{videos.length || next || lookupIds ? "可以调整筛选条件，或继续加载更多视频。" : "点击刷新重新读取频道。"}</p></div>}
       </div>
@@ -163,6 +173,7 @@ function ChannelManagement({ channelId, channelTitle, commands }: { channelId: s
       </div>
     </div>
     {editing && <VideoEditor key={editing.id} video={editing} channelId={channelId} commands={commands} onClose={() => setEditing(undefined)} onSaved={updated} />}
+    {aiVideos && <VideoAiDialog videos={aiVideos} channelId={channelId} channelTitle={channelTitle} commands={commands} onUpdated={updated} onClose={() => setAiVideos(undefined)} />}
     {bulk && <VideoBulkActionDialog {...bulk} channelId={channelId} channelTitle={channelTitle} commands={commands} onUpdated={updated} onDeleted={(id) => { setVideos((rows) => rows.filter((row) => row.id !== id)); setSelected((current) => { const ids = new Set(current); ids.delete(id); return ids; }); setLookupIds((current) => current ? new Set([...current].filter((value) => value !== id)) : undefined); }} onClose={() => setBulk(undefined)} />}
   </section>;
 }

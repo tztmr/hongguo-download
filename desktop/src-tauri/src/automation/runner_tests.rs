@@ -119,17 +119,27 @@ fn resumed_download_returns_to_first_missing_episode_and_keeps_later_files() {
 }
 
 #[test]
-fn automated_privacy_is_public_only_after_ai_cover_succeeds() {
+fn automated_privacy_uses_setting_and_defaults_private_regardless_of_cover() {
     let mut fixture = Fixture::new();
-    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Unlisted);
-
-    let generated = fixture.file("生成封面.png", b"generated cover");
-    fixture.task.cover = Some(generated);
-    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Public);
-
-    let source = fixture.file("源封面.png", b"source cover");
-    fixture.task.cover = Some(source);
-    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Unlisted);
+    fixture
+        .task
+        .config
+        .as_object_mut()
+        .unwrap()
+        .remove("privacy");
+    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Private);
+    fixture.task.cover = Some(fixture.file("生成封面.png", b"generated cover"));
+    assert_eq!(automated_privacy(&fixture.task), PrivacyStatus::Private);
+    for (setting, expected) in [
+        ("private", PrivacyStatus::Private),
+        ("unlisted", PrivacyStatus::Unlisted),
+        ("public", PrivacyStatus::Public),
+    ] {
+        fixture.task.config["privacy"] = json!(setting);
+        assert_eq!(automated_privacy(&fixture.task), expected);
+        fixture.task.cover = None;
+        assert_eq!(automated_privacy(&fixture.task), expected);
+    }
 }
 
 impl Fixture {

@@ -209,6 +209,9 @@ pub fn validate_config(value: Value) -> Result<Value, AppError> {
         clean.insert("categoryIds".into(), serde_json::json!(ids));
     }
     let mut c = Value::Object(clean);
+    if c.get("privacy").is_none() {
+        c["privacy"] = json!("private");
+    }
     for key in [
         "collectRecommend",
         "collectNew",

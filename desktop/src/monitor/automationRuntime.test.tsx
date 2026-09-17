@@ -31,6 +31,14 @@ function save(view: ReturnType<typeof render>) { fireEvent.click(view.getAllByRo
 async function loaded(view: ReturnType<typeof render>) { await waitFor(() => expect((view.getAllByRole("button", { name: "保存设置" })[0] as HTMLButtonElement).disabled).toBe(false)); }
 
 describe("native automation boundaries", () => {
+  it.each([undefined, "private", "unlisted", "public"])("defaults missing privacy to private and retains saved %s", async privacy => {
+    state.config = { ...state.config };
+    if (privacy) state.config.privacy = privacy; else delete state.config.privacy;
+    const view = page(); await loaded(view);
+    save(view);
+    await waitFor(() => expect(state.config?.privacy).toBe(privacy || "private"));
+    expect(view.queryByText(/AI 封面成功公开/)).toBeNull();
+  });
   it("pauses polling while hidden and keeps unsaved fields when returning", async () => {
     const view = page(); await loaded(view);
     fireEvent.change(view.getByRole("spinbutton", { name: /^最多集数/ }), { target: { value: "123" } });
@@ -186,7 +194,7 @@ describe("native automation boundaries", () => {
     save(view);
     await waitFor(() => expect(button(view, "启动 24 小时自动任务").disabled).toBe(false));
     fireEvent.click(button(view, "启动 24 小时自动任务"));
-    expect(view.getByLabelText("确认自动任务启动").textContent).toContain("channel-fixture；上传可见性：自动：AI 图片封面成功公开，否则不公开");
+    expect(view.getByLabelText("确认自动任务启动").textContent).toContain("channel-fixture；上传可见性：不公开");
     expect(vi.mocked(invoke).mock.calls.some(([name]) => name === "start_automation")).toBe(false);
     fireEvent.click(button(view, "确认启动"));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("start_automation"));

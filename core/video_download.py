@@ -1,5 +1,6 @@
 """Pooled CDN downloads; hedge stalled transfers, not shared-bandwidth rates."""
 import asyncio
+from dataclasses import dataclass
 import httpx
 
 VIDEO_UA = ('com.dragon.read/58332 (Linux; U; Android 9; zh_CN; HD1900; '
@@ -8,6 +9,22 @@ FIRST_BYTE_WAIT = 2.0
 STALL_WAIT = 3.0
 DOWNLOAD_TIMEOUT = 120.0
 MIN_VIDEO_BYTES = 1024
+POOL_RETRIES = 2
+POOL_RETRY_DELAY = 0.5
+
+
+class VideoPoolBusy(RuntimeError):
+    """Local connection pressure; callers should queue instead of changing CDNs."""
+
+    def __init__(self):
+        super().__init__('下载连接繁忙，请稍后重试')
+
+
+@dataclass
+class _Progress:
+    started: float | None = None
+    last_byte: float = 0.0
+    received: int = 0
 
 
 def create_video_client() -> httpx.AsyncClient:
@@ -24,21 +41,40 @@ async def download_video(urls: list[str], client: httpx.AsyncClient) -> bytes:
     progress = {}
 
     async def fetch(url: str) -> bytes:
-        async with client.stream('GET', url) as response:
-            response.raise_for_status()
-            if response.status_code != 200:
-                raise RuntimeError(f'CDN HTTP {response.status_code}')
-            parts = []
-            async for part in response.aiter_bytes():
-                if part:
-                    state = progress[asyncio.current_task()]
-                    state[1] = loop.time()
-                    state[2] += len(part)
-                parts.append(part)
-            data = b''.join(parts)
-            if len(data) < MIN_VIDEO_BYTES:
-                raise RuntimeError('CDN 视频内容过小')
-            return data
+        state = progress[asyncio.current_task()]
+
+        async def trace(event, _info):
+            # HTTPX transport events start only after acquiring a connection.
+            # Do not treat time spent queued locally as a stalled CDN. Never
+            # retain/log trace info, which can contain signed URLs and headers.
+            if event.endswith('.started') and state.started is None:
+                state.started = loop.time()
+
+        for attempt in range(POOL_RETRIES + 1):
+            try:
+                async with client.stream('GET', url, extensions={'trace': trace}) as response:
+                    if state.started is None:
+                        state.started = loop.time()
+                    response.raise_for_status()
+                    if response.status_code != 200:
+                        raise RuntimeError(f'CDN HTTP {response.status_code}')
+                    parts = []
+                    async for part in response.aiter_bytes():
+                        if part:
+                            state.last_byte = loop.time()
+                            state.received += len(part)
+                        parts.append(part)
+                    data = b''.join(parts)
+                    if len(data) < MIN_VIDEO_BYTES:
+                        raise RuntimeError('CDN 视频内容过小')
+                    return data
+            except httpx.PoolTimeout:
+                # Retry the same address after allowing other streams to finish;
+                # changing CDN would just add another waiter to the same pool.
+                state.started = None
+                if attempt == POOL_RETRIES:
+                    raise VideoPoolBusy() from None
+                await asyncio.sleep(POOL_RETRY_DELAY * (2 ** attempt))
 
     if not urls:
         raise RuntimeError('没有可用视频 CDN')
@@ -46,12 +82,12 @@ async def download_video(urls: list[str], client: httpx.AsyncClient) -> bytes:
 
     def start_next():
         task = asyncio.create_task(fetch(urls.pop(0)))
-        now = loop.time()
-        progress[task] = [now, now, 0]
+        progress[task] = _Progress()
         tasks.add(task)
 
     start_next()
     errors = []
+    pool_busy = False
     try:
         async with asyncio.timeout(DOWNLOAD_TIMEOUT):
             while tasks:
@@ -67,17 +103,22 @@ async def download_video(urls: list[str], client: httpx.AsyncClient) -> bytes:
                     progress.pop(task)
                     try:
                         return task.result()
+                    except VideoPoolBusy:
+                        pool_busy = True
                     except (httpx.HTTPError, RuntimeError) as exc:
                         # Never log signed CDN URLs or token-bearing exception text.
                         errors.append(type(exc).__name__)
+                if not tasks and pool_busy:
+                    raise VideoPoolBusy()
                 if not tasks and urls:
                     start_next()
-                elif len(tasks) == 1 and urls:
-                    started, last_byte, received = progress[next(iter(tasks))]
+                elif len(tasks) == 1 and urls and not pool_busy:
+                    state = progress[next(iter(tasks))]
+                    if state.started is None:
+                        continue
                     now = loop.time()
-                    elapsed = now - started
-                    waiting = received == 0 and elapsed >= FIRST_BYTE_WAIT
-                    stalled = received > 0 and now - last_byte >= STALL_WAIT
+                    waiting = state.received == 0 and now - state.started >= FIRST_BYTE_WAIT
+                    stalled = state.received > 0 and now - state.last_byte >= STALL_WAIT
                     # A low per-episode rate can simply mean that all episodes
                     # share the same link. Racing a second full copy then steals
                     # bandwidth from useful downloads (v0.3.1 regression).
@@ -86,6 +127,8 @@ async def download_video(urls: list[str], client: httpx.AsyncClient) -> bytes:
                     if waiting or stalled:
                         start_next()
     except TimeoutError as exc:
+        if pool_busy or (tasks and all(progress[task].started is None for task in tasks)):
+            raise VideoPoolBusy() from None
         raise RuntimeError('视频 CDN 下载超时，请重试') from exc
     finally:
         for task in tasks:

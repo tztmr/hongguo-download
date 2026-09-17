@@ -1,7 +1,7 @@
 import type { DownloadAdapter } from "./download/useDownloadManager";
 import type { DownloadBatch, DownloadItem, DownloadItemStatus, DownloadManagerState } from "./download/model";
 import type { MediaCommands, MediaJob } from "./media/types";
-import type { AIComponentStatus, EpisodeItem, SeriesItem } from "./types";
+import type { AIComponentStatus, CatalogContentType, EpisodeItem, SeriesItem, RankPage, WebCategoryPage } from "./types";
 import type { YouTubeModel } from "./youtube/types";
 import type { AnalyticsCommands, AnalyticsMetrics, AnalyticsRow, BreakdownRow } from "./youtube/analyticsCommands";
 import type { ManagedVideo, ManagementCommands } from "./youtube/managementCommands";
@@ -39,6 +39,17 @@ export const previewSeries: SeriesItem[] = Array.from({ length: 40 }, (_, index)
   likeCount: 1_200 + index * 23,
   commentCount: 320 + index * 17,
 }));
+
+export function previewCatalogItems(type: CatalogContentType): SeriesItem[] {
+  if (type === "drama") return previewSeries;
+  return previewSeries.map(item => ({ ...item, bookId: `${type}-${item.bookId}`, seriesId: `${type}-${item.seriesId}`,
+    contentTypeCode: 2, category: type === "ai" ? "AI剧" : "漫剧", releaseType: type === "ai" ? "ai_playlet" : "comic_series_rank" }));
+}
+export const previewCategoryApi = {
+  fetchWebCategoryGroups: async () => [{ id: "sort_type", name: "排序", items: [{ id: "1", name: "最热" }, { id: "2", name: "最新" }] }],
+  fetchWebCategory: async (type: CatalogContentType): Promise<WebCategoryPage> => ({ items: previewCatalogItems(type), nextPage: 2, hasMore: false, total: previewSeries.length }),
+};
+export const previewAiRank = async (): Promise<RankPage> => ({ items: previewCatalogItems("ai"), nextCursor: "", hasMore: false, board: "ranklist_hot_sc", boardName: "演示榜单", releaseType: "ai_playlet", boards: [] });
 
 export const previewEpisodes: EpisodeItem[] = Array.from({ length: 59 }, (_, index) => ({
   index: index + 1,
@@ -268,6 +279,23 @@ export const previewManagementCommands: ManagementCommands = {
     const updated: ManagedVideo = { ...video, privacyStatus: "private", etag: `${video.etag}-private` };
     previewManagedVideos = previewManagedVideos.map((row) => row.id === videoId ? updated : row);
     return updated;
+  },
+  setPrivacy: async (_channelId, videoId, privacyStatus) => {
+    const video = await previewManagementCommands.detail(_channelId, videoId);
+    const updated = { ...video, privacyStatus, etag: `${video.etag}-status` };
+    previewManagedVideos = previewManagedVideos.map(row => row.id === videoId ? updated : row);
+    return updated;
+  },
+  generateAi: async (channelId, videoId, _etag, kind) => ({
+    video: await previewManagementCommands.detail(channelId, videoId),
+    title: kind === "text" ? "她带着秘密归来，一场命运的重逢｜演示文案" : null,
+    description: kind === "text" ? "多年后再度相逢，未曾说出口的真相浮出水面。\n\n这是浏览器中的 AI 预览演示，不会调用真实服务。\n\n#短剧 #命运重逢" : null,
+    image: kind === "cover" ? "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6d1sAAAAASUVORK5CYII=" : null,
+    model: "浏览器演示",
+  }),
+  generatedThumbnail: async (channelId, videoId, _etag, image) => {
+    const video = await previewManagementCommands.detail(channelId, videoId);
+    previewManagedVideos = previewManagedVideos.map(row => row.id === videoId ? { ...video, thumbnailUrl: image, etag: `${video.etag}-cover` } : row);
   },
   update: async (request) => { const index = previewManagedVideos.findIndex((video) => video.id === request.videoId); if (index < 0) throw new Error("演示视频不存在"); previewManagedVideos[index] = { ...previewManagedVideos[index], ...request }; return previewManagedVideos[index]; },
   thumbnail: async () => undefined,

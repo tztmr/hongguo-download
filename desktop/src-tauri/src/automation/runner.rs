@@ -1449,18 +1449,13 @@ async fn upload(
 }
 
 fn automated_privacy(task: &Task) -> PrivacyStatus {
-    let ai_cover_succeeded = task
-        .cover
-        .as_ref()
-        .and_then(|path| path.file_stem())
-        .and_then(|stem| stem.to_str())
-        == Some("生成封面");
-    if ai_cover_succeeded {
-        PrivacyStatus::Public
-    } else {
-        PrivacyStatus::Unlisted
+    match text(&task.config, "privacy") {
+        "public" => PrivacyStatus::Public,
+        "unlisted" => PrivacyStatus::Unlisted,
+        _ => PrivacyStatus::Private,
     }
 }
+
 async fn short(app: &AppHandle, service: &Arc<Service>, task: &mut Task) -> Result<(), AppError> {
     if !task.shorts_required() || task.short_done {
         task.next("cleanup", "全部启用的上传已完成");

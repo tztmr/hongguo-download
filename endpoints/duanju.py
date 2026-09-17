@@ -29,7 +29,7 @@ from core.duanju_feeds import (
 )
 from core.playback import prepare_compatible_video, prepare_streaming_video, while_connected
 from core.mp4_decrypt import decrypt_mp4, derive_key_from_spade_a
-from core.video_download import create_video_client, download_video
+from core.video_download import VideoPoolBusy, create_video_client, download_video
 from core.new_releases import (
     SHANGHAI,
     CursorStore,
@@ -1103,7 +1103,15 @@ async def duanju_download(
         request.app.state.download_slots = asyncio.Semaphore(3)
     slots = request.app.state.download_slots
     try:
-        await asyncio.wait_for(slots.acquire(), timeout=20)
+        async with asyncio.timeout(20):
+            while True:
+                if await request.is_disconnected():
+                    raise asyncio.CancelledError()
+                try:
+                    await asyncio.wait_for(slots.acquire(), timeout=0.2)
+                    break
+                except asyncio.TimeoutError:
+                    continue
     except asyncio.TimeoutError:
         response = error('下载服务繁忙，等待可用内存与下载名额后自动重试', code=-11, status_code=503)
         response.headers['Retry-After'] = '30'
@@ -1122,14 +1130,14 @@ async def duanju_download(
                 if isinstance(exc, MemoryError):
                     return error(f'下载内存不足，等待资源释放后自动恢复（记录 {reference}）', code=-11, status_code=503)
                 response = error(f'{stage}异常：{type(exc).__name__}；将自动恢复（记录 {reference}）', code=-12, status_code=502)
-            if response.status_code < 500 or playback_compat:
+            if response.status_code < 500 or response.status_code == 503 or playback_compat:
                 return response
             # Retry an early transient error once with fresh playback URLs. Do
             # not cache failures, change quality, or restart completed episodes.
             _duanju_video_cache.delete(make_cache_key('duanju_content', item_id=item_id))
             if attempt or time.monotonic() - started >= 30:
                 return response
-            await asyncio.sleep(1)
+            await while_connected(asyncio.sleep(1), request.is_disconnected)
         return response
     finally:
         slots.release()
@@ -1143,15 +1151,19 @@ async def _duanju_download_once(request, item_id, definition, playback_compat, p
     started = time.perf_counter()
     try:
         model = _fetch_video_model(request, item_id)
-        data = await while_connected(model, request.is_disconnected) if playback_compat else await model
+        data = await while_connected(model, request.is_disconnected)
         model_done = time.perf_counter()
         source = _pick_source(data['sources'], definition, prefer_h264=playback_compat, compatible_only=True)
         request.state.download_stage = '播放密钥解析'
         key_hex = derive_key_from_spade_a(source['spade_a'])
         request.state.download_stage = '视频 CDN 下载'
         download = _download_encrypted(source['urls'], getattr(request.app.state, 'video_client', None))
-        encrypted = await while_connected(download, request.is_disconnected) if playback_compat else await download
+        encrypted = await while_connected(download, request.is_disconnected)
         download_done = time.perf_counter()
+    except VideoPoolBusy as exc:
+        response = error(str(exc), code=-11, status_code=503)
+        response.headers['Retry-After'] = '5'
+        return response
     except (RuntimeError, ValueError) as exc:
         logger.warning('短剧下载失败: %s', exc)
         return error(str(exc), code=-8, status_code=502)

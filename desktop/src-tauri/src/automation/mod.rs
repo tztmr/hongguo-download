@@ -8,6 +8,7 @@ pub mod source;
 mod storage;
 #[cfg(test)]
 mod tests;
+pub mod video_ai;
 mod view;
 
 use crate::{AppError, AppState};

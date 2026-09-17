@@ -26,7 +26,7 @@ const defaults = {
   collectPages: "10", recommendDevices: "3",
   keywords: "", categoryIds: [] as string[], exclude: "", completeOnly: true, maxEpisodes: "300", definition: "auto", concurrency: "1",
   separate: true, subtitles: true, subtitleSource: "original", subtitleFormat: "srt", retries: "3",
-  channel: "", privacy: "unlisted", title: "{剧名}", description: "{简介}", tags: "{分类标签}, {剧名}",
+  channel: "", privacy: "private", title: "{剧名}", description: "{简介}", tags: "{分类标签}, {剧名}",
   aiMetadataApplied: false, nonAiTitle: "{剧名}", nonAiDescription: "{简介}", nonAiTags: "{分类标签}, {剧名}",
   coverSource: "moyuu", metadataSource: "deepseek", metadataVersion: 3,
   textModel: "deepseek-v4-pro", coverModel: "gpt-image-2", category: "24",
@@ -91,7 +91,7 @@ function normalizeDraft(value: unknown): Draft {
       result.title = result.nonAiTitle; result.description = result.nonAiDescription;
       result.tags = result.nonAiTags; result.aiMetadataApplied = false;
     }
-    if (result.privacy === "private") result.privacy = "unlisted";
+    if (!["private", "unlisted", "public"].includes(result.privacy)) result.privacy = defaults.privacy;
     result.metadataVersion = defaults.metadataVersion;
     return result;
   } catch { return { ...defaults }; }
@@ -282,7 +282,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiDevic
   const mode = snapshot?.mode ?? "stopped";
   const modeText = !runtimeEnabled ? "浏览器预览" : !loaded ? "连接后台中" : ({ stopped: "已停止", running: "运行中", paused: "已暂停" }[mode]);
   const savedChannel = channels.find(channel => channel.channelId === snapshot?.config?.channel)?.title || String(snapshot?.config?.channel || "未选择");
-  const savedPrivacy = "自动：AI 图片封面成功公开，否则不公开";
+  const savedPrivacy = ({ private: "私人", unlisted: "不公开", public: "公开" } as Record<string, string>)[String(snapshot?.config?.privacy)] || "私人";
   const currentJobs = snapshot?.jobs.filter(job => job.status !== "completed" && job.status !== "skipped" && (!job.config || job.config.channel === snapshot.config?.channel)) || [];
   const activeGroupCount = currentJobs.filter(usesMediaSlot).length;
   const scanSummary = snapshot?.scanSummary;
@@ -366,7 +366,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiDevic
       <div className="auto-path"><span>下载目录 · 沿用应用设置</span><code>{saveDir || "尚未设置"}</code>{onOpenSettings && <button className="text-action" type="button" onClick={onOpenSettings}>前往设置修改 →</button>}</div></>}
       {tab === 1 && <><div className="auto-panel-heading"><h2>准备完整成片</h2><p>每个阶段成功后才进入下一步；缺集或文件校验失败时暂停该剧。</p></div><div className="auto-fixed"><CheckIcon size={16} /><div><strong>自动下载、解密与全集合并</strong><small>按集数顺序合并，检查文件、时长和完整性。</small></div><span>必选步骤</span></div>{toggle("separate", "分离背景音乐", "生成保留人声的成片，已成功处理的文件不重复分离。")}{onAIDeviceChange && <AIDeviceControl value={aiDevice} onChange={onAIDeviceChange} />}{onAIConcurrencyChange && <MediaConcurrencyControl max={mediaConcurrencyMax} value={aiConcurrency} onChange={onAIConcurrencyChange} />}{toggle("subtitles", "提取字幕", "生成独立字幕文件，随成片上传到 YouTube。")}
       <div className="auto-grid"><Field label="字幕识别音轨"><select disabled={!draft.subtitles} value={draft.subtitleSource} onChange={(e) => update("subtitleSource", e.target.value)}><option value="original">原始音轨</option><option value="vocal" disabled={!draft.separate}>分离后的人声音轨</option></select></Field><Field label="字幕文件格式"><select disabled={!draft.subtitles} value={draft.subtitleFormat} onChange={(e) => update("subtitleFormat", e.target.value)}><option value="srt">SRT 字幕</option><option value="vtt">VTT 字幕</option></select></Field></div><div className="auto-inline-note">分离模型、字幕模型与计算设备沿用「设置 → 媒体处理模型」。模型未安装时暂停对应任务。</div></>}
-      {tab === 2 && <><div className="auto-panel-heading"><h2>查重后上传到指定频道</h2><p>保留上传记录，避免同一部剧反复发布。</p></div><div className="auto-grid"><Field label="目标 YouTube 频道"><select value={draft.channel} onChange={(e) => update("channel", e.target.value)}><option value="">请选择已授权频道</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.title}</option>)}{draft.channel && !channels.some((c) => c.channelId === draft.channel) && <option value={draft.channel} disabled>原频道授权不可用，请重新选择</option>}</select></Field><Field label="上传可见性（自动规则优先）" hint="AI 图片封面成功时公开，否则不公开；此项仅保留兼容设置"><select value={draft.privacy} onChange={(e) => update("privacy", e.target.value)}><option value="private">私享</option><option value="unlisted">不公开列出</option><option value="public">公开</option></select></Field></div>{!channels.length && <div className="auto-inline-note">尚无已授权频道。{onOpenSettings && <button type="button" className="text-action" onClick={onOpenSettings}>前往设置连接 YouTube →</button>}</div>}
+      {tab === 2 && <><div className="auto-panel-heading"><h2>查重后上传到指定频道</h2><p>保留上传记录，避免同一部剧反复发布。</p></div><div className="auto-grid"><Field label="目标 YouTube 频道"><select value={draft.channel} onChange={(e) => update("channel", e.target.value)}><option value="">请选择已授权频道</option>{channels.map((channel) => <option key={channel.channelId} value={channel.channelId}>{channel.title}</option>)}{draft.channel && !channels.some((c) => c.channelId === draft.channel) && <option value={draft.channel} disabled>原频道授权不可用，请重新选择</option>}</select></Field><Field label="上传可见性" hint="默认私人，正片与 Shorts 均按此设置上传"><select value={draft.privacy} onChange={(e) => update("privacy", e.target.value)}><option value="private">私人</option><option value="unlisted">不公开列出</option><option value="public">公开</option></select></Field></div>{!channels.length && <div className="auto-inline-note">尚无已授权频道。{onOpenSettings && <button type="button" className="text-action" onClick={onOpenSettings}>前往设置连接 YouTube →</button>}</div>}
       <UploadFormatPicker value={draft.uploadFormat} onChange={value => update("uploadFormat", value)} />
       {toggle("firstEpisodeShorts", "首集额外上传 Shorts 引流", "默认关闭。开启后，正片上传成功再将首集转为 1:1 方形，额外发布一条 Shorts。相关视频需在 Studio 手动关联。")}
       {draft.firstEpisodeShorts && <section className="auto-path" aria-label="首集 Shorts 引流方案">
@@ -376,7 +376,7 @@ export function AutomationPage({ saveDir, channels = [], onOpenSettings, aiDevic
         <small>首集单独生成标题和描述，只写首集实际剧情；AI Key 不可用时使用原剧名、源简介与源封面。正片与首集分别记录上传结果，每个频道、每部剧的每一季最多一条首集 Shorts。失败只重试首集，不重复上传正片。</small>
         <small>首集保留到 Shorts 上传及 YouTube 处理成功后再清理；失败时保留文件。正片已上传的记录不能直接跳过尚未完成的首集任务。</small>
         <small>上传后，在后台任务的「Shorts 关联」中打开「相关视频 / Related video」，前往 YouTube Studio 选择同频道正片并保存。需要高级功能权限，正片须公开或不公开列出。只上传 Shorts、在简介写正片地址，都不会自动生成播放器中的关联链接。关联完成前不加入“点击相关视频”的文案。</small>
-        <small>可见性规则：AI 图片封面成功时正片和 Shorts 公开，否则两者均不公开；上面的选择仅保留兼容设置。</small>
+        <small>正片与 Shorts 使用所选可见性；生成 AI 封面不会自动改为公开。</small>
         {draft.uploadFormat === "shorts" && <small>正片上传类型当前也是 Shorts；若两项使用同一首集文件，只上传一次。要引流到中长视频，请为正片选择普通／中长视频。</small>}
       </section>}
 

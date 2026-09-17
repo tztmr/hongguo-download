@@ -13,10 +13,10 @@ use std::{
 use tauri::Manager;
 
 const MAX_IMAGE: usize = 20 * 1024 * 1024;
-const MAX_REFERENCE: usize = 8 * 1024 * 1024;
+pub(super) const MAX_REFERENCE: usize = 8 * 1024 * 1024;
 const CACHE_NAME: &str = "发布文案.json";
-const TEXT_PROMPT: &str = include_str!("../../../src/monitor/textPrompt.ts");
-const COVER_PROMPT: &str = include_str!("../../../src/monitor/coverPrompt.ts");
+pub(super) const TEXT_PROMPT: &str = include_str!("../../../src/monitor/textPrompt.ts");
+pub(super) const COVER_PROMPT: &str = include_str!("../../../src/monitor/coverPrompt.ts");
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,14 +38,14 @@ struct CoverAttempt {
     status: String,
     message: String,
 }
-fn can_try_next_cover_model(error: &AppError) -> bool {
+pub(super) fn can_try_next_cover_model(error: &AppError) -> bool {
     matches!(
         error.code.as_str(),
         "AI_UPSTREAM_ERROR" | "AI_INVALID_IMAGE"
     )
 }
 
-fn fixed_prompt(source: &str) -> &str {
+pub(super) fn fixed_prompt(source: &str) -> &str {
     source.split('`').nth(1).unwrap_or("")
 }
 fn clamp(value: &str, limit: usize) -> String {
@@ -105,10 +105,11 @@ fn render(template: &str, task: &Task) -> String {
     } else {
         &task.source.summary
     };
-    // One pass: source text containing a template token is still source text.
+    let episodes = task.source.episode_count.to_string();
     let values = [
         ("{剧名}", task.source.title.as_str()),
         ("{简介}", summary.as_str()),
+        ("{集数}", episodes.as_str()),
         (
             "{分类标签}",
             if genres.trim().is_empty() {
@@ -118,16 +119,17 @@ fn render(template: &str, task: &Task) -> String {
             },
         ),
     ];
-    let episodes = task.source.episode_count.to_string();
+    render_template(template, &values)
+}
+
+pub(super) fn render_template(template: &str, values: &[(&str, &str)]) -> String {
+    // One pass: source text containing a template token is still source text.
     let mut output = String::new();
     let mut rest = template;
     while !rest.is_empty() {
         if let Some((token, value)) = values.iter().find(|(token, _)| rest.starts_with(token)) {
             output.push_str(value);
             rest = &rest[token.len()..];
-        } else if let Some(next) = rest.strip_prefix("{集数}") {
-            output.push_str(&episodes);
-            rest = next;
         } else {
             let ch = rest.chars().next().unwrap();
             output.push(ch);
@@ -193,6 +195,10 @@ fn shorts(task: &Task) -> Option<Value> {
 }
 
 fn generated(result: &Value, task: &Task) -> Option<Value> {
+    generated_metadata(result, &task.config)
+}
+
+pub(super) fn generated_metadata(result: &Value, config: &Value) -> Option<Value> {
     let title = result["recommended_title"].as_str()?.trim();
     let description = result["description"].as_str()?.trim();
     if title.is_empty() || description.is_empty() {
@@ -221,7 +227,7 @@ fn generated(result: &Value, task: &Task) -> Option<Value> {
     let description = upload_description(description, &suffix);
     Some(
         json!({"title":clamp(title,100),"description":description,"tags":generated_tags,
-        "categoryId":category(&task.config["category"],"24")}),
+        "categoryId":category(&config["category"],"24")}),
     )
 }
 
@@ -321,7 +327,7 @@ fn public_ip(ip: IpAddr) -> bool {
             }),
     }
 }
-async fn fetch_image(raw: &str) -> Result<Vec<u8>, AppError> {
+pub(super) async fn fetch_image(raw: &str) -> Result<Vec<u8>, AppError> {
     if raw.starts_with("data:") {
         let (header, encoded) = raw.split_once(',').ok_or_else(image_error)?;
         if ![
