@@ -76,7 +76,7 @@ describe("AI edits to channel videos", () => {
       .mockRejectedValueOnce({ code: "AI_QUOTA_EXCEEDED", message: "图片额度不足" });
     mount(api); await openBatch();
     fireEvent.click(screen.getByRole("button", { name: "一键生成" }));
-    await screen.findByText("图片额度不足");
+    await within(screen.getByRole("region", { name: `优化 ${video.id}` })).findByText(/图片额度不足/);
     expect(normal).toHaveBeenCalledTimes(2);
     expect(screen.getByLabelText(`AI 标题 ${video.id}`)).toHaveProperty("value", "已生成标题");
     fireEvent.click(screen.getByRole("button", { name: "生成未完成项" }));
@@ -91,10 +91,143 @@ describe("AI edits to channel videos", () => {
     vi.mocked(api.detail).mockRejectedValueOnce({ message: "network" });
     fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
     await screen.findByText(/封面已上传，读取最新资料失败/);
-    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
     await screen.findByText("所选内容已全部同步");
     expect(api.update).toHaveBeenCalledTimes(1); expect(api.generatedThumbnail).toHaveBeenCalledTimes(1);
     expect(api.detail).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    { code: "THUMBNAIL_UPLOAD_FAILED", message: "YouTube 封面上传失败" },
+    { code: "THUMBNAIL_CONVERT_FAILED", message: "无法转换这张封面" },
+    { code: "THUMBNAIL_FORBIDDEN", message: "当前视频无法设置封面" },
+    new Error("封面请求未完成"),
+  ])("continues other videos after an individual cover failure and retries only that cover: $message", async error => {
+    const api = commands(); mount(api); await openBatch(); await generate();
+    vi.mocked(api.generatedThumbnail).mockRejectedValueOnce(error);
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await waitFor(() => expect(api.generatedThumbnail).toHaveBeenCalledTimes(2));
+    await screen.findByText("已同步 1 / 2");
+    expect(api.update).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText("所选内容已全部同步")).toBeNull();
+    expect(within(screen.getByRole("region", { name: `优化 ${video.id}` })).getByRole("alert").textContent).toContain(error.message);
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText("所选内容已全部同步");
+    expect(api.update).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.generatedThumbnail).mock.calls.map(([, id]) => id)).toEqual([video.id, short.id, video.id]);
+    expect(api.generateAi).toHaveBeenCalledTimes(4);
+  });
+  it("continues after a cover readback failure and excludes that video from confirmed completion", async () => {
+    const api = commands(); mount(api); await openBatch(); await generate();
+    vi.mocked(api.detail).mockRejectedValueOnce({ code: "YOUTUBE_MANAGEMENT_NETWORK", message: "读取超时" });
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await waitFor(() => expect(api.generatedThumbnail).toHaveBeenCalledTimes(2));
+    await screen.findByText("已同步 1 / 2");
+    expect(screen.getByText(/封面已上传，读取最新资料失败/)).toBeTruthy();
+    expect(screen.queryByText("所选内容已全部同步")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText("所选内容已全部同步");
+    expect(api.generatedThumbnail).toHaveBeenCalledTimes(2);
+    expect(api.update).toHaveBeenCalledTimes(2);
+    expect(api.detail).toHaveBeenCalledTimes(3);
+  });
+  it("reconciles an accepted text write after lost readback before retrying its remaining cover", async () => {
+    const api = commands(); const update = api.update;
+    const updateRemote = vi.mocked(update).getMockImplementation()!;
+    vi.mocked(api.update).mockImplementationOnce(async request => {
+      await updateRemote(request);
+      throw { code: "YOUTUBE_MANAGEMENT_NETWORK", message: "保存后读取超时" };
+    });
+    mount(api); await openBatch(); await generate();
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await waitFor(() => expect(api.update).toHaveBeenCalledTimes(2));
+    await screen.findByText("已同步 1 / 2");
+    expect(vi.mocked(api.generatedThumbnail).mock.calls.map(([, id]) => id)).toEqual([short.id]);
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText("所选内容已全部同步");
+    expect(api.update).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.generatedThumbnail).mock.calls).toEqual([
+      ["c1", short.id, "after-text", image], ["c1", video.id, "after-text", image],
+    ]);
+  });
+  it("keeps edits made after an uncertain text write and submits them using the reconciled revision", async () => {
+    const api = commands(); const updateRemote = vi.mocked(api.update).getMockImplementation()!;
+    vi.mocked(api.update).mockImplementationOnce(async request => {
+      await updateRemote(request);
+      throw { code: "YOUTUBE_MANAGEMENT_NETWORK", message: "保存后读取超时" };
+    });
+    mount(api); await openBatch(); await generate();
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await screen.findByText("已同步 1 / 2");
+    fireEvent.change(screen.getByLabelText(`AI 标题 ${video.id}`), { target: { value: "再次核对后的标题" } });
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText("所选内容已全部同步");
+    expect(api.update).toHaveBeenCalledTimes(3);
+    expect(api.update).toHaveBeenLastCalledWith(expect.objectContaining({ videoId: video.id, title: "再次核对后的标题", etag: "after-text" }));
+    expect(api.generatedThumbnail).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    { title: "在 Studio 中改的新标题" },
+    { description: "在 Studio 中改的新说明" },
+    { privacyStatus: "public" as const },
+  ])("does not overwrite concurrent edits while reconciling a failed write: %j", async change => {
+    const api = commands(); mount(api); await openBatch(); await generate();
+    vi.mocked(api.update).mockRejectedValueOnce({ code: "YOUTUBE_MANAGEMENT_NETWORK", message: "保存结果未确认" });
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await screen.findByText("已同步 1 / 2");
+    vi.mocked(api.detail).mockResolvedValueOnce({ ...video, ...change, etag: "external-edit" });
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText(/未覆盖最新资料/);
+    expect(api.update).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.generatedThumbnail).mock.calls.map(([, id]) => id)).toEqual([short.id]);
+    expect(screen.queryByText("所选内容已全部同步")).toBeNull();
+  });
+  it("resumes a write that was never applied using a fresh revision and preserves its draft", async () => {
+    const api = commands(); mount(api); await openBatch(); await generate();
+    vi.mocked(api.update).mockRejectedValueOnce({ code: "YOUTUBE_MANAGEMENT_NETWORK", message: "连接超时" });
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await screen.findByText("已同步 1 / 2");
+    vi.mocked(api.detail).mockResolvedValueOnce({ ...video, etag: "fresh-original" });
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText("所选内容已全部同步");
+    expect(api.update).toHaveBeenCalledTimes(3);
+    expect(api.update).toHaveBeenLastCalledWith(expect.objectContaining({ videoId: video.id, title: `新标题 ${video.id}`, etag: "fresh-original" }));
+    expect(api.generatedThumbnail).toHaveBeenCalledTimes(2);
+  });
+  it("continues and retries a cover-only batch without rewriting metadata", async () => {
+    const api = commands(); mount(api); await openBatch();
+    fireEvent.click(screen.getByRole("checkbox", { name: "标题" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "说明" }));
+    await generate();
+    vi.mocked(api.generatedThumbnail).mockRejectedValueOnce({ code: "THUMBNAIL_UPLOAD_FAILED", message: "连接超时" });
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await screen.findByText("已同步 1 / 2");
+    expect(screen.getByText(/封面已上传 1 \/ 2/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText("所选内容已全部同步");
+    expect(api.update).not.toHaveBeenCalled();
+    expect(vi.mocked(api.generatedThumbnail).mock.calls.map(([, id]) => id)).toEqual([video.id, short.id, video.id]);
+  });
+  it.each(["YOUTUBE_QUOTA_EXCEEDED", "THUMBNAIL_RATE_LIMITED", "YOUTUBE_CHANNEL_MISMATCH"])("pauses the batch on a known channel-wide blocker: %s", async code => {
+    const api = commands(); mount(api); await openBatch(); await generate();
+    vi.mocked(api.generatedThumbnail).mockRejectedValueOnce({ code, message: "频道操作暂不可用" });
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await screen.findByText(/批量操作已暂停/);
+    expect(api.update).toHaveBeenCalledTimes(1);
+    expect(api.generatedThumbnail).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "重试未完成项（2）" })).toBeTruthy();
+  });
+  it("preserves an auth failure from cover readback and never resubmits its confirmed upload", async () => {
+    const api = commands(); mount(api); await openBatch(); await generate();
+    vi.mocked(api.detail).mockRejectedValueOnce({ code: "AUTH_REQUIRED", message: "请重新授权" });
+    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    await screen.findByText(/批量操作已暂停/);
+    expect(api.update).toHaveBeenCalledTimes(1);
+    expect(api.generatedThumbnail).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("已同步 0 / 2")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
+    await screen.findByText("所选内容已全部同步");
+    expect(api.update).toHaveBeenCalledTimes(2);
+    expect(api.generatedThumbnail).toHaveBeenCalledTimes(2);
   });
   it("stops after a pending request when the channel changes and blocks duplicate generation", async () => {
     const api = commands(); let resolve!: (draft: VideoAiDraft) => void;
@@ -121,7 +254,7 @@ describe("AI edits to channel videos", () => {
     fireEvent.click(await screen.findByRole("button", { name: "AI 优化 原剧名" }));
     vi.mocked(api.generateAi).mockResolvedValueOnce({ video: { ...video, etag: "changed" }, title: "stale", description: "stale", image: null, model: "test" });
     fireEvent.click(screen.getByRole("button", { name: "一键生成" }));
-    await screen.findByText(/视频资料已变化/);
+    await within(screen.getByRole("region", { name: `优化 ${video.id}` })).findByText(/视频资料已变化/);
     expect(screen.getByLabelText(`AI 标题 ${video.id}`)).toHaveProperty("value", video.title);
     expect(api.update).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "生成未完成项" }));
@@ -134,9 +267,9 @@ describe("AI edits to channel videos", () => {
     const api = commands(); mount(api); await openBatch(); await generate();
     vi.mocked(api.generatedThumbnail).mockRejectedValueOnce({ code: "AUTH_REQUIRED", message: "请重新授权" });
     fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
-    await screen.findByText("请重新授权");
+    await within(screen.getByRole("region", { name: `优化 ${video.id}` })).findByText(/请重新授权/);
     expect(api.update).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: "一键同步到 YouTube" }));
+    fireEvent.click(screen.getByRole("button", { name: /重试未完成项/ }));
     await screen.findByText("所选内容已全部同步");
     expect(vi.mocked(api.update).mock.calls.map(([request]) => request.videoId)).toEqual([video.id, short.id]);
     expect(vi.mocked(api.generatedThumbnail).mock.calls.map(([, id]) => id)).toEqual([video.id, video.id, short.id]);

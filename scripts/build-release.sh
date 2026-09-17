@@ -35,11 +35,14 @@ python3 -m unittest discover -s ai_worker/tests -v
 cargo fmt --manifest-path desktop/src-tauri/Cargo.toml -- --check
 cargo clippy --manifest-path desktop/src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path desktop/src-tauri/Cargo.toml
-(cd desktop && npm run tauri -- build --config src-tauri/tauri.release.conf.json)
+(cd desktop && npm run tauri -- build --bundles app --config src-tauri/tauri.release.conf.json)
 
 tauri_config="$project_root/desktop/src-tauri/tauri.conf.json"
 product_name="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["productName"])' "$tauri_config")"
 product_version="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' "$tauri_config")"
+./scripts/create-macos-dmg.sh \
+  "$project_root/desktop/src-tauri/target/release/bundle/macos/$product_name.app" \
+  "$project_root/desktop/src-tauri/target/release/bundle/dmg/${product_name}_${product_version}_aarch64.dmg"
 artifact_paths="$(
   "$project_root/scripts/resolve-release-artifacts.sh" \
     "$project_root/desktop/src-tauri/target/release/bundle" \

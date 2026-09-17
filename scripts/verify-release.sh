@@ -92,6 +92,13 @@ fi
 
 /usr/bin/codesign --verify --deep --strict "$app_path"
 /usr/bin/hdiutil verify "$dmg_path" >/dev/null
+# Valid sealed files and direct process startup do not prove that Gatekeeper
+# will allow a browser-downloaded copy to open from Finder.
+if /usr/sbin/spctl --assess --type execute "$app_path" >/dev/null 2>&1; then
+  echo "release verify: Gatekeeper accepted this app"
+else
+  echo "release verify: Gatekeeper did not accept this app; first-open approval is required (see docs/MACOS_INSTALL.md)" >&2
+fi
 info_plist="$app_path/Contents/Info.plist"
 if [[ ! -f "$info_plist" || -L "$info_plist" ]]; then
   echo "release verify: missing Info.plist" >&2
