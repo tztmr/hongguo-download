@@ -14,6 +14,84 @@ use url::Url;
 const MAX_THUMBNAIL_BYTES: u64 = 2_000_000;
 const TARGET_THUMBNAIL_BYTES: u64 = 1_900_000;
 const THUMBNAIL_ENDPOINT: &str = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set";
+const MAX_REFERENCE_THUMBNAIL_BYTES: usize = 8 * 1024 * 1024;
+
+fn reference_thumbnail_url(raw: &str) -> Result<Url, AppError> {
+    let url = Url::parse(raw).map_err(|_| reference_thumbnail_invalid())?;
+    let trusted_host = url
+        .host_str()
+        .is_some_and(|host| host.ends_with(".ytimg.com") || host == "img.youtube.com");
+    if url.scheme() != "https"
+        || !trusted_host
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(reference_thumbnail_invalid());
+    }
+    Ok(url)
+}
+
+fn reference_thumbnail_invalid() -> AppError {
+    AppError::new(
+        "THUMBNAIL_INVALID",
+        "YouTube 原封面地址或图片无效，或图片超过 8 MB",
+    )
+}
+
+fn reference_thumbnail_unavailable() -> AppError {
+    AppError::new(
+        "YOUTUBE_THUMBNAIL_FETCH_FAILED",
+        "无法读取 YouTube 原封面，请检查系统代理或网络连接后重试",
+    )
+}
+
+/// YouTube's fixed CDN hosts use the same system proxy as the other YouTube
+/// requests. Do not route arbitrary image URLs here: redirects are disabled and
+/// URL validation restricts this path to HTTPS on Google's thumbnail CDN.
+pub async fn fetch_reference_thumbnail(raw: &str) -> Result<Vec<u8>, AppError> {
+    let url = reference_thumbnail_url(raw)?;
+    let client = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(45))
+        .build()
+        .map_err(|_| reference_thumbnail_unavailable())?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| reference_thumbnail_unavailable())?;
+    read_reference_thumbnail(response).await
+}
+
+async fn read_reference_thumbnail(mut response: reqwest::Response) -> Result<Vec<u8>, AppError> {
+    if !response.status().is_success() {
+        return Err(reference_thumbnail_unavailable());
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_REFERENCE_THUMBNAIL_BYTES as u64)
+    {
+        return Err(reference_thumbnail_invalid());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| reference_thumbnail_unavailable())?
+    {
+        if bytes.len() + chunk.len() > MAX_REFERENCE_THUMBNAIL_BYTES {
+            return Err(reference_thumbnail_invalid());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if crate::cover_extension(&bytes).is_none() {
+        return Err(reference_thumbnail_invalid());
+    }
+    Ok(bytes)
+}
 
 pub fn prepare_thumbnail(
     source: &Path,
@@ -310,6 +388,127 @@ mod tests {
             println!("cover {}: {} -> {} bytes", index + 1, original.len(), size);
         }
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reference_urls_allow_only_https_youtube_cdn_without_credentials_or_custom_ports() {
+        for url in [
+            "https://i.ytimg.com/vi/video/mqdefault.jpg",
+            "https://i9.ytimg.com/vi/video/mqdefault.jpg?sqp=signed-value",
+            "https://img.youtube.com/vi/video/0.jpg",
+        ] {
+            assert!(reference_thumbnail_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://i.ytimg.com/vi/video/mqdefault.jpg",
+            "https://i.ytimg.com.evil.test/cover.jpg",
+            "https://notytimg.com/cover.jpg",
+            "https://127.0.0.1/cover.jpg",
+            "https://example.com/cover.jpg",
+            "https://user:secret@i.ytimg.com/cover.jpg",
+            "https://i.ytimg.com:8443/cover.jpg",
+            "https://i.ytimg.com/cover.jpg#fragment",
+            "file:///tmp/cover.jpg",
+        ] {
+            assert!(reference_thumbnail_url(url).is_err(), "{url}");
+        }
+    }
+
+    async fn reference_response(raw: Vec<u8>) -> reqwest::Response {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(&raw);
+        });
+        Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/thumbnail"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn reference_response_accepts_images_and_rejects_html_and_redirects() {
+        let image = b"\xff\xd8\xfffixture";
+        let mut raw = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+        raw.extend_from_slice(image);
+        assert_eq!(
+            read_reference_thumbnail(reference_response(raw).await)
+                .await
+                .unwrap(),
+            image
+        );
+        let html = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n<html>proxy page</html>".to_vec();
+        assert_eq!(
+            read_reference_thumbnail(reference_response(html).await)
+                .await
+                .unwrap_err()
+                .code,
+            "THUMBNAIL_INVALID"
+        );
+        let redirect = b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/private\r\nContent-Length: 0\r\n\r\n".to_vec();
+        assert_eq!(
+            read_reference_thumbnail(reference_response(redirect).await)
+                .await
+                .unwrap_err()
+                .code,
+            "YOUTUBE_THUMBNAIL_FETCH_FAILED"
+        );
+    }
+
+    #[tokio::test]
+    async fn reference_response_bounds_both_declared_and_streamed_size() {
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            MAX_REFERENCE_THUMBNAIL_BYTES + 1
+        )
+        .into_bytes();
+        assert_eq!(
+            read_reference_thumbnail(reference_response(raw).await)
+                .await
+                .unwrap_err()
+                .code,
+            "THUMBNAIL_INVALID"
+        );
+        let mut raw = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n",
+            MAX_REFERENCE_THUMBNAIL_BYTES + 1
+        )
+        .into_bytes();
+        raw.resize(raw.len() + MAX_REFERENCE_THUMBNAIL_BYTES + 1, 1);
+        raw.extend_from_slice(b"\r\n0\r\n\r\n");
+        assert_eq!(
+            read_reference_thumbnail(reference_response(raw).await)
+                .await
+                .unwrap_err()
+                .code,
+            "THUMBNAIL_INVALID"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly supplied YouTube thumbnail URL and working system network"]
+    async fn supplied_youtube_reference_download_uses_system_network() {
+        let url = std::env::var("HONGGUO_TEST_YOUTUBE_THUMBNAIL_URL").unwrap();
+        let bytes = fetch_reference_thumbnail(&url).await.unwrap();
+        assert!(crate::cover_extension(&bytes).is_some());
+        assert!(bytes.len() <= MAX_REFERENCE_THUMBNAIL_BYTES);
+        println!("YouTube reference downloaded: {} bytes", bytes.len());
     }
 
     #[test]

@@ -145,7 +145,9 @@ pub(crate) async fn generate_youtube_video_ai(
     }
     let reference = text(&config, "imageMode") != "text";
     if reference {
-        let bytes = metadata::fetch_image(&draft.video.thumbnail_url).await?;
+        let bytes =
+            crate::youtube::thumbnail::fetch_reference_thumbnail(&draft.video.thumbnail_url)
+                .await?;
         if bytes.len() > metadata::MAX_REFERENCE {
             return Err(invalid(
                 "当前视频封面超过参考图上限，请在自动追剧中选择纯文字生图后重试",
